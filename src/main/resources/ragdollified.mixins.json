@@ -1,0 +1,20 @@
+{
+  "required": true,
+  "package": "com.raiiiden.relentlessundead.mixin",
+  "compatibilityLevel": "JAVA_17",
+  "refmap": "relentlessundead.refmap.json",
+  "mixins": [
+    "ZombieSwimMixin",
+    "ZombieSunBurnMixin",
+    "ZombieStackingMixin",
+    "GroundPathNavigationMixin",
+    "MobPathfindingMalusMixin",
+    "MobFallDistanceMixin",
+    "LivingEntityFallDamageMixin",
+    "accessor.MobGoalSelectorAccessor"
+  ],
+  "client": [
+
+  ],
+  "minVersion": "0.8.5"
+}
