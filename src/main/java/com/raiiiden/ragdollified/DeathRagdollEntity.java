@@ -132,16 +132,7 @@ public class DeathRagdollEntity extends Entity {
 
             if (physics != null) {
                 physics.update();
-
-                // Update entity position to follow physics
-                Vector3f pos = physics.getTorsoPosition();
-                setPos(pos.x, pos.y, pos.z);
-
-                Vector3f vel = new Vector3f();
-                physics.ragdollParts.get(0).getLinearVelocity(vel);
-                setDeltaMovement(vel.x, vel.y, vel.z);
-
-                hasImpulse = true;
+                // REMOVED: Don't update entity position - let renderer handle it
             }
         }
     }

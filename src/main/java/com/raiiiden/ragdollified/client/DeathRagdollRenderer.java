@@ -76,22 +76,18 @@ public class DeathRagdollRenderer extends EntityRenderer<DeathRagdollEntity> {
 
         poseStack.pushPose();
 
-        // CRITICAL FIX: Translate to torso's world position
-        // The entity position is just a reference point, actual rendering is based on physics transforms
-        double entityX = entity.getX();
-        double entityY = entity.getY();
-        double entityZ = entity.getZ();
-
-        // Torso position from physics
-        double torsoX = torso.position.x;
-        double torsoY = torso.position.y;
-        double torsoZ = torso.position.z;
-
-        // Translate to torso position (entity renderer already translates to entity pos)
+        // Entity renderer already translates to entity position, so undo that
         poseStack.translate(
-                torsoX - entityX,
-                torsoY - entityY,
-                torsoZ - entityZ
+                -entity.getX(),
+                -entity.getY(),
+                -entity.getZ()
+        );
+
+        // Now translate to absolute torso world position from physics
+        poseStack.translate(
+                torso.position.x,
+                torso.position.y,
+                torso.position.z
         );
 
         ResourceLocation skin = getTextureLocation(entity);

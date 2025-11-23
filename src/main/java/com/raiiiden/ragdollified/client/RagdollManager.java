@@ -2,7 +2,6 @@ package com.raiiiden.ragdollified.client;
 
 import com.raiiiden.ragdollified.RagdollPart;
 import com.raiiiden.ragdollified.RagdollTransform;
-import net.minecraft.client.model.PlayerModel;
 
 import javax.annotation.Nullable;
 import java.util.*;
@@ -18,7 +17,6 @@ public class RagdollManager {
         }
         r.pushUpdate(transforms, serverTime);
     }
-
 
     public static void remove(int playerEntityId){
         RAGDOLLS.remove(playerEntityId);
@@ -37,9 +35,9 @@ public class RagdollManager {
         public final int playerEntityId;
         public final int ragdollId;
 
-        // last and current arrays length = 6
         private final RagdollTransform[] last = new RagdollTransform[6];
         private final RagdollTransform[] current = new RagdollTransform[6];
+        private final RagdollTransform[] smoothed = new RagdollTransform[6]; // NEW: Smoothed values
         private long lastTime = 0L;
         private long currentTime = 0L;
 
@@ -49,7 +47,6 @@ public class RagdollManager {
         }
 
         public void pushUpdate(RagdollTransform[] transforms, long serverTime){
-            // move current -> last then set current
             for (int i=0;i<6;i++){
                 last[i] = current[i];
             }
@@ -63,18 +60,17 @@ public class RagdollManager {
         }
 
         private float computeAlpha(float partialTicks){
-            // compute alpha using timestamps if available, otherwise use partialTicks
-            if (lastTime <= 0 || currentTime <= lastTime) return partialTicks;
+            if (lastTime <= 0 || currentTime <= lastTime) return 0f;
+
+            long now = System.currentTimeMillis();
             long dt = currentTime - lastTime;
-            if (dt <= 0) return partialTicks;
-            // Use client clock: map partialTicks (0..1) into 0..1 alpha but clamp
-            float a = (float)((System.currentTimeMillis() - currentTime) / (double)dt) + partialTicks;
-            // simpler fallback:
-            a = partialTicks;
-            return Math.max(0f, Math.min(1f, a));
+
+            if (dt <= 0) return 0f;
+
+            float elapsed = (now - lastTime) / (float)dt;
+            return Math.max(0f, Math.min(1f, elapsed));
         }
 
-        /** Interpolated transform for a given part. Returns null if no data */
         public RagdollTransform getPartInterpolated(RagdollPart part, float partialTicks){
             int idx = part.index;
             RagdollTransform prev = last[idx];
@@ -82,14 +78,40 @@ public class RagdollManager {
             if (cur == null && prev == null) return null;
             if (prev == null) return cur;
             if (cur == null) return prev;
+
             float a = computeAlpha(partialTicks);
 
             float x = lerp(prev.position.x, cur.position.x, a);
             float y = lerp(prev.position.y, cur.position.y, a);
             float z = lerp(prev.position.z, cur.position.z, a);
-            // slerp quaternion
-            float[] q = slerp(prev.rotation.x, prev.rotation.y, prev.rotation.z, prev.rotation.w, cur.rotation.x, cur.rotation.y, cur.rotation.z, cur.rotation.w, a);
-            return new RagdollTransform(idx, x, y, z, q[0], q[1], q[2], q[3]);
+
+            float[] q = slerp(prev.rotation.x, prev.rotation.y, prev.rotation.z, prev.rotation.w,
+                    cur.rotation.x, cur.rotation.y, cur.rotation.z, cur.rotation.w, a);
+
+            RagdollTransform interpolated = new RagdollTransform(idx, x, y, z, q[0], q[1], q[2], q[3]);
+
+            // NEW: Apply exponential smoothing to reduce jitter
+            if (smoothed[idx] == null) {
+                smoothed[idx] = interpolated;
+                return interpolated;
+            }
+
+            // Smooth factor (0.3f = balanced smoothness and responsiveness)
+            float smoothFactor = 0.3f;
+
+            float smoothX = lerp(smoothed[idx].position.x, interpolated.position.x, smoothFactor);
+            float smoothY = lerp(smoothed[idx].position.y, interpolated.position.y, smoothFactor);
+            float smoothZ = lerp(smoothed[idx].position.z, interpolated.position.z, smoothFactor);
+
+            // Smooth rotation using slerp
+            float[] smoothQ = slerp(
+                    smoothed[idx].rotation.x, smoothed[idx].rotation.y, smoothed[idx].rotation.z, smoothed[idx].rotation.w,
+                    interpolated.rotation.x, interpolated.rotation.y, interpolated.rotation.z, interpolated.rotation.w,
+                    smoothFactor
+            );
+
+            smoothed[idx] = new RagdollTransform(idx, smoothX, smoothY, smoothZ, smoothQ[0], smoothQ[1], smoothQ[2], smoothQ[3]);
+            return smoothed[idx];
         }
 
         public Map<RagdollPart, RagdollTransform> getAllPartsInterpolated(float partialTicks) {
@@ -99,11 +121,10 @@ public class RagdollManager {
             }
             return map;
         }
+
         private float lerp(float a, float b, float t){ return a + (b - a) * t; }
 
-        // returns quaternion components [x,y,z,w]
         private float[] slerp(float x1,float y1,float z1,float w1, float x2,float y2,float z2,float w2, float t){
-            // normalize inputs
             float mag1 = (float)Math.sqrt(x1*x1+y1*y1+z1*z1+w1*w1);
             float mag2 = (float)Math.sqrt(x2*x2+y2*y2+z2*z2+w2*w2);
             x1/=mag1; y1/=mag1; z1/=mag1; w1/=mag1;
@@ -113,7 +134,6 @@ public class RagdollManager {
             if (dot < 0f) { dot = -dot; x2=-x2; y2=-y2; z2=-z2; w2=-w2; }
             final float DOT_THRESH = 0.9995f;
             if (dot > DOT_THRESH) {
-                // linear fallback
                 float rx = x1 + t*(x2-x1);
                 float ry = y1 + t*(y2-y1);
                 float rz = z1 + t*(z2-z1);
@@ -138,7 +158,6 @@ public class RagdollManager {
         }
 
         public boolean isActive(){
-            // if any current part exists treat active
             for (RagdollTransform t : current) if (t != null) return true;
             return false;
         }

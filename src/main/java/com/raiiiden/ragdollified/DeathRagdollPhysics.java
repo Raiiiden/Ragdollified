@@ -65,43 +65,48 @@ public class DeathRagdollPhysics {
     }
 
     public void update() {
-        RagdollTransform[] transforms = getRagdollTransforms();
+        // Run physics substeps for smoother simulation
+        int substeps = 2; // Run physics twice per game tick
 
+        for (int substep = 0; substep < substeps; substep++) {
+            // Apply forces and constraints
+            for (RigidBody r : ragdollParts) {
+                Vector3f vel = new Vector3f();
+                r.getLinearVelocity(vel);
+
+                if (vel.y < -80f) vel.y = -80f;
+
+                float speed = vel.length();
+                if (speed > 90f) {
+                    vel.scale(90f / speed);
+                }
+                r.setLinearVelocity(vel);
+
+                Vector3f angVel = new Vector3f();
+                r.getAngularVelocity(angVel);
+                float angSpeed = angVel.length();
+                if (angSpeed > 8f) {
+                    angVel.scale(8f / angSpeed);
+                    r.setAngularVelocity(angVel);
+                }
+            }
+
+            applyFluidForces();
+            applyPlayerCollisions();
+            checkCollisionsForParts();
+            correctInterpenetrations();
+        }
+
+        // Update collision geometry once per tick (not per substep)
+        updateLocalWorldCollision();
+
+        // Send network update with final state
+        RagdollTransform[] transforms = getRagdollTransforms();
         int tick = ((ServerLevel)entity.level()).getServer().getTickCount();
         ModNetwork.CHANNEL.send(
                 PacketDistributor.ALL.noArg(),
                 new DeathRagdollUpdatePacket(networkRagdollId, tick, transforms)
         );
-
-        // Keep your existing velocity clamping but add angular velocity limiting
-        for (RigidBody r : ragdollParts) {
-            Vector3f vel = new Vector3f();
-            r.getLinearVelocity(vel);
-
-            // Keep your existing vertical clamp
-            if (vel.y < -80f) vel.y = -80f;
-
-            // Keep your existing speed clamp
-            float speed = vel.length();
-            if (speed > 90f) {
-                vel.scale(90f / speed);
-            }
-            r.setLinearVelocity(vel);
-
-            // NEW: Just limit angular velocity to prevent spinning jitter
-            Vector3f angVel = new Vector3f();
-            r.getAngularVelocity(angVel);
-            float angSpeed = angVel.length();
-            if (angSpeed > 8f) {  // Reasonable limit, not too restrictive
-                angVel.scale(8f / angSpeed);
-                r.setAngularVelocity(angVel);
-            }
-        }
-
-        applyFluidForces();
-        checkCollisionsForParts();
-        updateLocalWorldCollision();
-        correctInterpenetrations();
     }
 
     public void applyInitialVelocity(Vector3f velocity) {
@@ -337,7 +342,7 @@ public class DeathRagdollPhysics {
                         Vector3f contactPoint = new Vector3f();
                         pt.getPositionWorldOnB(contactPoint);
                         float impactSpeed = computeImpactSpeed(a, b, pt);
-                        // You can add collision handling here if needed
+                        // add collision handling here if needed later
                     }
                 }
             }
@@ -418,8 +423,8 @@ public class DeathRagdollPhysics {
                     ignoreNext = true;
 
                     Vector3f normal = new Vector3f(point.normalWorldOnB);
-                    // CRITICAL: Reduced from 4.5x to 1.5x
-                    float correctionScale = 1.5f * Math.abs(point.getDistance());
+                    // Reduced from 4.5x to 1.5x
+                    float correctionScale = 0.8f * Math.abs(point.getDistance());
                     normal.scale(correctionScale);
 
                     // Apply position correction
@@ -427,27 +432,27 @@ public class DeathRagdollPhysics {
                     normal.scale(-1);
                     if (b.getInvMass() > 0) b.translate(normal);
 
-                    // NEW: Dampen velocities after correction
+                    // Dampen velocities after correction
                     if (a.getInvMass() > 0) {
                         Vector3f vel = new Vector3f();
                         a.getLinearVelocity(vel);
-                        vel.scale(0.75f);
+                        vel.scale(0.5f);
                         a.setLinearVelocity(vel);
 
                         Vector3f angVel = new Vector3f();
                         a.getAngularVelocity(angVel);
-                        angVel.scale(0.75f);
+                        angVel.scale(0.5f);
                         a.setAngularVelocity(angVel);
                     }
                     if (b.getInvMass() > 0) {
                         Vector3f vel = new Vector3f();
                         b.getLinearVelocity(vel);
-                        vel.scale(0.75f);
+                        vel.scale(0.5f);
                         b.setLinearVelocity(vel);
 
                         Vector3f angVel = new Vector3f();
                         b.getAngularVelocity(angVel);
-                        angVel.scale(0.75f);
+                        angVel.scale(0.5f);
                         b.setAngularVelocity(angVel);
                     }
                 }
@@ -627,6 +632,59 @@ public class DeathRagdollPhysics {
 
         world.addConstraint(joint, true);
         return joint;
+    }
+
+    private void applyPlayerCollisions() {
+        // Find nearby players
+        List<net.minecraft.world.entity.player.Player> nearbyPlayers = entity.level().getEntitiesOfClass(
+                net.minecraft.world.entity.player.Player.class,
+                entity.getBoundingBox().inflate(3.0)
+        );
+
+        for (net.minecraft.world.entity.player.Player player : nearbyPlayers) {
+            // Get player position and velocity
+            Vec3 playerPos = player.position();
+            Vec3 playerVel = player.getDeltaMovement();
+
+            // Only apply force if player is moving
+            if (playerVel.lengthSqr() < 0.01) continue;
+
+            // Check each ragdoll part
+            for (RigidBody part : ragdollParts) {
+                Transform t = new Transform();
+                part.getMotionState().getWorldTransform(t);
+                Vector3f partPos = t.origin;
+
+                // Calculate distance to player
+                float dx = (float)(playerPos.x - partPos.x);
+                float dy = (float)(playerPos.y - partPos.y);
+                float dz = (float)(playerPos.z - partPos.z);
+                float distSq = dx*dx + dy*dy + dz*dz;
+
+                // If player is close enough, apply impulse
+                if (distSq < 1.5f * 1.5f) { // Within 1.5 blocks
+                    float dist = (float)Math.sqrt(distSq);
+                    if (dist < 0.1f) dist = 0.1f; // Avoid division by zero
+
+                    // Direction away from player
+                    Vector3f pushDir = new Vector3f(
+                            -dx / dist,
+                            -dy / dist,
+                            -dz / dist
+                    );
+
+                    // Scale by player velocity and inverse distance (closer = stronger push)
+                    float playerSpeed = (float)playerVel.length();
+                    float pushStrength = playerSpeed * 15f * (1.5f - dist) / 1.5f;
+
+                    pushDir.scale(pushStrength);
+                    part.applyCentralImpulse(pushDir);
+
+                    // Wake up the body
+                    part.activate();
+                }
+            }
+        }
     }
 
     public boolean hasBody(CollisionObject obj) {
