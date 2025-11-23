@@ -1,6 +1,6 @@
 package com.raiiiden.ragdollified;
 
-import com.raiiiden.ragdollified.DeathRagdollPhysics;
+import com.raiiiden.ragdollified.config.RagdollifiedConfig;
 import com.raiiiden.ragdollified.network.DeathRagdollEndPacket;
 import com.raiiiden.ragdollified.network.ModNetwork;
 import net.minecraft.nbt.CompoundTag;
@@ -30,12 +30,13 @@ public class DeathRagdollEntity extends Entity {
             SynchedEntityData.defineId(DeathRagdollEntity.class, EntityDataSerializers.STRING);
 
     private DeathRagdollPhysics physics;
-    private int lifetime = 600;
+    private int lifetime;  // Removed default value
     public int ticksExisted = 0;
 
     public DeathRagdollEntity(EntityType<?> type, Level level) {
         super(type, level);
         this.noCulling = true;
+        this.lifetime = RagdollifiedConfig.getRagdollLifetime();  // Get from config
         Ragdollified.LOGGER.info("DeathRagdollEntity created with ID: " + this.getId());
     }
 
@@ -87,12 +88,11 @@ public class DeathRagdollEntity extends Entity {
             JbulletWorld world = JbulletWorld.get((net.minecraft.server.level.ServerLevel) level);
             ragdoll.physics = new DeathRagdollPhysics(ragdoll, world);
 
-            // FIXED: Reduce velocity scaling from 20f to 5f
             Vector3f playerVel = new Vector3f(
                     (float) player.getDeltaMovement().x,
                     (float) player.getDeltaMovement().y,
                     (float) player.getDeltaMovement().z);
-            playerVel.scale(1f); // Reduced from 20f
+            playerVel.scale(1f);
 
             // Clamp to reasonable speed
             float speed = playerVel.length();
@@ -113,7 +113,6 @@ public class DeathRagdollEntity extends Entity {
     public void tick() {
         super.tick();
 
-        /* ---- server-side bookkeeping ---- */
         if (!level().isClientSide) {
             ticksExisted++;
             if (ticksExisted % 20 == 0) {
@@ -131,12 +130,10 @@ public class DeathRagdollEntity extends Entity {
                 return;
             }
 
-            /* ---- physics ---- */
             if (physics != null) {
                 physics.update();
 
-            /* pull position / velocity from bullet and give them to MC
-               so the network layer broadcasts a smooth, every-tick packet */
+                // Update entity position to follow physics
                 Vector3f pos = physics.getTorsoPosition();
                 setPos(pos.x, pos.y, pos.z);
 
@@ -144,7 +141,7 @@ public class DeathRagdollEntity extends Entity {
                 physics.ragdollParts.get(0).getLinearVelocity(vel);
                 setDeltaMovement(vel.x, vel.y, vel.z);
 
-                hasImpulse = true;   // force tracker to send this frame
+                hasImpulse = true;
             }
         }
     }
@@ -189,7 +186,8 @@ public class DeathRagdollEntity extends Entity {
         if (tag.contains("PlayerName")) entityData.set(PLAYER_NAME, tag.getString("PlayerName"));
         if (tag.contains("PlayerUUID")) entityData.set(PLAYER_UUID, tag.getString("PlayerUUID"));
         ticksExisted = tag.getInt("TicksExisted");
-        lifetime = tag.getInt("Lifetime");
+        // Load lifetime from NBT, or use config default if not present
+        lifetime = tag.contains("Lifetime") ? tag.getInt("Lifetime") : RagdollifiedConfig.getRagdollLifetime();
     }
 
     @Override
