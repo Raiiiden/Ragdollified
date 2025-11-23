@@ -5,6 +5,7 @@ plugins {
     id 'net.neoforged.gradle' version '[6.0,6.2)'
     id 'org.parchmentmc.librarian.forgegradle' version '1.+'
     id 'org.spongepowered.mixin' version '0.7.+'
+    id 'com.github.johnrengelman.shadow' version '8.1.1'
 }
 
 version = "${minecraft_version}-${mod_version}"
@@ -15,6 +16,10 @@ base {
 }
 
 java.toolchain.languageVersion = JavaLanguageVersion.of(17)
+
+configurations {
+    includedLibs
+}
 
 println "Java: ${System.getProperty 'java.version'}, JVM: ${System.getProperty 'java.vm.version'} (${System.getProperty 'java.vendor'}), Arch: ${System.getProperty 'os.arch'}"
 
@@ -123,10 +128,16 @@ repositories {
 dependencies {
     minecraft "net.minecraftforge:forge:${minecraft_version}-${forge_version}"
 
+    minecraftLibrary "cz.advel.jbullet:jbullet:20101010-1"
+    includedLibs "cz.advel.jbullet:jbullet:20101010-1"
+    minecraftLibrary 'javax.vecmath:vecmath:1.5.2'
+    includedLibs 'javax.vecmath:vecmath:1.5.2'
+
     datagenImplementation sourceSets.main.output
 
     annotationProcessor "org.spongepowered:mixin:${mixin_version}:processor"
     implementation fg.deobf("curse.maven:configured-457570:5180900")
+    // implementation fg.deobf("curse.maven:timeless-and-classics-zero-1028108:6654541")
 }
 
 tasks.withType(ProcessResources).configureEach {
@@ -156,6 +167,11 @@ tasks.named('jar', Jar).configure {
                 'Implementation-Timestamp': new Date().format('yyyy-MM-dd\'T\'HH:mm:ssZ')
         ])
     }
+
+    from {
+        configurations.includedLibs.collect { it.isDirectory() ? it : zipTree(it) }
+    }
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
 
     finalizedBy 'reobfJar'
 }
