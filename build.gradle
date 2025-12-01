@@ -137,7 +137,7 @@ dependencies {
 
     annotationProcessor "org.spongepowered:mixin:${mixin_version}:processor"
     implementation fg.deobf("curse.maven:configured-457570:5180900")
-    // implementation fg.deobf("curse.maven:timeless-and-classics-zero-1028108:6654541")
+    implementation fg.deobf("curse.maven:timeless-and-classics-zero-1028108:6654541")
 }
 
 tasks.withType(ProcessResources).configureEach {

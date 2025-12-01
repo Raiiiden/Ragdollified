@@ -5,6 +5,7 @@ import com.bulletphysics.collision.dispatch.CollisionObject;
 import com.bulletphysics.collision.narrowphase.ManifoldPoint;
 import com.bulletphysics.collision.narrowphase.PersistentManifold;
 import com.bulletphysics.collision.shapes.BoxShape;
+import com.bulletphysics.collision.shapes.CapsuleShape;
 import com.bulletphysics.collision.shapes.CollisionShape;
 import com.bulletphysics.dynamics.DiscreteDynamicsWorld;
 import com.bulletphysics.dynamics.RigidBody;
@@ -19,8 +20,6 @@ import com.raiiiden.ragdollified.network.ModNetwork;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.server.level.ServerLevel;
-import net.minecraft.server.level.ServerPlayer;
-import net.minecraft.world.entity.Pose;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
@@ -33,12 +32,11 @@ import javax.vecmath.Vector3f;
 import java.util.ArrayList;
 import java.util.List;
 
-public class DeathRagdollPhysics {
-    private final DeathRagdollEntity entity;
+public class MobRagdollPhysics {
+    private final MobRagdollEntity entity;
     private final JbulletWorld manager;
     private final DiscreteDynamicsWorld world;
-    private int stuckCheckCounter = 0;
-    private Vector3f lastTorsoPosition = new Vector3f();
+    private boolean ignoreNext;
 
     public final List<RigidBody> ragdollParts = new ArrayList<>(6);
     private final List<TypedConstraint> ragdollJoints = new ArrayList<>(5);
@@ -46,9 +44,8 @@ public class DeathRagdollPhysics {
 
     private final int networkRagdollId;
     private BlockPos lastCollisionCenter = BlockPos.ZERO;
-    private boolean ignoreNext;
 
-    public DeathRagdollPhysics(DeathRagdollEntity entity, JbulletWorld manager) {
+    public MobRagdollPhysics(MobRagdollEntity entity, JbulletWorld manager) {
         this.entity = entity;
         this.manager = manager;
         this.world = manager.getDynamicsWorld();
@@ -57,7 +54,7 @@ public class DeathRagdollPhysics {
         createRagdollBodies();
         updateLocalWorldCollision();
 
-        int tick = ((ServerLevel)entity.level()).getServer().getTickCount();
+        int tick = ((ServerLevel) entity.level()).getServer().getTickCount();
         ModNetwork.CHANNEL.send(
                 PacketDistributor.ALL.noArg(),
                 new DeathRagdollStartPacket(entity.getId(), tick, getRagdollTransforms())
@@ -66,7 +63,7 @@ public class DeathRagdollPhysics {
 
     public void update() {
         // Run physics substeps for smoother simulation
-        int substeps = 2; // Run physics twice per game tick
+        int substeps = 2;
 
         for (int substep = 0; substep < substeps; substep++) {
             // Apply forces and constraints
@@ -97,12 +94,12 @@ public class DeathRagdollPhysics {
             correctInterpenetrations();
         }
 
-        // Update collision geometry once per tick (not per substep)
-        updateLocalWorldCollision(); // Fix this; causing massive tps issues
+        // Update collision geometry once per tick (fix this; causing massive tps issue)
+        updateLocalWorldCollision();
 
         // Send network update with final state
         RagdollTransform[] transforms = getRagdollTransforms();
-        int tick = ((ServerLevel)entity.level()).getServer().getTickCount();
+        int tick = ((ServerLevel) entity.level()).getServer().getTickCount();
         ModNetwork.CHANNEL.send(
                 PacketDistributor.ALL.noArg(),
                 new DeathRagdollUpdatePacket(networkRagdollId, tick, transforms)
@@ -125,14 +122,13 @@ public class DeathRagdollPhysics {
     }
 
     private void createRagdollBodies() {
-        float x = entity.getXRot();
-        if (entity.getPose() == Pose.SWIMMING) {
-            x = 90;
-        }
+        String mobType = entity.getMobType();
+        float scale = entity.getMobScale();
 
-        Vector3f pos = new Vector3f((float) entity.getX(), (float) entity.getY() + 1.3f, (float) entity.getZ());
+        Vector3f pos = new Vector3f((float) entity.getX(), (float) entity.getY() + 0.9f * scale, (float) entity.getZ());
+
         Quaternionf q = new Quaternionf().rotateXYZ(
-                (float) Math.toRadians(x),
+                (float) Math.toRadians(entity.getXRot()),
                 (float) Math.toRadians(180 - entity.getYRot()),
                 0f
         );
@@ -147,36 +143,113 @@ public class DeathRagdollPhysics {
             return result;
         };
 
-        // Scale initial velocity appropriately (matching PlayerPhysics scale of 20)
         Vector3f initialVel = new Vector3f(
                 (float) entity.getDeltaMovement().x * 20,
                 (float) entity.getDeltaMovement().y * 20,
                 (float) entity.getDeltaMovement().z * 20
         );
 
-        // Create all 6 body parts
-        ragdollParts.add(createRagdollPart(new BoxShape(new Vector3f(0.25f, 0.4f, 0.15f)),
-                pos, qq, 8, initialVel)); // Torso
-
-        ragdollParts.add(createRagdollPart(new BoxShape(new Vector3f(0.2f, 0.2f, 0.2f)),
-                worldOffset.apply(new Vector3f(0f, 0.55f, 0f)), qq, 4, initialVel)); // Head
-
-        ragdollParts.add(createRagdollPart(new BoxShape(new Vector3f(0.15f, 0.45f, 0.15f)),
-                worldOffset.apply(new Vector3f(-0.1f, -0.75f, 0f)), qq, 6, initialVel)); // Left Leg
-
-        ragdollParts.add(createRagdollPart(new BoxShape(new Vector3f(0.15f, 0.45f, 0.15f)),
-                worldOffset.apply(new Vector3f(0.1f, -0.75f, 0f)), qq, 6, initialVel)); // Right Leg
-
-        ragdollParts.add(createRagdollPart(new BoxShape(new Vector3f(0.1f, 0.35f, 0.1f)),
-                worldOffset.apply(new Vector3f(-0.4f, 0.05f, 0f)), qq, 4, initialVel)); // Left Arm
-
-        ragdollParts.add(createRagdollPart(new BoxShape(new Vector3f(0.1f, 0.35f, 0.1f)),
-                worldOffset.apply(new Vector3f(0.4f, 0.05f, 0f)), qq, 4, initialVel)); // Right Arm
+        // Create bodies based on mob type
+        if (mobType.contains("creeper")) {
+            createCreeperBodies(pos, qq, scale, initialVel, worldOffset);
+        } else {
+            // Default humanoid (zombie, skeleton, etc.)
+            createHumanoidBodies(pos, qq, scale, initialVel, worldOffset);
+        }
 
         createJoints();
     }
 
-    private RigidBody createRagdollPart(CollisionShape shape, Vector3f position, Quat4f rotation, float mass, Vector3f initialVel) {
+    private void createHumanoidBodies(Vector3f pos, Quat4f qq, float scale, Vector3f initialVel,
+                                      java.util.function.Function<Vector3f, Vector3f> worldOffset) {
+        // Torso
+        ragdollParts.add(createRagdollPart(
+                new BoxShape(new Vector3f(0.25f * scale, 0.4f * scale, 0.15f * scale)),
+                pos, qq, 8 * scale, initialVel
+        ));
+
+        // Head
+        ragdollParts.add(createRagdollPart(
+                new BoxShape(new Vector3f(0.2f * scale, 0.2f * scale, 0.2f * scale)),
+                worldOffset.apply(new Vector3f(0f, 0.55f * scale, 0f)),
+                qq, 4 * scale, initialVel
+        ));
+
+        // Left Leg
+        ragdollParts.add(createRagdollPart(
+                new BoxShape(new Vector3f(0.15f * scale, 0.45f * scale, 0.15f * scale)),
+                worldOffset.apply(new Vector3f(-0.1f * scale, -0.75f * scale, 0f)),
+                qq, 6 * scale, initialVel
+        ));
+
+        // Right Leg
+        ragdollParts.add(createRagdollPart(
+                new BoxShape(new Vector3f(0.15f * scale, 0.45f * scale, 0.15f * scale)),
+                worldOffset.apply(new Vector3f(0.1f * scale, -0.75f * scale, 0f)),
+                qq, 6 * scale, initialVel
+        ));
+
+        // Left Arm
+        ragdollParts.add(createRagdollPart(
+                new BoxShape(new Vector3f(0.1f * scale, 0.35f * scale, 0.1f * scale)),
+                worldOffset.apply(new Vector3f(-0.4f * scale, 0.05f * scale, 0f)),
+                qq, 4 * scale, initialVel
+        ));
+
+        // Right Arm
+        ragdollParts.add(createRagdollPart(
+                new BoxShape(new Vector3f(0.1f * scale, 0.35f * scale, 0.1f * scale)),
+                worldOffset.apply(new Vector3f(0.4f * scale, 0.05f * scale, 0f)),
+                qq, 4 * scale, initialVel
+        ));
+    }
+
+    private void createCreeperBodies(Vector3f pos, Quat4f qq, float scale, Vector3f initialVel,
+                                     java.util.function.Function<Vector3f, Vector3f> worldOffset) {
+        // Torso (body)
+        ragdollParts.add(createRagdollPart(
+                new BoxShape(new Vector3f(0.3f * scale, 0.5f * scale, 0.3f * scale)),
+                pos, qq, 10 * scale, initialVel
+        ));
+
+        // Head
+        ragdollParts.add(createRagdollPart(
+                new BoxShape(new Vector3f(0.25f * scale, 0.25f * scale, 0.25f * scale)),
+                worldOffset.apply(new Vector3f(0f, 0.6f * scale, 0f)),
+                qq, 4 * scale, initialVel
+        ));
+
+        // Front Left Leg
+        ragdollParts.add(createRagdollPart(
+                new BoxShape(new Vector3f(0.12f * scale, 0.3f * scale, 0.12f * scale)),
+                worldOffset.apply(new Vector3f(-0.2f * scale, -0.6f * scale, -0.2f * scale)),
+                qq, 3 * scale, initialVel
+        ));
+
+        // Front Right Leg
+        ragdollParts.add(createRagdollPart(
+                new BoxShape(new Vector3f(0.12f * scale, 0.3f * scale, 0.12f * scale)),
+                worldOffset.apply(new Vector3f(0.2f * scale, -0.6f * scale, -0.2f * scale)),
+                qq, 3 * scale, initialVel
+        ));
+
+        // Back Left Leg (stored as LEFT_ARM slot)
+        ragdollParts.add(createRagdollPart(
+                new BoxShape(new Vector3f(0.12f * scale, 0.3f * scale, 0.12f * scale)),
+                worldOffset.apply(new Vector3f(-0.2f * scale, -0.6f * scale, 0.2f * scale)),
+                qq, 3 * scale, initialVel
+        ));
+
+        // Back Right Leg (stored as RIGHT_ARM slot)
+        ragdollParts.add(createRagdollPart(
+                new BoxShape(new Vector3f(0.12f * scale, 0.3f * scale, 0.12f * scale)),
+                worldOffset.apply(new Vector3f(0.2f * scale, -0.6f * scale, 0.2f * scale)),
+                qq, 3 * scale, initialVel
+        ));
+    }
+
+    private RigidBody createRagdollPart(CollisionShape shape, Vector3f position, Quat4f rotation,
+                                        float mass, Vector3f initialVel) {
         Transform t = new Transform();
         t.setIdentity();
         t.origin.set(position);
@@ -196,19 +269,17 @@ public class DeathRagdollPhysics {
 
         RigidBody body = new RigidBody(info);
 
-        // Clamp initial velocity before applying
+        // Clamp initial velocity
         float speed = initialVel.length();
         if (speed > 8f) {
             initialVel.scale(8f / speed);
         }
         body.setLinearVelocity(initialVel);
 
-        body.setDamping(0.1f, 0.9f);  // Increased linear damping
-        body.setSleepingThresholds(0.3f, 0.3f);  // Tighter thresholds
-
-        // More conservative CCD
-        body.setCcdMotionThreshold(0.1f);  // Increased from 0.01f
-        body.setCcdSweptSphereRadius(0.2f); // Reduced from 0.35f
+        body.setDamping(0.1f, 0.9f);
+        body.setSleepingThresholds(0.3f, 0.3f);
+        body.setCcdMotionThreshold(0.1f);
+        body.setCcdSweptSphereRadius(0.2f);
 
         world.addRigidBody(body);
         return body;
@@ -217,6 +288,9 @@ public class DeathRagdollPhysics {
     private void createJoints() {
         if (ragdollParts.size() < 6) return;
 
+        String mobType = entity.getMobType();
+        float scale = entity.getMobScale();
+
         RigidBody torso = ragdollParts.get(RagdollPart.TORSO.index);
         RigidBody head = ragdollParts.get(RagdollPart.HEAD.index);
         RigidBody lLeg = ragdollParts.get(RagdollPart.LEFT_LEG.index);
@@ -224,12 +298,18 @@ public class DeathRagdollPhysics {
         RigidBody lArm = ragdollParts.get(RagdollPart.LEFT_ARM.index);
         RigidBody rArm = ragdollParts.get(RagdollPart.RIGHT_ARM.index);
 
-        Transform tTorso = new Transform(); torso.getMotionState().getWorldTransform(tTorso);
-        Transform tHead  = new Transform(); head.getMotionState().getWorldTransform(tHead);
-        Transform tLLeg  = new Transform(); lLeg.getMotionState().getWorldTransform(tLLeg);
-        Transform tRLeg  = new Transform(); rLeg.getMotionState().getWorldTransform(tRLeg);
-        Transform tLArm  = new Transform(); lArm.getMotionState().getWorldTransform(tLArm);
-        Transform tRArm  = new Transform(); rArm.getMotionState().getWorldTransform(tRArm);
+        Transform tTorso = new Transform();
+        torso.getMotionState().getWorldTransform(tTorso);
+        Transform tHead = new Transform();
+        head.getMotionState().getWorldTransform(tHead);
+        Transform tLLeg = new Transform();
+        lLeg.getMotionState().getWorldTransform(tLLeg);
+        Transform tRLeg = new Transform();
+        rLeg.getMotionState().getWorldTransform(tRLeg);
+        Transform tLArm = new Transform();
+        lArm.getMotionState().getWorldTransform(tLArm);
+        Transform tRArm = new Transform();
+        rArm.getMotionState().getWorldTransform(tRArm);
 
         java.util.function.Function<Vector3f, Vector3f> torsoLocalToWorld = (local) -> {
             Quat4f trot = tTorso.getRotation(new Quat4f());
@@ -238,79 +318,174 @@ public class DeathRagdollPhysics {
             return out;
         };
 
+        if (mobType.contains("creeper")) {
+            createCreeperJoints(
+                    torso, head,
+                    lArm, rArm,     // FRONT legs
+                    lLeg, rLeg,     // BACK legs
+                    tTorso, tHead,
+                    tLArm, tRArm,   // FRONT transforms
+                    tLLeg, tRLeg,   // BACK transforms
+                    torsoLocalToWorld,
+                    scale
+            );
+    } else {
+            createHumanoidJoints(torso, head, lLeg, rLeg, lArm, rArm,
+                    tTorso, tHead, tLLeg, tRLeg, tLArm, tRArm,
+                    torsoLocalToWorld, scale);
+        }
+    }
+
+    private void createHumanoidJoints(RigidBody torso, RigidBody head, RigidBody lLeg, RigidBody rLeg,
+                                      RigidBody lArm, RigidBody rArm,
+                                      Transform tTorso, Transform tHead, Transform tLLeg, Transform tRLeg,
+                                      Transform tLArm, Transform tRArm,
+                                      java.util.function.Function<Vector3f, Vector3f> torsoLocalToWorld,
+                                      float scale) {
         // Head <-> Torso
-        Vector3f torsoTopWorld = torsoLocalToWorld.apply(new Vector3f(0f, 0.4f, 0f));
+        Vector3f torsoTopWorld = torsoLocalToWorld.apply(new Vector3f(0f, 0.4f * scale, 0f));
         Quat4f hrot = tHead.getRotation(new Quat4f());
-        Vector3f headBottomWorld = rotateVecByQuat(hrot, new Vector3f(0f, -0.2f, 0f));
+        Vector3f headBottomWorld = rotateVecByQuat(hrot, new Vector3f(0f, -0.2f * scale, 0f));
         headBottomWorld.add(tHead.origin);
-        Vector3f headAnchor = new Vector3f((torsoTopWorld.x + headBottomWorld.x) * 0.5f,
+        Vector3f headAnchor = new Vector3f(
+                (torsoTopWorld.x + headBottomWorld.x) * 0.5f,
                 (torsoTopWorld.y + headBottomWorld.y) * 0.5f,
-                (torsoTopWorld.z + headBottomWorld.z) * 0.5f);
+                (torsoTopWorld.z + headBottomWorld.z) * 0.5f
+        );
         ragdollJoints.add(createJointAtWorldAnchor(
                 torso, head, headAnchor,
-                new Vector3f(0,0,0), new Vector3f(0,0,0),
-                new Vector3f((float)-Math.toRadians(30), (float)-Math.toRadians(20), (float)-Math.toRadians(30)),
-                new Vector3f((float)Math.toRadians(30), (float)Math.toRadians(50), (float)Math.toRadians(30))
+                new Vector3f(0, 0, 0), new Vector3f(0, 0, 0),
+                new Vector3f((float) -Math.toRadians(30), (float) -Math.toRadians(20), (float) -Math.toRadians(30)),
+                new Vector3f((float) Math.toRadians(30), (float) Math.toRadians(50), (float) Math.toRadians(30))
         ));
 
         // Left Leg <-> Torso
-        Vector3f torsoLeftHip = torsoLocalToWorld.apply(new Vector3f(-0.1f, -0.55f, 0f));
+        Vector3f torsoLeftHip = torsoLocalToWorld.apply(new Vector3f(-0.1f * scale, -0.55f * scale, 0f));
         Quat4f lrot = tLLeg.getRotation(new Quat4f());
-        Vector3f legTopWorld = rotateVecByQuat(lrot, new Vector3f(0f, 0.45f, 0f));
+        Vector3f legTopWorld = rotateVecByQuat(lrot, new Vector3f(0f, 0.45f * scale, 0f));
         legTopWorld.add(tLLeg.origin);
-        Vector3f lLegAnchor = new Vector3f((torsoLeftHip.x + legTopWorld.x) * 0.5f,
+        Vector3f lLegAnchor = new Vector3f(
+                (torsoLeftHip.x + legTopWorld.x) * 0.5f,
                 (torsoLeftHip.y + legTopWorld.y) * 0.5f,
-                (torsoLeftHip.z + legTopWorld.z) * 0.5f);
+                (torsoLeftHip.z + legTopWorld.z) * 0.5f
+        );
         ragdollJoints.add(createJointAtWorldAnchor(
                 torso, lLeg, lLegAnchor,
-                new Vector3f(-0.05f,-0.05f,-0.05f), new Vector3f(0.05f,0.05f,0.05f),
-                new Vector3f((float)-Math.toRadians(40), 0f, (float)-Math.toRadians(10)),
-                new Vector3f((float)Math.toRadians(80), 0f, (float)Math.toRadians(10))
+                new Vector3f(-0.05f, -0.05f, -0.05f), new Vector3f(0.05f, 0.05f, 0.05f),
+                new Vector3f((float) -Math.toRadians(40), 0f, (float) -Math.toRadians(10)),
+                new Vector3f((float) Math.toRadians(80), 0f, (float) Math.toRadians(10))
         ));
 
         // Right Leg <-> Torso
-        Vector3f torsoRightHip = torsoLocalToWorld.apply(new Vector3f(0.1f, -0.55f, 0f));
+        Vector3f torsoRightHip = torsoLocalToWorld.apply(new Vector3f(0.1f * scale, -0.55f * scale, 0f));
         Quat4f rrot = tRLeg.getRotation(new Quat4f());
-        Vector3f rLegTopWorld = rotateVecByQuat(rrot, new Vector3f(0f, 0.45f, 0f));
+        Vector3f rLegTopWorld = rotateVecByQuat(rrot, new Vector3f(0f, 0.45f * scale, 0f));
         rLegTopWorld.add(tRLeg.origin);
-        Vector3f rLegAnchor = new Vector3f((torsoRightHip.x + rLegTopWorld.x) * 0.5f,
+        Vector3f rLegAnchor = new Vector3f(
+                (torsoRightHip.x + rLegTopWorld.x) * 0.5f,
                 (torsoRightHip.y + rLegTopWorld.y) * 0.5f,
-                (torsoRightHip.z + rLegTopWorld.z) * 0.5f);
+                (torsoRightHip.z + rLegTopWorld.z) * 0.5f
+        );
         ragdollJoints.add(createJointAtWorldAnchor(
                 torso, rLeg, rLegAnchor,
-                new Vector3f(-0.05f,-0.05f,-0.05f), new Vector3f(0.05f,0.05f,0.05f),
-                new Vector3f((float)-Math.toRadians(40), 0f, (float)-Math.toRadians(10)),
-                new Vector3f((float)Math.toRadians(80), 0f, (float)Math.toRadians(10))
+                new Vector3f(-0.05f, -0.05f, -0.05f), new Vector3f(0.05f, 0.05f, 0.05f),
+                new Vector3f((float) -Math.toRadians(40), 0f, (float) -Math.toRadians(10)),
+                new Vector3f((float) Math.toRadians(80), 0f, (float) Math.toRadians(10))
         ));
 
         // Left Arm <-> Torso
-        Vector3f torsoLeftShoulder = torsoLocalToWorld.apply(new Vector3f(-0.35f, 0.05f, 0f));
+        Vector3f torsoLeftShoulder = torsoLocalToWorld.apply(new Vector3f(-0.35f * scale, 0.05f * scale, 0f));
         Quat4f larot = tLArm.getRotation(new Quat4f());
-        Vector3f lArmTopWorld = rotateVecByQuat(larot, new Vector3f(0f, 0.35f, 0f));
+        Vector3f lArmTopWorld = rotateVecByQuat(larot, new Vector3f(0f, 0.35f * scale, 0f));
         lArmTopWorld.add(tLArm.origin);
-        Vector3f lArmAnchor = new Vector3f((torsoLeftShoulder.x + lArmTopWorld.x) * 0.5f,
+        Vector3f lArmAnchor = new Vector3f(
+                (torsoLeftShoulder.x + lArmTopWorld.x) * 0.5f,
                 (torsoLeftShoulder.y + lArmTopWorld.y) * 0.5f,
-                (torsoLeftShoulder.z + lArmTopWorld.z) * 0.5f);
+                (torsoLeftShoulder.z + lArmTopWorld.z) * 0.5f
+        );
         ragdollJoints.add(createJointAtWorldAnchor(
                 torso, lArm, lArmAnchor,
-                new Vector3f(-0.02f,-0.02f,-0.02f), new Vector3f(0.02f,0.02f,0.02f),
-                new Vector3f((float)-Math.toRadians(80), (float)-Math.toRadians(30), (float)-Math.toRadians(40)),
-                new Vector3f((float)Math.toRadians(80), (float)Math.toRadians(30), (float)Math.toRadians(40))
+                new Vector3f(-0.02f, -0.02f, -0.02f), new Vector3f(0.02f, 0.02f, 0.02f),
+                new Vector3f((float) -Math.toRadians(80), (float) -Math.toRadians(30), (float) -Math.toRadians(40)),
+                new Vector3f((float) Math.toRadians(80), (float) Math.toRadians(30), (float) Math.toRadians(40))
         ));
 
         // Right Arm <-> Torso
-        Vector3f torsoRightShoulder = torsoLocalToWorld.apply(new Vector3f(0.35f, 0.05f, 0f));
+        Vector3f torsoRightShoulder = torsoLocalToWorld.apply(new Vector3f(0.35f * scale, 0.05f * scale, 0f));
         Quat4f rarot = tRArm.getRotation(new Quat4f());
-        Vector3f rArmTopWorld = rotateVecByQuat(rarot, new Vector3f(0f, 0.35f, 0f));
+        Vector3f rArmTopWorld = rotateVecByQuat(rarot, new Vector3f(0f, 0.35f * scale, 0f));
         rArmTopWorld.add(tRArm.origin);
-        Vector3f rArmAnchor = new Vector3f((torsoRightShoulder.x + rArmTopWorld.x) * 0.5f,
+        Vector3f rArmAnchor = new Vector3f(
+                (torsoRightShoulder.x + rArmTopWorld.x) * 0.5f,
                 (torsoRightShoulder.y + rArmTopWorld.y) * 0.5f,
-                (torsoRightShoulder.z + rArmTopWorld.z) * 0.5f);
+                (torsoRightShoulder.z + rArmTopWorld.z) * 0.5f
+        );
         ragdollJoints.add(createJointAtWorldAnchor(
                 torso, rArm, rArmAnchor,
-                new Vector3f(-0.02f,-0.02f,-0.02f), new Vector3f(0.02f,0.02f,0.02f),
-                new Vector3f((float)-Math.toRadians(80), (float)-Math.toRadians(30), (float)-Math.toRadians(40)),
-                new Vector3f((float)Math.toRadians(80), (float)Math.toRadians(30), (float)Math.toRadians(40))
+                new Vector3f(-0.02f, -0.02f, -0.02f), new Vector3f(0.02f, 0.02f, 0.02f),
+                new Vector3f((float) -Math.toRadians(80), (float) -Math.toRadians(30), (float) -Math.toRadians(40)),
+                new Vector3f((float) Math.toRadians(80), (float) Math.toRadians(30), (float) Math.toRadians(40))
+        ));
+    }
+
+    private void createCreeperJoints(RigidBody torso, RigidBody head, RigidBody frontLeft, RigidBody frontRight,
+                                     RigidBody backLeft, RigidBody backRight,
+                                     Transform tTorso, Transform tHead, Transform tFL, Transform tFR,
+                                     Transform tBL, Transform tBR,
+                                     java.util.function.Function<Vector3f, Vector3f> torsoLocalToWorld,
+                                     float scale) {
+        // Head <-> Body
+        Vector3f torsoTop = torsoLocalToWorld.apply(new Vector3f(0f, 0.5f * scale, 0f));
+        Vector3f headBottom = tHead.origin;
+        Vector3f headAnchor = new Vector3f(
+                (torsoTop.x + headBottom.x) * 0.5f,
+                (torsoTop.y + headBottom.y) * 0.5f,
+                (torsoTop.z + headBottom.z) * 0.5f
+        );
+        ragdollJoints.add(createJointAtWorldAnchor(
+                torso, head, headAnchor,
+                new Vector3f(0, 0, 0), new Vector3f(0, 0, 0),
+                new Vector3f((float) -Math.toRadians(20), (float) -Math.toRadians(20), (float) -Math.toRadians(20)),
+                new Vector3f((float) Math.toRadians(20), (float) Math.toRadians(20), (float) Math.toRadians(20))
+        ));
+
+        // Leg joints with limited movement
+        float legLimit = (float) Math.toRadians(30);
+
+        // Front Left Leg
+        Vector3f flAnchor = torsoLocalToWorld.apply(new Vector3f(-0.2f * scale, -0.4f * scale, -0.2f * scale));
+        ragdollJoints.add(createJointAtWorldAnchor(
+                torso, frontLeft, flAnchor,
+                new Vector3f(-0.02f, -0.02f, -0.02f), new Vector3f(0.02f, 0.02f, 0.02f),
+                new Vector3f(-legLimit, -legLimit, -legLimit),
+                new Vector3f(legLimit, legLimit, legLimit)
+        ));
+
+        // Front Right Leg
+        Vector3f frAnchor = torsoLocalToWorld.apply(new Vector3f(0.2f * scale, -0.4f * scale, -0.2f * scale));
+        ragdollJoints.add(createJointAtWorldAnchor(
+                torso, frontRight, frAnchor,
+                new Vector3f(-0.02f, -0.02f, -0.02f), new Vector3f(0.02f, 0.02f, 0.02f),
+                new Vector3f(-legLimit, -legLimit, -legLimit),
+                new Vector3f(legLimit, legLimit, legLimit)
+        ));
+
+        // Back Left Leg
+        Vector3f blAnchor = torsoLocalToWorld.apply(new Vector3f(-0.2f * scale, -0.4f * scale, 0.2f * scale));
+        ragdollJoints.add(createJointAtWorldAnchor(
+                torso, backLeft, blAnchor,
+                new Vector3f(-0.02f, -0.02f, -0.02f), new Vector3f(0.02f, 0.02f, 0.02f),
+                new Vector3f(-legLimit, -legLimit, -legLimit),
+                new Vector3f(legLimit, legLimit, legLimit)
+        ));
+
+        // Back Right Leg
+        Vector3f brAnchor = torsoLocalToWorld.apply(new Vector3f(0.2f * scale, -0.4f * scale, 0.2f * scale));
+        ragdollJoints.add(createJointAtWorldAnchor(
+                torso, backRight, brAnchor,
+                new Vector3f(-0.02f, -0.02f, -0.02f), new Vector3f(0.02f, 0.02f, 0.02f),
+                new Vector3f(-legLimit, -legLimit, -legLimit),
+                new Vector3f(legLimit, legLimit, legLimit)
         ));
     }
 
@@ -321,93 +496,18 @@ public class DeathRagdollPhysics {
             CollisionObject a = (CollisionObject) manifold.getBody0();
             CollisionObject b = (CollisionObject) manifold.getBody1();
 
-            // Skip self-collisions
             if (ragdollParts.contains(a) && ragdollParts.contains(b)) continue;
 
             for (int p = 0; p < manifold.getNumContacts(); p++) {
                 ManifoldPoint pt = manifold.getContactPoint(p);
                 if (pt.getDistance() <= 0f) {
-                    RigidBody hitPart = null;
-                    CollisionObject other = null;
-
-                    if (ragdollParts.contains(a)) { hitPart = (RigidBody) a; other = b; }
-                    else if (ragdollParts.contains(b)) { hitPart = (RigidBody) b; other = a; }
-
                     if (ignoreNext) {
                         ignoreNext = false;
                         return;
                     }
-
-                    if (hitPart != null) {
-                        Vector3f contactPoint = new Vector3f();
-                        pt.getPositionWorldOnB(contactPoint);
-                        float impactSpeed = computeImpactSpeed(a, b, pt);
-                        // add collision handling here if needed later
-                    }
                 }
             }
         }
-    }
-
-    private RagdollPart identifyPart(RigidBody rb) {
-        int idx = ragdollParts.indexOf(rb);
-        return RagdollPart.byIndex(idx);
-    }
-
-    private float computeImpactSpeed(CollisionObject aObj, CollisionObject bObj, ManifoldPoint pt) {
-        Vector3f contact = new Vector3f();
-        pt.getPositionWorldOnB(contact);
-
-        Vector3f velA = new Vector3f(0f, 0f, 0f);
-        Vector3f velB = new Vector3f(0f, 0f, 0f);
-
-        if (pt.getDistance() < -0.1f) {
-            return 0f;
-        }
-
-        if (aObj instanceof RigidBody) {
-            RigidBody a = (RigidBody) aObj;
-            a.getLinearVelocity(velA);
-            Vector3f angA = new Vector3f();
-            a.getAngularVelocity(angA);
-
-            Transform ta = new Transform();
-            a.getMotionState().getWorldTransform(ta);
-            Vector3f comA = new Vector3f(ta.origin);
-            Vector3f rA = new Vector3f();
-            rA.sub(contact, comA);
-
-            Vector3f wCrossR = cross(angA, rA);
-            velA.add(wCrossR);
-        }
-
-        if (bObj instanceof RigidBody) {
-            RigidBody b = (RigidBody) bObj;
-            b.getLinearVelocity(velB);
-            Vector3f angB = new Vector3f();
-            b.getAngularVelocity(angB);
-
-            Transform tb = new Transform();
-            b.getMotionState().getWorldTransform(tb);
-            Vector3f comB = new Vector3f(tb.origin);
-            Vector3f rB = new Vector3f();
-            rB.sub(contact, comB);
-
-            Vector3f wCrossR = cross(angB, rB);
-            velB.add(wCrossR);
-        }
-
-        Vector3f rel = new Vector3f();
-        rel.sub(velA, velB);
-        return rel.length();
-    }
-
-    private Vector3f cross(Vector3f a, Vector3f b) {
-        Vector3f out = new Vector3f();
-        out.x = a.y * b.z - a.z * b.y;
-        out.y = a.z * b.x - a.x * b.z;
-        out.z = a.x * b.y - a.y * b.x;
-        return out;
     }
 
     private void correctInterpenetrations() {
@@ -462,7 +562,7 @@ public class DeathRagdollPhysics {
 
     private void updateLocalWorldCollision() {
         Vector3f torsoPos = getTorsoPosition();
-        BlockPos center = new BlockPos((int)torsoPos.x, (int)torsoPos.y, (int)torsoPos.z);
+        BlockPos center = new BlockPos((int) torsoPos.x, (int) torsoPos.y, (int) torsoPos.z);
 
         if (center.distManhattan(lastCollisionCenter) < 2) return;
         lastCollisionCenter = center;
@@ -471,9 +571,9 @@ public class DeathRagdollPhysics {
         localStaticCollision.clear();
 
         int radius = 3;
-        for (int dx=-radius; dx<=radius; dx++)
-            for (int dy=-radius; dy<=radius; dy++)
-                for (int dz=-radius; dz<=radius; dz++) {
+        for (int dx = -radius; dx <= radius; dx++)
+            for (int dy = -radius; dy <= radius; dy++)
+                for (int dz = -radius; dz <= radius; dz++) {
                     BlockPos pos = center.offset(dx, dy, dz);
                     BlockState state = entity.level().getBlockState(pos);
                     if (state.isAir() || state.getFluidState().isSource()) continue;
@@ -484,18 +584,18 @@ public class DeathRagdollPhysics {
 
                     for (AABB box : shape.toAabbs()) {
                         Vector3f halfExtents = new Vector3f(
-                                (float)(box.getXsize()/2),
-                                (float)(box.getYsize()/2),
-                                (float)(box.getZsize()/2)
+                                (float) (box.getXsize() / 2),
+                                (float) (box.getYsize() / 2),
+                                (float) (box.getZsize() / 2)
                         );
                         CollisionShape cs = new BoxShape(halfExtents);
 
                         Transform t = new Transform();
                         t.setIdentity();
                         t.origin.set(
-                                (float)(pos.getX() + box.minX + box.getXsize()/2),
-                                (float)(pos.getY() + box.minY + box.getYsize()/2),
-                                (float)(pos.getZ() + box.minZ + box.getZsize()/2)
+                                (float) (pos.getX() + box.minX + box.getXsize() / 2),
+                                (float) (pos.getY() + box.minY + box.getYsize() / 2),
+                                (float) (pos.getZ() + box.minZ + box.getZsize() / 2)
                         );
 
                         RigidBody rb = new RigidBody(new RigidBodyConstructionInfo(0f, new DefaultMotionState(t), cs, new Vector3f()));
@@ -542,66 +642,6 @@ public class DeathRagdollPhysics {
         }
     }
 
-    private RagdollTransform[] getRagdollTransforms() {
-        RagdollTransform[] out = new RagdollTransform[ragdollParts.size()];
-        for (int i = 0; i < ragdollParts.size(); i++) {
-            Transform t = new Transform();
-            ragdollParts.get(i).getMotionState().getWorldTransform(t);
-            Quat4f rot = t.getRotation(new Quat4f());
-            out[i] = new RagdollTransform(i, t.origin.x, t.origin.y, t.origin.z,
-                    rot.x, rot.y, rot.z, rot.w);
-        }
-        return out;
-    }
-
-    public void destroy() {
-        for (RigidBody r : ragdollParts) {
-            world.removeRigidBody(r);
-        }
-        for (TypedConstraint c : ragdollJoints) {
-            world.removeConstraint(c);
-        }
-        for (CollisionObject co : localStaticCollision) {
-            world.removeCollisionObject(co);
-        }
-        ragdollParts.clear();
-        ragdollJoints.clear();
-        localStaticCollision.clear();
-    }
-
-    // Helper methods
-    private Vector3f rotateVecByQuat(Quat4f q, Vector3f v) {
-        Vector3f qvec = new Vector3f(q.x, q.y, q.z);
-        Vector3f t = new Vector3f();
-        t.x = 2f * (qvec.y * v.z - qvec.z * v.y);
-        t.y = 2f * (qvec.z * v.x - qvec.x * v.z);
-        t.z = 2f * (qvec.x * v.y - qvec.y * v.x);
-
-        Vector3f result = new Vector3f(v);
-        Vector3f qwt = new Vector3f(t);
-        qwt.scale(q.w);
-        result.add(qwt);
-
-        Vector3f cross = new Vector3f();
-        cross.x = qvec.y * t.z - qvec.z * t.y;
-        cross.y = qvec.z * t.x - qvec.x * t.z;
-        cross.z = qvec.x * t.y - qvec.y * t.x;
-        result.add(cross);
-        return result;
-    }
-
-    private Vector3f rotateVecByQuatConjugate(Quat4f q, Vector3f v) {
-        Quat4f qc = new Quat4f(-q.x, -q.y, -q.z, q.w);
-        return rotateVecByQuat(qc, v);
-    }
-
-    private Vector3f worldPointToLocal(Transform bodyWorldTransform, Vector3f worldPoint) {
-        Vector3f delta = new Vector3f(worldPoint);
-        delta.sub(bodyWorldTransform.origin);
-        Quat4f rot = bodyWorldTransform.getRotation(new Quat4f());
-        return rotateVecByQuatConjugate(rot, delta);
-    }
-
     private Generic6DofConstraint createJointAtWorldAnchor(RigidBody a, RigidBody b, Vector3f worldAnchor,
                                                            Vector3f linearLower, Vector3f linearUpper,
                                                            Vector3f angularLower, Vector3f angularUpper) {
@@ -633,7 +673,46 @@ public class DeathRagdollPhysics {
         world.addConstraint(joint, true);
         return joint;
     }
+    private Vector3f worldPointToLocal(Transform bodyWorldTransform, Vector3f worldPoint) {
+        Vector3f delta = new Vector3f(worldPoint);
+        delta.sub(bodyWorldTransform.origin);
+        Quat4f rot = bodyWorldTransform.getRotation(new Quat4f());
+        return rotateVecByQuatConjugate(rot, delta);
+    }
+    private Vector3f rotateVecByQuatConjugate(Quat4f q, Vector3f v) {
+        Quat4f qc = new Quat4f(-q.x, -q.y, -q.z, q.w);
+        return rotateVecByQuat(qc, v);
+    }
+    private Vector3f rotateVecByQuat(Quat4f q, Vector3f v) {
+        Vector3f qvec = new Vector3f(q.x, q.y, q.z);
+        Vector3f t = new Vector3f();
+        t.x = 2f * (qvec.y * v.z - qvec.z * v.y);
+        t.y = 2f * (qvec.z * v.x - qvec.x * v.z);
+        t.z = 2f * (qvec.x * v.y - qvec.y * v.x);
 
+        Vector3f result = new Vector3f(v);
+        Vector3f qwt = new Vector3f(t);
+        qwt.scale(q.w);
+        result.add(qwt);
+
+        Vector3f cross = new Vector3f();
+        cross.x = qvec.y * t.z - qvec.z * t.y;
+        cross.y = qvec.z * t.x - qvec.x * t.z;
+        cross.z = qvec.x * t.y - qvec.y * t.x;
+        result.add(cross);
+        return result;
+    }
+    private RagdollTransform[] getRagdollTransforms() {
+        RagdollTransform[] out = new RagdollTransform[ragdollParts.size()];
+        for (int i = 0; i < ragdollParts.size(); i++) {
+            Transform t = new Transform();
+            ragdollParts.get(i).getMotionState().getWorldTransform(t);
+            Quat4f rot = t.getRotation(new Quat4f());
+            out[i] = new RagdollTransform(i, t.origin.x, t.origin.y, t.origin.z,
+                    rot.x, rot.y, rot.z, rot.w);
+        }
+        return out;
+    }
     private void applyPlayerCollisions() {
         // Find nearby players
         List<net.minecraft.world.entity.player.Player> nearbyPlayers = entity.level().getEntitiesOfClass(
@@ -686,8 +765,18 @@ public class DeathRagdollPhysics {
             }
         }
     }
-
-    public boolean hasBody(CollisionObject obj) {
-        return ragdollParts.contains(obj);
+    public void destroy() {
+        for (RigidBody r : ragdollParts) {
+            world.removeRigidBody(r);
+        }
+        for (TypedConstraint c : ragdollJoints) {
+            world.removeConstraint(c);
+        }
+        for (CollisionObject co : localStaticCollision) {
+            world.removeCollisionObject(co);
+        }
+        ragdollParts.clear();
+        ragdollJoints.clear();
+        localStaticCollision.clear();
     }
 }

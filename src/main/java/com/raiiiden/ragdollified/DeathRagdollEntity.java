@@ -4,6 +4,7 @@ import com.raiiiden.ragdollified.config.RagdollifiedConfig;
 import com.raiiiden.ragdollified.network.DeathRagdollEndPacket;
 import com.raiiiden.ragdollified.network.ModNetwork;
 import net.minecraft.nbt.CompoundTag;
+import net.minecraft.nbt.ListTag;
 import net.minecraft.network.protocol.Packet;
 import net.minecraft.network.protocol.game.ClientGamePacketListener;
 import net.minecraft.network.syncher.EntityDataAccessor;
@@ -11,6 +12,8 @@ import net.minecraft.network.syncher.EntityDataSerializers;
 import net.minecraft.network.syncher.SynchedEntityData;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntityType;
+import net.minecraft.world.entity.EquipmentSlot;
+import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.core.BlockPos;
@@ -29,21 +32,26 @@ public class DeathRagdollEntity extends Entity {
     private static final EntityDataAccessor<String> PLAYER_UUID =
             SynchedEntityData.defineId(DeathRagdollEntity.class, EntityDataSerializers.STRING);
 
+    // Store armor as ItemStacks
+    private ItemStack helmet = ItemStack.EMPTY;
+    private ItemStack chestplate = ItemStack.EMPTY;
+    private ItemStack leggings = ItemStack.EMPTY;
+    private ItemStack boots = ItemStack.EMPTY;
+
     private DeathRagdollPhysics physics;
-    private int lifetime;  // Removed default value
+    private int lifetime;
     public int ticksExisted = 0;
 
     public DeathRagdollEntity(EntityType<?> type, Level level) {
         super(type, level);
         this.noCulling = true;
-        this.lifetime = RagdollifiedConfig.getRagdollLifetime();  // Get from config
+        this.lifetime = RagdollifiedConfig.getRagdollLifetime();
         Ragdollified.LOGGER.info("DeathRagdollEntity created with ID: " + this.getId());
     }
 
     private static Vec3 findSafeSpawn(Level level, Vec3 center) {
         BlockPos.MutableBlockPos m = new BlockPos.MutableBlockPos();
 
-        // First, try going UP to find air (need 3 blocks clearance)
         for (int y = 0; y < 8; y++) {
             m.set(center.x, center.y + y, center.z);
             BlockState state = level.getBlockState(m);
@@ -55,7 +63,6 @@ public class DeathRagdollEntity extends Entity {
             }
         }
 
-        // If no safe position found above, try a wider horizontal search
         for (int dx = -2; dx <= 2; dx++) {
             for (int dz = -2; dz <= 2; dz++) {
                 for (int dy = -1; dy <= 4; dy++) {
@@ -69,7 +76,6 @@ public class DeathRagdollEntity extends Entity {
             }
         }
 
-        // Last resort: spawn well above
         return center.add(0, 4, 0);
     }
 
@@ -81,6 +87,12 @@ public class DeathRagdollEntity extends Entity {
         ragdoll.setXRot(player.getXRot());
         ragdoll.entityData.set(PLAYER_NAME, player.getName().getString());
         ragdoll.entityData.set(PLAYER_UUID, player.getUUID().toString());
+
+        // Copy armor from player
+        ragdoll.helmet = player.getItemBySlot(EquipmentSlot.HEAD).copy();
+        ragdoll.chestplate = player.getItemBySlot(EquipmentSlot.CHEST).copy();
+        ragdoll.leggings = player.getItemBySlot(EquipmentSlot.LEGS).copy();
+        ragdoll.boots = player.getItemBySlot(EquipmentSlot.FEET).copy();
 
         Ragdollified.LOGGER.info("Creating death ragdoll for player: " + player.getName().getString());
 
@@ -94,7 +106,6 @@ public class DeathRagdollEntity extends Entity {
                     (float) player.getDeltaMovement().z);
             playerVel.scale(1f);
 
-            // Clamp to reasonable speed
             float speed = playerVel.length();
             if (speed > 8f) playerVel.scale(8f / speed);
 
@@ -132,7 +143,6 @@ public class DeathRagdollEntity extends Entity {
 
             if (physics != null) {
                 physics.update();
-                // REMOVED: Don't update entity position - let renderer handle it
             }
         }
     }
@@ -172,13 +182,29 @@ public class DeathRagdollEntity extends Entity {
         return physics;
     }
 
+    // Armor getters
+    public ItemStack getHelmet() { return helmet; }
+    public ItemStack getChestplate() { return chestplate; }
+    public ItemStack getLeggings() { return leggings; }
+    public ItemStack getBoots() { return boots; }
+
     @Override
     protected void readAdditionalSaveData(CompoundTag tag) {
         if (tag.contains("PlayerName")) entityData.set(PLAYER_NAME, tag.getString("PlayerName"));
         if (tag.contains("PlayerUUID")) entityData.set(PLAYER_UUID, tag.getString("PlayerUUID"));
         ticksExisted = tag.getInt("TicksExisted");
-        // Load lifetime from NBT, or use config default if not present
         lifetime = tag.contains("Lifetime") ? tag.getInt("Lifetime") : RagdollifiedConfig.getRagdollLifetime();
+
+        // Load armor
+        if (tag.contains("Armor", 9)) { // 9 = ListTag
+            ListTag armorList = tag.getList("Armor", 10); // 10 = CompoundTag
+            if (armorList.size() >= 4) {
+                helmet = ItemStack.of(armorList.getCompound(0));
+                chestplate = ItemStack.of(armorList.getCompound(1));
+                leggings = ItemStack.of(armorList.getCompound(2));
+                boots = ItemStack.of(armorList.getCompound(3));
+            }
+        }
     }
 
     @Override
@@ -187,6 +213,14 @@ public class DeathRagdollEntity extends Entity {
         tag.putString("PlayerUUID", entityData.get(PLAYER_UUID));
         tag.putInt("TicksExisted", ticksExisted);
         tag.putInt("Lifetime", lifetime);
+
+        // Save armor
+        ListTag armorList = new ListTag();
+        armorList.add(helmet.save(new CompoundTag()));
+        armorList.add(chestplate.save(new CompoundTag()));
+        armorList.add(leggings.save(new CompoundTag()));
+        armorList.add(boots.save(new CompoundTag()));
+        tag.put("Armor", armorList);
     }
 
     @Override

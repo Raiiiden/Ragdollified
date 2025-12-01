@@ -20,4 +20,10 @@ public class ModEntities {
                             .setShouldReceiveVelocityUpdates(true) // ← send velocity
                             .build("death_ragdoll")
             );
+    public static final RegistryObject<EntityType<MobRagdollEntity>> MOB_RAGDOLL = ENTITIES.register("mob_ragdoll",
+            () -> EntityType.Builder.<MobRagdollEntity>of(MobRagdollEntity::new, MobCategory.MISC)
+                    .sized(1.0f, 2.0f)
+                    .clientTrackingRange(10)
+                    .updateInterval(1)
+                    .build("mob_ragdoll"));
 }

@@ -5,6 +5,7 @@ import com.raiiiden.ragdollified.command.SpawnRagdollCommand;
 import com.raiiiden.ragdollified.config.RagdollifiedConfig;
 import com.raiiiden.ragdollified.network.ModNetwork;
 import com.raiiiden.ragdollified.client.DeathRagdollRenderer;
+import com.raiiiden.ragdollified.client.MobRagdollRenderer;
 import net.minecraft.client.renderer.entity.EntityRenderers;
 import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.event.RegisterCommandsEvent;
@@ -38,6 +39,7 @@ public class Ragdollified {
     private void clientSetup(final FMLClientSetupEvent event) {
         event.enqueueWork(() -> {
             EntityRenderers.register(ModEntities.DEATH_RAGDOLL.get(), DeathRagdollRenderer::new);
+            EntityRenderers.register(ModEntities.MOB_RAGDOLL.get(), MobRagdollRenderer::new);
         });
     }
     @SubscribeEvent
