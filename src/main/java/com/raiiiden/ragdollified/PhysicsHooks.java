@@ -50,8 +50,8 @@ public class PhysicsHooks {
             DeathRagdollEntity deathRagdoll = DeathRagdollEntity.createFromPlayer(player.level(), player);
             player.level().addFreshEntity(deathRagdoll);
         }
-        // Handle mob deaths
-        else if (shouldCreateMobRagdoll(entity)) {
+        // Handle mob deaths - SERVER SIDE ONLY
+        else if (shouldCreateMobRagdoll(entity) && !entity.level().isClientSide) {
             if (entity.level() instanceof ServerLevel serverLevel) {
                 // Make mob invisible before removing
                 entity.setInvisible(true);
@@ -69,7 +69,8 @@ public class PhysicsHooks {
                             .ifPresent(oldest -> oldest.discard());
                 }
 
-                // Create mob ragdoll
+                // NO DELAY - Create ragdoll immediately
+                // Client will look up texture from its cache using original mob ID
                 MobRagdollEntity mobRagdoll = MobRagdollEntity.createFromMob(entity.level(), entity);
                 entity.level().addFreshEntity(mobRagdoll);
             }

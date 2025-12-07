@@ -6,6 +6,7 @@ import com.raiiiden.ragdollified.MobRagdollEntity;
 import com.raiiiden.ragdollified.Ragdollified;
 import com.raiiiden.ragdollified.RagdollPart;
 import com.raiiiden.ragdollified.RagdollTransform;
+import net.minecraft.client.model.HumanoidModel;
 import net.minecraft.client.model.ZombieModel;
 import net.minecraft.client.model.SkeletonModel;
 import net.minecraft.client.model.CreeperModel;
@@ -17,19 +18,21 @@ import net.minecraft.client.renderer.entity.EntityRenderer;
 import net.minecraft.client.renderer.entity.EntityRendererProvider;
 import net.minecraft.client.renderer.texture.OverlayTexture;
 import net.minecraft.resources.ResourceLocation;
-import net.minecraft.world.entity.monster.Zombie;
-import net.minecraft.world.entity.monster.Skeleton;
-import net.minecraft.world.entity.monster.Creeper;
+import net.minecraft.world.entity.EquipmentSlot;
+import net.minecraft.world.item.ArmorItem;
+import net.minecraft.world.item.ItemStack;
 import org.joml.Quaternionf;
 import org.joml.Vector3f;
 
 public class MobRagdollRenderer extends EntityRenderer<MobRagdollEntity> {
-    // Use wildcard types to avoid generic bound issues
     private final ZombieModel<?> zombieModel;
     private final SkeletonModel<?> skeletonModel;
     private final CreeperModel<?> creeperModel;
 
-    // Use same offsets as player for humanoid mobs
+    // Armor models for humanoid mobs
+    private final HumanoidModel<?> armorInner;
+    private final HumanoidModel<?> armorOuter;
+
     private static final Vector3f[] headoff = new Vector3f[]{
             new Vector3f(0.0f, 0.0f, 0.0f), new Vector3f(0.0f, -6.0f/16, 0.0f)
     };
@@ -54,7 +57,10 @@ public class MobRagdollRenderer extends EntityRenderer<MobRagdollEntity> {
         this.zombieModel = new ZombieModel<>(context.bakeLayer(ModelLayers.ZOMBIE));
         this.skeletonModel = new SkeletonModel<>(context.bakeLayer(ModelLayers.SKELETON));
         this.creeperModel = new CreeperModel<>(context.bakeLayer(ModelLayers.CREEPER));
-        Ragdollified.LOGGER.info("MobRagdollRenderer created!");
+
+        // Create armor models for humanoid mobs
+        this.armorInner = new HumanoidModel<>(context.bakeLayer(ModelLayers.PLAYER_INNER_ARMOR));
+        this.armorOuter = new HumanoidModel<>(context.bakeLayer(ModelLayers.PLAYER_OUTER_ARMOR));
     }
 
     @Override
@@ -69,7 +75,6 @@ public class MobRagdollRenderer extends EntityRenderer<MobRagdollEntity> {
 
         String mobType = entity.getMobType();
 
-        // Route to appropriate render method based on mob type
         if (mobType.contains("zombie")) {
             renderZombie(entity, rag, partialTick, poseStack, buffer, packedLight);
         } else if (mobType.contains("skeleton")) {
@@ -77,7 +82,6 @@ public class MobRagdollRenderer extends EntityRenderer<MobRagdollEntity> {
         } else if (mobType.contains("creeper")) {
             renderCreeper(entity, rag, partialTick, poseStack, buffer, packedLight);
         }
-        // Add more mob types here
     }
 
     private void renderZombie(MobRagdollEntity entity, RagdollManager.ClientRagdoll rag,
@@ -97,7 +101,8 @@ public class MobRagdollRenderer extends EntityRenderer<MobRagdollEntity> {
         poseStack.translate(-entity.getX(), -entity.getY(), -entity.getZ());
         poseStack.translate(torso.position.x, torso.position.y, torso.position.z);
 
-        ResourceLocation texture = new ResourceLocation("minecraft", "textures/entity/zombie/zombie.png");
+        // Render mob skin
+        ResourceLocation texture = getTextureLocation(entity);
         VertexConsumer vertexConsumer = buffer.getBuffer(RenderType.entityCutoutNoCull(texture));
 
         renderHumanoidPart(poseStack, vertexConsumer, zombieModel.body, torso, torso, torsoff, light);
@@ -106,6 +111,9 @@ public class MobRagdollRenderer extends EntityRenderer<MobRagdollEntity> {
         renderHumanoidPart(poseStack, vertexConsumer, zombieModel.rightLeg, rleg, torso, rlegoff, light);
         renderHumanoidPart(poseStack, vertexConsumer, zombieModel.leftArm, larm, torso, larmoff, light);
         renderHumanoidPart(poseStack, vertexConsumer, zombieModel.rightArm, rarm, torso, rarmoff, light);
+
+        // Render armor
+        renderArmor(entity, poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg);
 
         poseStack.popPose();
     }
@@ -127,7 +135,8 @@ public class MobRagdollRenderer extends EntityRenderer<MobRagdollEntity> {
         poseStack.translate(-entity.getX(), -entity.getY(), -entity.getZ());
         poseStack.translate(torso.position.x, torso.position.y, torso.position.z);
 
-        ResourceLocation texture = new ResourceLocation("minecraft", "textures/entity/skeleton/skeleton.png");
+        // Render mob skin
+        ResourceLocation texture = getTextureLocation(entity);
         VertexConsumer vertexConsumer = buffer.getBuffer(RenderType.entityCutoutNoCull(texture));
 
         renderHumanoidPart(poseStack, vertexConsumer, skeletonModel.body, torso, torso, torsoff, light);
@@ -136,6 +145,9 @@ public class MobRagdollRenderer extends EntityRenderer<MobRagdollEntity> {
         renderHumanoidPart(poseStack, vertexConsumer, skeletonModel.rightLeg, rleg, torso, rlegoff, light);
         renderHumanoidPart(poseStack, vertexConsumer, skeletonModel.leftArm, larm, torso, larmoff, light);
         renderHumanoidPart(poseStack, vertexConsumer, skeletonModel.rightArm, rarm, torso, rarmoff, light);
+
+        // Render armor
+        renderArmor(entity, poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg);
 
         poseStack.popPose();
     }
@@ -147,7 +159,6 @@ public class MobRagdollRenderer extends EntityRenderer<MobRagdollEntity> {
         RagdollTransform torso = rag.getPartInterpolated(RagdollPart.TORSO, partialTick);
         RagdollTransform head  = rag.getPartInterpolated(RagdollPart.HEAD, partialTick);
 
-        // FOUR leg transforms
         RagdollTransform leftFrontT  = rag.getPartInterpolated(RagdollPart.LEFT_ARM, partialTick);
         RagdollTransform rightFrontT = rag.getPartInterpolated(RagdollPart.RIGHT_ARM, partialTick);
         RagdollTransform leftHindT   = rag.getPartInterpolated(RagdollPart.LEFT_LEG, partialTick);
@@ -159,36 +170,121 @@ public class MobRagdollRenderer extends EntityRenderer<MobRagdollEntity> {
         poseStack.translate(-entity.getX(), -entity.getY(), -entity.getZ());
         poseStack.translate(torso.position.x, torso.position.y, torso.position.z);
 
-        ResourceLocation texture = new ResourceLocation("minecraft", "textures/entity/creeper/creeper.png");
+        ResourceLocation texture = getTextureLocation(entity);
         VertexConsumer vertexConsumer = buffer.getBuffer(RenderType.entityCutoutNoCull(texture));
 
         ModelPart root = creeperModel.root();
-
         ModelPart body       = root.getChild("body");
         ModelPart headPart   = root.getChild("head");
-
         ModelPart rightHind  = root.getChild("right_hind_leg");
         ModelPart leftHind   = root.getChild("left_hind_leg");
         ModelPart rightFront = root.getChild("right_front_leg");
         ModelPart leftFront  = root.getChild("left_front_leg");
 
-        // Body
         renderHumanoidPart(poseStack, vertexConsumer, body, torso, torso, torsoff, light);
         renderHumanoidPart(poseStack, vertexConsumer, headPart, head, torso, headoff, light);
-
-        // Back legs
         renderHumanoidPart(poseStack, vertexConsumer, leftHind,  leftHindT,  torso, llegoff, light);
         renderHumanoidPart(poseStack, vertexConsumer, rightHind, rightHindT, torso, rlegoff, light);
-
-        // Front legs
         renderHumanoidPart(poseStack, vertexConsumer, leftFront,  leftFrontT,  torso, llegoff, light);
         renderHumanoidPart(poseStack, vertexConsumer, rightFront, rightFrontT, torso, rlegoff, light);
+
+        // Creepers don't wear armor, so no armor rendering, I will do the same for other non-armor wearing mobs
 
         poseStack.popPose();
     }
 
+    private void renderArmor(MobRagdollEntity entity, PoseStack poseStack,
+                             MultiBufferSource buffer, int light,
+                             RagdollTransform torso, RagdollTransform head,
+                             RagdollTransform larm, RagdollTransform rarm,
+                             RagdollTransform lleg, RagdollTransform rleg) {
 
+        ItemStack helmet = entity.getHelmet();
+        ItemStack chestplate = entity.getChestplate();
+        ItemStack leggings = entity.getLeggings();
+        ItemStack boots = entity.getBoots();
 
+        // Render helmet
+        if (!helmet.isEmpty() && helmet.getItem() instanceof ArmorItem armorItem) {
+            ResourceLocation armorTexture = getArmorTexture(armorItem, EquipmentSlot.HEAD);
+            VertexConsumer vertexConsumer = buffer.getBuffer(RenderType.armorCutoutNoCull(armorTexture));
+            renderHumanoidPart(poseStack, vertexConsumer, armorOuter.head, head, torso, headoff, light);
+        }
+
+        // Render chestplate
+        if (!chestplate.isEmpty() && chestplate.getItem() instanceof ArmorItem armorItem) {
+            ResourceLocation armorTexture = getArmorTexture(armorItem, EquipmentSlot.CHEST);
+            VertexConsumer innerConsumer = buffer.getBuffer(RenderType.armorCutoutNoCull(armorTexture));
+
+            renderHumanoidPart(poseStack, innerConsumer, armorInner.body, torso, torso, torsoff, light);
+            renderHumanoidPart(poseStack, innerConsumer, armorInner.leftArm, larm, torso, larmoff, light);
+            renderHumanoidPart(poseStack, innerConsumer, armorInner.rightArm, rarm, torso, rarmoff, light);
+        }
+
+        // Render leggings
+        if (!leggings.isEmpty() && leggings.getItem() instanceof ArmorItem armorItem) {
+            ResourceLocation armorTexture = getArmorTexture(armorItem, EquipmentSlot.LEGS);
+            VertexConsumer innerConsumer = buffer.getBuffer(RenderType.armorCutoutNoCull(armorTexture));
+
+            renderHumanoidPart(poseStack, innerConsumer, armorInner.body, torso, torso, torsoff, light);
+            renderHumanoidPart(poseStack, innerConsumer, armorInner.leftLeg, lleg, torso, llegoff, light);
+            renderHumanoidPart(poseStack, innerConsumer, armorInner.rightLeg, rleg, torso, rlegoff, light);
+        }
+
+        // Render boots
+        if (!boots.isEmpty() && boots.getItem() instanceof ArmorItem armorItem) {
+            ResourceLocation armorTexture = getArmorTexture(armorItem, EquipmentSlot.FEET);
+            VertexConsumer outerConsumer = buffer.getBuffer(RenderType.armorCutoutNoCull(armorTexture));
+
+            renderHumanoidPart(poseStack, outerConsumer, armorOuter.leftLeg, lleg, torso, llegoff, light);
+            renderHumanoidPart(poseStack, outerConsumer, armorOuter.rightLeg, rleg, torso, rlegoff, light);
+        }
+    }
+
+    private ResourceLocation getArmorTexture(ArmorItem item, EquipmentSlot slot) {
+        String texturePath = item.getArmorTexture(
+                new ItemStack(item),
+                null,
+                slot,
+                null
+        );
+
+        if (texturePath != null && !texturePath.isEmpty()) {
+            try {
+                // If it's "modid:material_name" format - convert to texture path
+                if (texturePath.contains(":") && !texturePath.contains("textures/")) {
+                    String[] parts = texturePath.split(":", 2);
+                    if (parts.length == 2) {
+                        String namespace = parts[0];
+                        String materialName = parts[1];
+                        String layer = (slot == EquipmentSlot.LEGS) ? "layer_2" : "layer_1";
+                        return new ResourceLocation(namespace, "textures/models/armor/" + materialName + "_" + layer + ".png");
+                    }
+                }
+                // Otherwise assume it's a full texture path
+                return new ResourceLocation(texturePath);
+            } catch (Exception e) {
+                // Fall through to fallback on error
+                Ragdollified.LOGGER.warn("Failed to parse armor texture path: {}", texturePath, e);
+            }
+        }
+
+        // Fallback: construct the path manually
+        String materialName = item.getMaterial().getName();
+
+        // Parse namespace and path
+        String namespace = "minecraft";
+        String path = materialName;
+
+        if (materialName.contains(":")) {
+            String[] parts = materialName.split(":", 2);
+            namespace = parts[0];
+            path = parts[1];
+        }
+
+        String layer = (slot == EquipmentSlot.LEGS) ? "layer_2" : "layer_1";
+        return new ResourceLocation(namespace, "textures/models/armor/" + path + "_" + layer + ".png");
+    }
 
     private void renderHumanoidPart(PoseStack poseStack, VertexConsumer vertexConsumer,
                                     ModelPart part, RagdollTransform transform,
@@ -219,16 +315,33 @@ public class MobRagdollRenderer extends EntityRenderer<MobRagdollEntity> {
 
     @Override
     public ResourceLocation getTextureLocation(MobRagdollEntity entity) {
-        String mobType = entity.getMobType();
-
-        if (mobType.contains("zombie")) {
-            return new ResourceLocation("minecraft", "textures/entity/zombie/zombie.png");
-        } else if (mobType.contains("skeleton")) {
-            return new ResourceLocation("minecraft", "textures/entity/skeleton/skeleton.png");
-        } else if (mobType.contains("creeper")) {
-            return new ResourceLocation("minecraft", "textures/entity/creeper/creeper.png");
+        ResourceLocation cached = entity.getCachedTexture();
+        if (cached != null) {
+            return cached;
         }
 
-        return new ResourceLocation("minecraft", "textures/entity/zombie/zombie.png");
+        ResourceLocation textureFromCache = ClientMobTextureCache.getTextureForDeadMob(
+                entity.getOriginalMobId()
+        );
+
+        if (textureFromCache != null) {
+            entity.setCachedTexture(textureFromCache);
+            return textureFromCache;
+        }
+
+        String mobType = entity.getMobType();
+        ResourceLocation fallback;
+        if (mobType.contains("zombie")) {
+            fallback = new ResourceLocation("minecraft", "textures/entity/zombie/zombie.png");
+        } else if (mobType.contains("skeleton")) {
+            fallback = new ResourceLocation("minecraft", "textures/entity/skeleton/skeleton.png");
+        } else if (mobType.contains("creeper")) {
+            fallback = new ResourceLocation("minecraft", "textures/entity/creeper/creeper.png");
+        } else {
+            fallback = new ResourceLocation("minecraft", "textures/entity/zombie/zombie.png");
+        }
+
+        entity.setCachedTexture(fallback);
+        return fallback;
     }
 }

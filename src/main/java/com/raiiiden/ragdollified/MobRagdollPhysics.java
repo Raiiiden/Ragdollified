@@ -125,8 +125,7 @@ public class MobRagdollPhysics {
         String mobType = entity.getMobType();
         float scale = entity.getMobScale();
 
-        Vector3f pos = new Vector3f((float) entity.getX(), (float) entity.getY() + 0.9f * scale, (float) entity.getZ());
-
+        Vector3f pos = new Vector3f((float) entity.getX(), (float) entity.getY() + 1.3f * scale, (float) entity.getZ());
         Quaternionf q = new Quaternionf().rotateXYZ(
                 (float) Math.toRadians(entity.getXRot()),
                 (float) Math.toRadians(180 - entity.getYRot()),
@@ -162,41 +161,35 @@ public class MobRagdollPhysics {
 
     private void createHumanoidBodies(Vector3f pos, Quat4f qq, float scale, Vector3f initialVel,
                                       java.util.function.Function<Vector3f, Vector3f> worldOffset) {
-        // Torso
         ragdollParts.add(createRagdollPart(
                 new BoxShape(new Vector3f(0.25f * scale, 0.4f * scale, 0.15f * scale)),
                 pos, qq, 8 * scale, initialVel
         ));
 
-        // Head
         ragdollParts.add(createRagdollPart(
                 new BoxShape(new Vector3f(0.2f * scale, 0.2f * scale, 0.2f * scale)),
                 worldOffset.apply(new Vector3f(0f, 0.55f * scale, 0f)),
                 qq, 4 * scale, initialVel
         ));
 
-        // Left Leg
         ragdollParts.add(createRagdollPart(
                 new BoxShape(new Vector3f(0.15f * scale, 0.45f * scale, 0.15f * scale)),
                 worldOffset.apply(new Vector3f(-0.1f * scale, -0.75f * scale, 0f)),
                 qq, 6 * scale, initialVel
         ));
 
-        // Right Leg
         ragdollParts.add(createRagdollPart(
                 new BoxShape(new Vector3f(0.15f * scale, 0.45f * scale, 0.15f * scale)),
                 worldOffset.apply(new Vector3f(0.1f * scale, -0.75f * scale, 0f)),
                 qq, 6 * scale, initialVel
         ));
 
-        // Left Arm
         ragdollParts.add(createRagdollPart(
                 new BoxShape(new Vector3f(0.1f * scale, 0.35f * scale, 0.1f * scale)),
                 worldOffset.apply(new Vector3f(-0.4f * scale, 0.05f * scale, 0f)),
                 qq, 4 * scale, initialVel
         ));
 
-        // Right Arm
         ragdollParts.add(createRagdollPart(
                 new BoxShape(new Vector3f(0.1f * scale, 0.35f * scale, 0.1f * scale)),
                 worldOffset.apply(new Vector3f(0.4f * scale, 0.05f * scale, 0f)),
@@ -342,7 +335,6 @@ public class MobRagdollPhysics {
                                       Transform tLArm, Transform tRArm,
                                       java.util.function.Function<Vector3f, Vector3f> torsoLocalToWorld,
                                       float scale) {
-        // Head <-> Torso
         Vector3f torsoTopWorld = torsoLocalToWorld.apply(new Vector3f(0f, 0.4f * scale, 0f));
         Quat4f hrot = tHead.getRotation(new Quat4f());
         Vector3f headBottomWorld = rotateVecByQuat(hrot, new Vector3f(0f, -0.2f * scale, 0f));
@@ -359,7 +351,6 @@ public class MobRagdollPhysics {
                 new Vector3f((float) Math.toRadians(30), (float) Math.toRadians(50), (float) Math.toRadians(30))
         ));
 
-        // Left Leg <-> Torso
         Vector3f torsoLeftHip = torsoLocalToWorld.apply(new Vector3f(-0.1f * scale, -0.55f * scale, 0f));
         Quat4f lrot = tLLeg.getRotation(new Quat4f());
         Vector3f legTopWorld = rotateVecByQuat(lrot, new Vector3f(0f, 0.45f * scale, 0f));
@@ -376,7 +367,6 @@ public class MobRagdollPhysics {
                 new Vector3f((float) Math.toRadians(80), 0f, (float) Math.toRadians(10))
         ));
 
-        // Right Leg <-> Torso
         Vector3f torsoRightHip = torsoLocalToWorld.apply(new Vector3f(0.1f * scale, -0.55f * scale, 0f));
         Quat4f rrot = tRLeg.getRotation(new Quat4f());
         Vector3f rLegTopWorld = rotateVecByQuat(rrot, new Vector3f(0f, 0.45f * scale, 0f));
@@ -393,7 +383,6 @@ public class MobRagdollPhysics {
                 new Vector3f((float) Math.toRadians(80), 0f, (float) Math.toRadians(10))
         ));
 
-        // Left Arm <-> Torso
         Vector3f torsoLeftShoulder = torsoLocalToWorld.apply(new Vector3f(-0.35f * scale, 0.05f * scale, 0f));
         Quat4f larot = tLArm.getRotation(new Quat4f());
         Vector3f lArmTopWorld = rotateVecByQuat(larot, new Vector3f(0f, 0.35f * scale, 0f));
@@ -410,7 +399,6 @@ public class MobRagdollPhysics {
                 new Vector3f((float) Math.toRadians(80), (float) Math.toRadians(30), (float) Math.toRadians(40))
         ));
 
-        // Right Arm <-> Torso
         Vector3f torsoRightShoulder = torsoLocalToWorld.apply(new Vector3f(0.35f * scale, 0.05f * scale, 0f));
         Quat4f rarot = tRArm.getRotation(new Quat4f());
         Vector3f rArmTopWorld = rotateVecByQuat(rarot, new Vector3f(0f, 0.35f * scale, 0f));
@@ -515,24 +503,28 @@ public class MobRagdollPhysics {
             int numContacts = manifold.getNumContacts();
             for (int i = 0; i < numContacts; i++) {
                 ManifoldPoint point = manifold.getContactPoint(i);
-                // Only correct significant penetrations
-                if (point.getDistance() < -0.12f) {  // Higher threshold
+                if (point.getDistance() < -0.1f) {
                     RigidBody a = (RigidBody) manifold.getBody0();
                     RigidBody b = (RigidBody) manifold.getBody1();
+
+                    // Skip if both are parts of this ragdoll (internal collisions)
+                    boolean aIsThisRagdoll = ragdollParts.contains(a);
+                    boolean bIsThisRagdoll = ragdollParts.contains(b);
+
+                    if (aIsThisRagdoll && bIsThisRagdoll) {
+                        continue; // Don't correct internal ragdoll collisions
+                    }
 
                     ignoreNext = true;
 
                     Vector3f normal = new Vector3f(point.normalWorldOnB);
-                    // Reduced from 4.5x to 1.5x
-                    float correctionScale = 0.8f * Math.abs(point.getDistance());
-                    normal.scale(correctionScale);
+                    normal.scale(4.5f * Math.abs(point.getDistance()));
 
-                    // Apply position correction
                     if (a.getInvMass() > 0) a.translate(normal);
                     normal.scale(-1);
                     if (b.getInvMass() > 0) b.translate(normal);
 
-                    // Dampen velocities after correction
+                    // Keep the velocity dampening
                     if (a.getInvMass() > 0) {
                         Vector3f vel = new Vector3f();
                         a.getLinearVelocity(vel);

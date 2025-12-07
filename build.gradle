@@ -136,8 +136,12 @@ dependencies {
     datagenImplementation sourceSets.main.output
 
     annotationProcessor "org.spongepowered:mixin:${mixin_version}:processor"
-    implementation fg.deobf("curse.maven:configured-457570:5180900")
-    implementation fg.deobf("curse.maven:timeless-and-classics-zero-1028108:6654541")
+    // implementation fg.deobf("curse.maven:configured-457570:5180900")
+    // implementation fg.deobf("curse.maven:timeless-and-classics-zero-1028108:6654541")
+    // implementation fg.deobf("curse.maven:entity-texture-features-fabric-568563:7249541")
+    // implementation fg.deobf("curse.maven:geckolib-388172:7025129")
+    // implementation fg.deobf("curse.maven:curios-309927:6418456")
+    // implementation fg.deobf("curse.maven:fracture-point-1207137:7215903")
 }
 
 tasks.withType(ProcessResources).configureEach {

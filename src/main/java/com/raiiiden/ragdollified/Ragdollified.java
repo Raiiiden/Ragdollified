@@ -1,6 +1,7 @@
 package com.raiiiden.ragdollified;
 
 import com.mojang.logging.LogUtils;
+import com.raiiiden.ragdollified.client.compat.ETFCompatibilityHelper;
 import com.raiiiden.ragdollified.command.SpawnRagdollCommand;
 import com.raiiiden.ragdollified.config.RagdollifiedConfig;
 import com.raiiiden.ragdollified.network.ModNetwork;
@@ -40,6 +41,7 @@ public class Ragdollified {
         event.enqueueWork(() -> {
             EntityRenderers.register(ModEntities.DEATH_RAGDOLL.get(), DeathRagdollRenderer::new);
             EntityRenderers.register(ModEntities.MOB_RAGDOLL.get(), MobRagdollRenderer::new);
+            ETFCompatibilityHelper.initialize();
         });
     }
     @SubscribeEvent
