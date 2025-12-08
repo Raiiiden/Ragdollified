@@ -6,6 +6,7 @@ import com.raiiiden.ragdollified.DeathRagdollEntity;
 import com.raiiiden.ragdollified.Ragdollified;
 import com.raiiiden.ragdollified.RagdollPart;
 import com.raiiiden.ragdollified.RagdollTransform;
+import com.raiiiden.ragdollified.client.compat.GeckoLibArmorHelper;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.model.HumanoidModel;
 import net.minecraft.client.model.PlayerModel;
@@ -16,12 +17,12 @@ import net.minecraft.client.renderer.MultiBufferSource;
 import net.minecraft.client.renderer.RenderType;
 import net.minecraft.client.renderer.entity.EntityRenderer;
 import net.minecraft.client.renderer.entity.EntityRendererProvider;
-import net.minecraft.client.renderer.entity.layers.HumanoidArmorLayer;
 import net.minecraft.client.renderer.texture.OverlayTexture;
 import net.minecraft.client.resources.DefaultPlayerSkin;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.item.ArmorItem;
+import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import org.joml.Quaternionf;
 import org.joml.Vector3f;
@@ -31,8 +32,6 @@ import java.util.UUID;
 public class DeathRagdollRenderer extends EntityRenderer<DeathRagdollEntity> {
     private final PlayerModel<AbstractClientPlayer> normalModel;
     private final PlayerModel<AbstractClientPlayer> slimModel;
-
-    // Armor models
     private final HumanoidModel<AbstractClientPlayer> normalArmorInner;
     private final HumanoidModel<AbstractClientPlayer> normalArmorOuter;
     private final HumanoidModel<AbstractClientPlayer> slimArmorInner;
@@ -61,25 +60,20 @@ public class DeathRagdollRenderer extends EntityRenderer<DeathRagdollEntity> {
         super(context);
         this.normalModel = new PlayerModel<>(context.bakeLayer(ModelLayers.PLAYER), false);
         this.slimModel = new PlayerModel<>(context.bakeLayer(ModelLayers.PLAYER_SLIM), true);
-
-        // Create armor models
         this.normalArmorInner = new HumanoidModel<>(context.bakeLayer(ModelLayers.PLAYER_INNER_ARMOR));
         this.normalArmorOuter = new HumanoidModel<>(context.bakeLayer(ModelLayers.PLAYER_OUTER_ARMOR));
         this.slimArmorInner = new HumanoidModel<>(context.bakeLayer(ModelLayers.PLAYER_INNER_ARMOR));
         this.slimArmorOuter = new HumanoidModel<>(context.bakeLayer(ModelLayers.PLAYER_OUTER_ARMOR));
 
-        Ragdollified.LOGGER.info("DeathRagdollRenderer created!");
+        Ragdollified.LOGGER.info("DeathRagdollRenderer created with " +
+                (GeckoLibArmorHelper.isGeckoLibAvailable() ? "GeckoLib" : "vanilla only") + " support");
     }
 
     @Override
     public void render(DeathRagdollEntity entity, float entityYaw, float partialTick,
                        PoseStack poseStack, MultiBufferSource buffer, int packedLight) {
-
         RagdollManager.ClientRagdoll rag = DeathRagdollManager.get(entity.getId());
-
-        if (rag == null || !rag.isActive()) {
-            return;
-        }
+        if (rag == null || !rag.isActive()) return;
 
         boolean isSlim = isSlimModel(entity);
         PlayerModel<AbstractClientPlayer> model = isSlim ? slimModel : normalModel;
@@ -94,14 +88,9 @@ public class DeathRagdollRenderer extends EntityRenderer<DeathRagdollEntity> {
         if (torso == null) return;
 
         poseStack.pushPose();
-
-        // Entity renderer already translates to entity position, so undo that
         poseStack.translate(-entity.getX(), -entity.getY(), -entity.getZ());
-
-        // Now translate to absolute torso world position from physics
         poseStack.translate(torso.position.x, torso.position.y, torso.position.z);
 
-        // Render player skin
         ResourceLocation skin = getTextureLocation(entity);
         VertexConsumer vertexConsumer = buffer.getBuffer(RenderType.entityTranslucent(skin));
 
@@ -112,124 +101,149 @@ public class DeathRagdollRenderer extends EntityRenderer<DeathRagdollEntity> {
         renderRagdollPart(poseStack, vertexConsumer, model.leftArm, larm, torso, larmoff, packedLight);
         renderRagdollPart(poseStack, vertexConsumer, model.rightArm, rarm, torso, rarmoff, packedLight);
 
-        // Render armor
-        renderArmor(entity, poseStack, buffer, packedLight, partialTick,
-                torso, head, larm, rarm, lleg, rleg, isSlim);
+        renderArmor(entity, poseStack, buffer, packedLight, partialTick, torso, head, larm, rarm, lleg, rleg, isSlim);
 
         poseStack.popPose();
     }
 
-    private void renderArmor(DeathRagdollEntity entity, PoseStack poseStack,
-                             MultiBufferSource buffer, int light, float partialTick,
-                             RagdollTransform torso, RagdollTransform head,
-                             RagdollTransform larm, RagdollTransform rarm,
-                             RagdollTransform lleg, RagdollTransform rleg,
-                             boolean isSlim) {
+    private void renderArmor(DeathRagdollEntity entity, PoseStack poseStack, MultiBufferSource buffer, int light, float partialTick,
+                             RagdollTransform torso, RagdollTransform head, RagdollTransform larm, RagdollTransform rarm,
+                             RagdollTransform lleg, RagdollTransform rleg, boolean isSlim) {
+        renderArmorPiece(entity.getHelmet(), EquipmentSlot.HEAD, entity, poseStack, buffer, light, partialTick, torso, head, larm, rarm, lleg, rleg, isSlim);
+        renderArmorPiece(entity.getChestplate(), EquipmentSlot.CHEST, entity, poseStack, buffer, light, partialTick, torso, head, larm, rarm, lleg, rleg, isSlim);
+        renderArmorPiece(entity.getLeggings(), EquipmentSlot.LEGS, entity, poseStack, buffer, light, partialTick, torso, head, larm, rarm, lleg, rleg, isSlim);
+        renderArmorPiece(entity.getBoots(), EquipmentSlot.FEET, entity, poseStack, buffer, light, partialTick, torso, head, larm, rarm, lleg, rleg, isSlim);
+    }
 
-        // --- THESE ARE THE MISSING LINES ---
-        // We must define the variables 'helmet', 'chestplate', etc. before using them.
-        // If your DeathRagdollEntity uses different method names, change .getHelmet() to match.
-        ItemStack helmet = entity.getHelmet();
-        ItemStack chestplate = entity.getChestplate();
-        ItemStack leggings = entity.getLeggings();
-        ItemStack boots = entity.getBoots();
-        // -----------------------------------
+    private void renderArmorPiece(ItemStack stack, EquipmentSlot slot, DeathRagdollEntity entity, PoseStack poseStack, MultiBufferSource buffer,
+                                  int light, float partialTick, RagdollTransform torso, RagdollTransform head, RagdollTransform larm,
+                                  RagdollTransform rarm, RagdollTransform lleg, RagdollTransform rleg, boolean isSlim) {
+        if (stack.isEmpty()) return;
+        Item item = stack.getItem();
 
+        if (GeckoLibArmorHelper.isGeckoLibArmor(item)) {
+            renderGeckoLibArmor(stack, slot, entity, poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg, isSlim);
+        } else if (item instanceof ArmorItem armorItem) {
+            renderVanillaArmor(stack, armorItem, slot, poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg, isSlim);
+        }
+    }
+
+    private void renderGeckoLibArmor(ItemStack stack, EquipmentSlot slot, DeathRagdollEntity entity, PoseStack poseStack,
+                                     MultiBufferSource buffer, int light, RagdollTransform torso, RagdollTransform head,
+                                     RagdollTransform larm, RagdollTransform rarm, RagdollTransform lleg, RagdollTransform rleg, boolean isSlim) {
+        HumanoidModel<AbstractClientPlayer> baseModel = isSlim ? slimArmorInner : normalArmorInner;
+
+        baseModel.setAllVisible(true);
+        baseModel.young = false;
+        baseModel.crouching = false;
+        baseModel.riding = false;
+
+        applyRagdollToModelPart(baseModel.head, head, torso, headoff);
+        applyRagdollToModelPart(baseModel.body, torso, torso, torsoff);
+        applyRagdollToModelPart(baseModel.leftArm, larm, torso, larmoff);
+        applyRagdollToModelPart(baseModel.rightArm, rarm, torso, rarmoff);
+        applyRagdollToModelPart(baseModel.leftLeg, lleg, torso, llegoff);
+        applyRagdollToModelPart(baseModel.rightLeg, rleg, torso, rlegoff);
+
+        GeckoLibArmorHelper.renderGeckoLibArmor(stack, slot, entity, poseStack, buffer, light, OverlayTexture.NO_OVERLAY, baseModel);
+    }
+
+    private void applyRagdollToModelPart(ModelPart part, RagdollTransform transform, RagdollTransform torso, Vector3f[] pivot) {
+        if (transform == null) {
+            part.setPos(pivot[0].x, pivot[0].y, pivot[0].z);
+            part.xRot = part.yRot = part.zRot = 0;
+            return;
+        }
+
+        Quaternionf torsoRot = new Quaternionf(torso.rotation.x, torso.rotation.y, torso.rotation.z, torso.rotation.w);
+        Quaternionf partRot = new Quaternionf(transform.rotation.x, transform.rotation.y, transform.rotation.z, transform.rotation.w);
+
+        Quaternionf relativeRot = new Quaternionf(torsoRot).conjugate().mul(partRot);
+        Vector3f angles = relativeRot.getEulerAnglesXYZ(new Vector3f());
+
+        part.xRot = -angles.x;
+        part.yRot = -angles.y;
+        part.zRot = angles.z;
+        part.setPos(pivot[0].x, pivot[0].y, pivot[0].z);
+    }
+
+    private void renderVanillaArmor(ItemStack stack, ArmorItem armorItem, EquipmentSlot slot, PoseStack poseStack, MultiBufferSource buffer,
+                                    int light, RagdollTransform torso, RagdollTransform head, RagdollTransform larm, RagdollTransform rarm,
+                                    RagdollTransform lleg, RagdollTransform rleg, boolean isSlim) {
         HumanoidModel<AbstractClientPlayer> innerModel = isSlim ? slimArmorInner : normalArmorInner;
         HumanoidModel<AbstractClientPlayer> outerModel = isSlim ? slimArmorOuter : normalArmorOuter;
+        ResourceLocation armorTexture = getArmorTexture(armorItem, slot);
 
-        // Render helmet
-        if (!helmet.isEmpty() && helmet.getItem() instanceof ArmorItem armorItem) {
-            ResourceLocation armorTexture = getArmorTexture(armorItem, EquipmentSlot.HEAD);
-            VertexConsumer vertexConsumer = buffer.getBuffer(RenderType.armorCutoutNoCull(armorTexture));
-
-            renderRagdollPart(poseStack, vertexConsumer, outerModel.head, head, torso, headoff, light);
-        }
-
-        // Render chestplate
-        if (!chestplate.isEmpty() && chestplate.getItem() instanceof ArmorItem armorItem) {
-            ResourceLocation armorTexture = getArmorTexture(armorItem, EquipmentSlot.CHEST);
-            VertexConsumer innerConsumer = buffer.getBuffer(RenderType.armorCutoutNoCull(armorTexture));
-
-            // Inner body
-            renderRagdollPart(poseStack, innerConsumer, innerModel.body, torso, torso, torsoff, light);
-            // Inner arms
-            renderRagdollPart(poseStack, innerConsumer, innerModel.leftArm, larm, torso, larmoff, light);
-            renderRagdollPart(poseStack, innerConsumer, innerModel.rightArm, rarm, torso, rarmoff, light);
-        }
-
-        // Render leggings
-        if (!leggings.isEmpty() && leggings.getItem() instanceof ArmorItem armorItem) {
-            ResourceLocation armorTexture = getArmorTexture(armorItem, EquipmentSlot.LEGS);
-            VertexConsumer innerConsumer = buffer.getBuffer(RenderType.armorCutoutNoCull(armorTexture));
-
-            // Inner body (for legs part of the armor model)
-            renderRagdollPart(poseStack, innerConsumer, innerModel.body, torso, torso, torsoff, light);
-            // Inner legs
-            renderRagdollPart(poseStack, innerConsumer, innerModel.leftLeg, lleg, torso, llegoff, light);
-            renderRagdollPart(poseStack, innerConsumer, innerModel.rightLeg, rleg, torso, rlegoff, light);
-        }
-
-        // Render boots
-        if (!boots.isEmpty() && boots.getItem() instanceof ArmorItem armorItem) {
-            ResourceLocation armorTexture = getArmorTexture(armorItem, EquipmentSlot.FEET);
-            VertexConsumer outerConsumer = buffer.getBuffer(RenderType.armorCutoutNoCull(armorTexture));
-
-            // Outer legs
-            renderRagdollPart(poseStack, outerConsumer, outerModel.leftLeg, lleg, torso, llegoff, light);
-            renderRagdollPart(poseStack, outerConsumer, outerModel.rightLeg, rleg, torso, rlegoff, light);
+        switch (slot) {
+            case HEAD:
+                VertexConsumer helmetConsumer = buffer.getBuffer(RenderType.armorCutoutNoCull(armorTexture));
+                renderRagdollPart(poseStack, helmetConsumer, outerModel.head, head, torso, headoff, light);
+                break;
+            case CHEST:
+                VertexConsumer chestConsumer = buffer.getBuffer(RenderType.armorCutoutNoCull(armorTexture));
+                renderRagdollPart(poseStack, chestConsumer, innerModel.body, torso, torso, torsoff, light);
+                renderRagdollPart(poseStack, chestConsumer, innerModel.leftArm, larm, torso, larmoff, light);
+                renderRagdollPart(poseStack, chestConsumer, innerModel.rightArm, rarm, torso, rarmoff, light);
+                break;
+            case LEGS:
+                VertexConsumer legsConsumer = buffer.getBuffer(RenderType.armorCutoutNoCull(armorTexture));
+                renderRagdollPart(poseStack, legsConsumer, innerModel.body, torso, torso, torsoff, light);
+                renderRagdollPart(poseStack, legsConsumer, innerModel.leftLeg, lleg, torso, llegoff, light);
+                renderRagdollPart(poseStack, legsConsumer, innerModel.rightLeg, rleg, torso, rlegoff, light);
+                break;
+            case FEET:
+                VertexConsumer bootsConsumer = buffer.getBuffer(RenderType.armorCutoutNoCull(armorTexture));
+                renderRagdollPart(poseStack, bootsConsumer, outerModel.leftLeg, lleg, torso, llegoff, light);
+                renderRagdollPart(poseStack, bootsConsumer, outerModel.rightLeg, rleg, torso, rlegoff, light);
+                break;
         }
     }
 
     private ResourceLocation getArmorTexture(ArmorItem item, EquipmentSlot slot) {
-        String texturePath = item.getArmorTexture(
-                new ItemStack(item),
-                null,
-                slot,
-                null
-        );
-
-        if (texturePath != null) {
-            // If the texture path already contains "textures/", it's a full path - use it directly
-            if (texturePath.contains("textures/")) {
-                return new ResourceLocation(texturePath);
+        try {
+            String texturePath = item.getArmorTexture(new ItemStack(item), null, slot, null);
+            if (texturePath != null && !texturePath.isEmpty()) {
+                try {
+                    return new ResourceLocation(texturePath);
+                } catch (Exception e) {
+                }
             }
-            // Otherwise it might be a namespace:path format, extract just the path
-            String[] parts = texturePath.split(":");
-            String actualPath = parts.length > 1 ? parts[1] : parts[0];
-            return new ResourceLocation(actualPath);
+
+            String materialName = item.getMaterial().getName();
+            if (materialName.contains(":")) {
+                materialName = materialName.substring(materialName.lastIndexOf(":") + 1);
+            }
+
+            materialName = switch (materialName.toLowerCase()) {
+                case "leather" -> "leather";
+                case "chainmail", "chain" -> "chainmail";
+                case "iron" -> "iron";
+                case "gold", "golden" -> "gold";
+                case "diamond" -> "diamond";
+                case "netherite" -> "netherite";
+                default -> materialName;
+            };
+
+            String layer = (slot == EquipmentSlot.LEGS) ? "layer_2" : "layer_1";
+            return new ResourceLocation("minecraft", "textures/models/armor/" + materialName + "_" + layer + ".png");
+        } catch (Exception e) {
+            Ragdollified.LOGGER.error("Failed to get armor texture for " + item.getDescriptionId(), e);
+            return new ResourceLocation("minecraft", "textures/models/armor/leather_layer_1.png");
         }
-
-        // Fallback: construct the path manually
-        String materialName = item.getMaterial().getName();
-
-        // Strip namespace if present (e.g., "fracturepoint:fracturepoint" → "fracturepoint")
-        if (materialName.contains(":")) {
-            materialName = materialName.split(":")[1];
-        }
-
-        String layer = (slot == EquipmentSlot.LEGS) ? "layer_2" : "layer_1";
-        return new ResourceLocation("minecraft", "textures/models/armor/" + materialName + "_" + layer + ".png");
     }
 
-    private void renderRagdollPart(PoseStack poseStack, VertexConsumer vertexConsumer,
-                                   ModelPart part, RagdollTransform transform,
+    private void renderRagdollPart(PoseStack poseStack, VertexConsumer vertexConsumer, ModelPart part, RagdollTransform transform,
                                    RagdollTransform torso, Vector3f[] pivot, int light) {
         if (transform == null) return;
 
         part.setPos(pivot[0].x, pivot[0].y, pivot[0].z);
         poseStack.pushPose();
 
-        Quaternionf torsoRot = new Quaternionf(
-                torso.rotation.x, torso.rotation.y, torso.rotation.z, torso.rotation.w
-        );
-
+        Quaternionf torsoRot = new Quaternionf(torso.rotation.x, torso.rotation.y, torso.rotation.z, torso.rotation.w);
         Vector3f rotatedPivot = new Vector3f(pivot[1]);
         torsoRot.transform(rotatedPivot);
 
-        Quaternionf q = new Quaternionf(
-                transform.rotation.x, transform.rotation.y, transform.rotation.z, transform.rotation.w
-        );
+        Quaternionf q = new Quaternionf(transform.rotation.x, transform.rotation.y, transform.rotation.z, transform.rotation.w);
 
         poseStack.translate(-rotatedPivot.x, -rotatedPivot.y, -rotatedPivot.z);
         q.rotateZ((float) Math.PI);

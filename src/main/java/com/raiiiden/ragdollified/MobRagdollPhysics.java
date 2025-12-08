@@ -44,6 +44,7 @@ public class MobRagdollPhysics {
 
     private final int networkRagdollId;
     private BlockPos lastCollisionCenter = BlockPos.ZERO;
+    private List<RigidBody> currentCachedBodies = null;
 
     public MobRagdollPhysics(MobRagdollEntity entity, JbulletWorld manager) {
         this.entity = entity;
@@ -62,42 +63,33 @@ public class MobRagdollPhysics {
     }
 
     public void update() {
-        // Run physics substeps for smoother simulation
-        int substeps = 2;
+        for (RigidBody r : ragdollParts) {
+            Vector3f vel = new Vector3f();
+            r.getLinearVelocity(vel);
 
-        for (int substep = 0; substep < substeps; substep++) {
-            // Apply forces and constraints
-            for (RigidBody r : ragdollParts) {
-                Vector3f vel = new Vector3f();
-                r.getLinearVelocity(vel);
-
-                if (vel.y < -80f) vel.y = -80f;
-
-                float speed = vel.length();
-                if (speed > 90f) {
-                    vel.scale(90f / speed);
-                }
+            if (vel.y < -80f) vel.y = -80f;
+            float speed = vel.length();
+            if (speed > 90f) {
+                vel.scale(90f / speed);
                 r.setLinearVelocity(vel);
-
-                Vector3f angVel = new Vector3f();
-                r.getAngularVelocity(angVel);
-                float angSpeed = angVel.length();
-                if (angSpeed > 8f) {
-                    angVel.scale(8f / angSpeed);
-                    r.setAngularVelocity(angVel);
-                }
             }
 
-            applyFluidForces();
-            applyPlayerCollisions();
-            checkCollisionsForParts();
-            correctInterpenetrations();
+            Vector3f angVel = new Vector3f();
+            r.getAngularVelocity(angVel);
+            float angSpeed = angVel.length();
+            if (angSpeed > 8f) {
+                angVel.scale(8f / angSpeed);
+                r.setAngularVelocity(angVel);
+            }
         }
 
-        // Update collision geometry once per tick (fix this; causing massive tps issue)
-        updateLocalWorldCollision();
+        applyFluidForces();
+        applyPlayerCollisions();
 
-        // Send network update with final state
+        checkCollisionsForParts();
+        updateLocalWorldCollision();
+        correctInterpenetrations();
+
         RagdollTransform[] transforms = getRagdollTransforms();
         int tick = ((ServerLevel) entity.level()).getServer().getTickCount();
         ModNetwork.CHANNEL.send(
@@ -503,48 +495,65 @@ public class MobRagdollPhysics {
             int numContacts = manifold.getNumContacts();
             for (int i = 0; i < numContacts; i++) {
                 ManifoldPoint point = manifold.getContactPoint(i);
-                if (point.getDistance() < -0.1f) {
+
+                // Only correct DEEP interpenetrations
+                if (point.getDistance() < -0.15f) {
                     RigidBody a = (RigidBody) manifold.getBody0();
                     RigidBody b = (RigidBody) manifold.getBody1();
 
-                    // Skip if both are parts of this ragdoll (internal collisions)
                     boolean aIsThisRagdoll = ragdollParts.contains(a);
                     boolean bIsThisRagdoll = ragdollParts.contains(b);
 
+                    // Skip internal collisions
                     if (aIsThisRagdoll && bIsThisRagdoll) {
-                        continue; // Don't correct internal ragdoll collisions
+                        continue;
                     }
+
+                    boolean bothDynamic = (a.getInvMass() > 0 && b.getInvMass() > 0);
 
                     ignoreNext = true;
 
                     Vector3f normal = new Vector3f(point.normalWorldOnB);
-                    normal.scale(4.5f * Math.abs(point.getDistance()));
+                    float depth = Math.abs(point.getDistance());
+
+                    // Much more conservative correction
+                    float maxCorrectionPerTick = 0.2f; // Reduced from 0.3f
+                    float actualCorrection = Math.min(depth * 1.5f, maxCorrectionPerTick); // Reduced multiplier from 2.0f
+
+                    // For ragdoll-ragdoll, MUCH gentler
+                    if (bothDynamic) {
+                        actualCorrection *= 0.15f; // Reduced from 0.3f (only 2.25% of normal correction!)
+                    }
+
+                    normal.scale(actualCorrection);
 
                     if (a.getInvMass() > 0) a.translate(normal);
                     normal.scale(-1);
                     if (b.getInvMass() > 0) b.translate(normal);
 
-                    // Keep the velocity dampening
+                    // Much stronger dampening for ragdoll-ragdoll
+                    float dampFactor = bothDynamic ? 0.92f : 0.5f; // Increased from 0.85f
+
                     if (a.getInvMass() > 0) {
                         Vector3f vel = new Vector3f();
                         a.getLinearVelocity(vel);
-                        vel.scale(0.5f);
+                        vel.scale(dampFactor);
                         a.setLinearVelocity(vel);
 
                         Vector3f angVel = new Vector3f();
                         a.getAngularVelocity(angVel);
-                        angVel.scale(0.5f);
+                        angVel.scale(dampFactor);
                         a.setAngularVelocity(angVel);
                     }
                     if (b.getInvMass() > 0) {
                         Vector3f vel = new Vector3f();
                         b.getLinearVelocity(vel);
-                        vel.scale(0.5f);
+                        vel.scale(dampFactor);
                         b.setLinearVelocity(vel);
 
                         Vector3f angVel = new Vector3f();
                         b.getAngularVelocity(angVel);
-                        angVel.scale(0.5f);
+                        angVel.scale(dampFactor);
                         b.setAngularVelocity(angVel);
                     }
                 }
@@ -556,46 +565,61 @@ public class MobRagdollPhysics {
         Vector3f torsoPos = getTorsoPosition();
         BlockPos center = new BlockPos((int) torsoPos.x, (int) torsoPos.y, (int) torsoPos.z);
 
-        if (center.distManhattan(lastCollisionCenter) < 2) return;
+        if (center.equals(lastCollisionCenter)) return; // Use equals instead of distManhattan
+
+        // Release old collision geometry
+        if (currentCachedBodies != null && !lastCollisionCenter.equals(BlockPos.ZERO)) {
+            manager.releaseCollisionGeometry(lastCollisionCenter);
+            for (CollisionObject c : localStaticCollision) {
+                world.removeRigidBody((RigidBody) c);
+            }
+            localStaticCollision.clear();
+        }
+
         lastCollisionCenter = center;
 
-        for (CollisionObject c : localStaticCollision) world.removeCollisionObject(c);
-        localStaticCollision.clear();
+        // Get or create collision geometry (cached if other ragdolls nearby)
+        currentCachedBodies = manager.getOrCreateCollisionGeometry(center, () -> {
+            List<RigidBody> newBodies = new ArrayList<>();
+            int radius = 3;
+            for (int dx = -radius; dx <= radius; dx++)
+                for (int dy = -radius; dy <= radius; dy++)
+                    for (int dz = -radius; dz <= radius; dz++) {
+                        BlockPos pos = center.offset(dx, dy, dz);
+                        BlockState state = entity.level().getBlockState(pos);
+                        if (state.isAir() || state.getFluidState().isSource()) continue;
+                        if (isCompletelySurrounded(pos)) continue;
 
-        int radius = 3;
-        for (int dx = -radius; dx <= radius; dx++)
-            for (int dy = -radius; dy <= radius; dy++)
-                for (int dz = -radius; dz <= radius; dz++) {
-                    BlockPos pos = center.offset(dx, dy, dz);
-                    BlockState state = entity.level().getBlockState(pos);
-                    if (state.isAir() || state.getFluidState().isSource()) continue;
-                    if (isCompletelySurrounded(pos)) continue;
+                        VoxelShape shape = state.getCollisionShape(entity.level(), pos);
+                        if (shape.isEmpty()) continue;
 
-                    VoxelShape shape = state.getCollisionShape(entity.level(), pos);
-                    if (shape.isEmpty()) continue;
+                        for (AABB box : shape.toAabbs()) {
+                            Vector3f halfExtents = new Vector3f(
+                                    (float) (box.getXsize() / 2),
+                                    (float) (box.getYsize() / 2),
+                                    (float) (box.getZsize() / 2)
+                            );
+                            CollisionShape cs = new BoxShape(halfExtents);
 
-                    for (AABB box : shape.toAabbs()) {
-                        Vector3f halfExtents = new Vector3f(
-                                (float) (box.getXsize() / 2),
-                                (float) (box.getYsize() / 2),
-                                (float) (box.getZsize() / 2)
-                        );
-                        CollisionShape cs = new BoxShape(halfExtents);
+                            Transform t = new Transform();
+                            t.setIdentity();
+                            t.origin.set(
+                                    (float) (pos.getX() + box.minX + box.getXsize() / 2),
+                                    (float) (pos.getY() + box.minY + box.getYsize() / 2),
+                                    (float) (pos.getZ() + box.minZ + box.getZsize() / 2)
+                            );
 
-                        Transform t = new Transform();
-                        t.setIdentity();
-                        t.origin.set(
-                                (float) (pos.getX() + box.minX + box.getXsize() / 2),
-                                (float) (pos.getY() + box.minY + box.getYsize() / 2),
-                                (float) (pos.getZ() + box.minZ + box.getZsize() / 2)
-                        );
-
-                        RigidBody rb = new RigidBody(new RigidBodyConstructionInfo(0f, new DefaultMotionState(t), cs, new Vector3f()));
-                        rb.setCollisionFlags(rb.getCollisionFlags() | CollisionFlags.STATIC_OBJECT);
-                        world.addRigidBody(rb);
-                        localStaticCollision.add(rb);
+                            RigidBody rb = new RigidBody(new RigidBodyConstructionInfo(
+                                    0f, new DefaultMotionState(t), cs, new Vector3f()));
+                            rb.setCollisionFlags(rb.getCollisionFlags() | CollisionFlags.STATIC_OBJECT);
+                            world.addRigidBody(rb);
+                            newBodies.add(rb);
+                        }
                     }
-                }
+            return newBodies;
+        });
+
+        localStaticCollision.addAll(currentCachedBodies);
     }
 
     private boolean isCompletelySurrounded(BlockPos pos) {
@@ -758,15 +782,21 @@ public class MobRagdollPhysics {
         }
     }
     public void destroy() {
+        // Release cached collision geometry
+        if (currentCachedBodies != null && !lastCollisionCenter.equals(BlockPos.ZERO)) {
+            manager.releaseCollisionGeometry(lastCollisionCenter);
+            for (CollisionObject c : localStaticCollision) {
+                world.removeRigidBody((RigidBody) c);
+            }
+        }
+
         for (RigidBody r : ragdollParts) {
             world.removeRigidBody(r);
         }
         for (TypedConstraint c : ragdollJoints) {
             world.removeConstraint(c);
         }
-        for (CollisionObject co : localStaticCollision) {
-            world.removeCollisionObject(co);
-        }
+
         ragdollParts.clear();
         ragdollJoints.clear();
         localStaticCollision.clear();

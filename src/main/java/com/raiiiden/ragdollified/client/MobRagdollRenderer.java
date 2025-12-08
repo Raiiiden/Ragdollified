@@ -12,6 +12,8 @@ import net.minecraft.client.model.SkeletonModel;
 import net.minecraft.client.model.CreeperModel;
 import net.minecraft.client.model.geom.ModelLayers;
 import net.minecraft.client.model.geom.ModelPart;
+import net.minecraft.client.model.geom.builders.CubeDeformation;
+import net.minecraft.client.model.geom.builders.LayerDefinition;
 import net.minecraft.client.renderer.MultiBufferSource;
 import net.minecraft.client.renderer.RenderType;
 import net.minecraft.client.renderer.entity.EntityRenderer;
@@ -25,9 +27,10 @@ import org.joml.Quaternionf;
 import org.joml.Vector3f;
 
 public class MobRagdollRenderer extends EntityRenderer<MobRagdollEntity> {
-    private final ZombieModel<?> zombieModel;
-    private final SkeletonModel<?> skeletonModel;
-    private final CreeperModel<?> creeperModel;
+    // VANILLA MODELS - Created fresh from LayerDefinitions to avoid EMF modifications
+    private final ZombieModel<?> vanillaZombieModel;
+    private final SkeletonModel<?> vanillaSkeletonModel;
+    private final CreeperModel<?> vanillaCreeperModel;
 
     // Armor models for humanoid mobs
     private final HumanoidModel<?> armorInner;
@@ -54,9 +57,28 @@ public class MobRagdollRenderer extends EntityRenderer<MobRagdollEntity> {
 
     public MobRagdollRenderer(EntityRendererProvider.Context context) {
         super(context);
-        this.zombieModel = new ZombieModel<>(context.bakeLayer(ModelLayers.ZOMBIE));
-        this.skeletonModel = new SkeletonModel<>(context.bakeLayer(ModelLayers.SKELETON));
-        this.creeperModel = new CreeperModel<>(context.bakeLayer(ModelLayers.CREEPER));
+
+        // CREATE VANILLA MODELS DIRECTLY FROM LAYER DEFINITIONS
+        // This bypasses any EMF modifications
+        try {
+            // Zombie/Skeleton use HumanoidModel.createMesh (they extend HumanoidModel)
+            LayerDefinition humanoidDef = LayerDefinition.create(
+                    HumanoidModel.createMesh(CubeDeformation.NONE, 0.0F), 64, 64
+            );
+
+            // Creeper has its own createBodyLayer that requires CubeDeformation
+            LayerDefinition creeperDef = CreeperModel.createBodyLayer(CubeDeformation.NONE);
+
+            // Create models from definitions (pure vanilla, no EMF)
+            this.vanillaZombieModel = new ZombieModel<>(humanoidDef.bakeRoot());
+            this.vanillaSkeletonModel = new SkeletonModel<>(humanoidDef.bakeRoot());
+            this.vanillaCreeperModel = new CreeperModel<>(creeperDef.bakeRoot());
+
+            Ragdollified.LOGGER.info("Successfully created vanilla models for ragdolls (bypassing EMF)");
+        } catch (Exception e) {
+            Ragdollified.LOGGER.error("Failed to create vanilla models directly", e);
+            throw new RuntimeException("Could not initialize ragdoll renderer", e);
+        }
 
         // Create armor models for humanoid mobs
         this.armorInner = new HumanoidModel<>(context.bakeLayer(ModelLayers.PLAYER_INNER_ARMOR));
@@ -105,12 +127,13 @@ public class MobRagdollRenderer extends EntityRenderer<MobRagdollEntity> {
         ResourceLocation texture = getTextureLocation(entity);
         VertexConsumer vertexConsumer = buffer.getBuffer(RenderType.entityCutoutNoCull(texture));
 
-        renderHumanoidPart(poseStack, vertexConsumer, zombieModel.body, torso, torso, torsoff, light);
-        renderHumanoidPart(poseStack, vertexConsumer, zombieModel.head, head, torso, headoff, light);
-        renderHumanoidPart(poseStack, vertexConsumer, zombieModel.leftLeg, lleg, torso, llegoff, light);
-        renderHumanoidPart(poseStack, vertexConsumer, zombieModel.rightLeg, rleg, torso, rlegoff, light);
-        renderHumanoidPart(poseStack, vertexConsumer, zombieModel.leftArm, larm, torso, larmoff, light);
-        renderHumanoidPart(poseStack, vertexConsumer, zombieModel.rightArm, rarm, torso, rarmoff, light);
+        // Use vanilla model (never touched by EMF)
+        renderHumanoidPart(poseStack, vertexConsumer, vanillaZombieModel.body, torso, torso, torsoff, light);
+        renderHumanoidPart(poseStack, vertexConsumer, vanillaZombieModel.head, head, torso, headoff, light);
+        renderHumanoidPart(poseStack, vertexConsumer, vanillaZombieModel.leftLeg, lleg, torso, llegoff, light);
+        renderHumanoidPart(poseStack, vertexConsumer, vanillaZombieModel.rightLeg, rleg, torso, rlegoff, light);
+        renderHumanoidPart(poseStack, vertexConsumer, vanillaZombieModel.leftArm, larm, torso, larmoff, light);
+        renderHumanoidPart(poseStack, vertexConsumer, vanillaZombieModel.rightArm, rarm, torso, rarmoff, light);
 
         // Render armor
         renderArmor(entity, poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg);
@@ -139,12 +162,13 @@ public class MobRagdollRenderer extends EntityRenderer<MobRagdollEntity> {
         ResourceLocation texture = getTextureLocation(entity);
         VertexConsumer vertexConsumer = buffer.getBuffer(RenderType.entityCutoutNoCull(texture));
 
-        renderHumanoidPart(poseStack, vertexConsumer, skeletonModel.body, torso, torso, torsoff, light);
-        renderHumanoidPart(poseStack, vertexConsumer, skeletonModel.head, head, torso, headoff, light);
-        renderHumanoidPart(poseStack, vertexConsumer, skeletonModel.leftLeg, lleg, torso, llegoff, light);
-        renderHumanoidPart(poseStack, vertexConsumer, skeletonModel.rightLeg, rleg, torso, rlegoff, light);
-        renderHumanoidPart(poseStack, vertexConsumer, skeletonModel.leftArm, larm, torso, larmoff, light);
-        renderHumanoidPart(poseStack, vertexConsumer, skeletonModel.rightArm, rarm, torso, rarmoff, light);
+        // Use vanilla model (never touched by EMF)
+        renderHumanoidPart(poseStack, vertexConsumer, vanillaSkeletonModel.body, torso, torso, torsoff, light);
+        renderHumanoidPart(poseStack, vertexConsumer, vanillaSkeletonModel.head, head, torso, headoff, light);
+        renderHumanoidPart(poseStack, vertexConsumer, vanillaSkeletonModel.leftLeg, lleg, torso, llegoff, light);
+        renderHumanoidPart(poseStack, vertexConsumer, vanillaSkeletonModel.rightLeg, rleg, torso, rlegoff, light);
+        renderHumanoidPart(poseStack, vertexConsumer, vanillaSkeletonModel.leftArm, larm, torso, larmoff, light);
+        renderHumanoidPart(poseStack, vertexConsumer, vanillaSkeletonModel.rightArm, rarm, torso, rarmoff, light);
 
         // Render armor
         renderArmor(entity, poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg);
@@ -173,7 +197,8 @@ public class MobRagdollRenderer extends EntityRenderer<MobRagdollEntity> {
         ResourceLocation texture = getTextureLocation(entity);
         VertexConsumer vertexConsumer = buffer.getBuffer(RenderType.entityCutoutNoCull(texture));
 
-        ModelPart root = creeperModel.root();
+        // Use vanilla model (never touched by EMF)
+        ModelPart root = vanillaCreeperModel.root();
         ModelPart body       = root.getChild("body");
         ModelPart headPart   = root.getChild("head");
         ModelPart rightHind  = root.getChild("right_hind_leg");
@@ -187,8 +212,6 @@ public class MobRagdollRenderer extends EntityRenderer<MobRagdollEntity> {
         renderHumanoidPart(poseStack, vertexConsumer, rightHind, rightHindT, torso, rlegoff, light);
         renderHumanoidPart(poseStack, vertexConsumer, leftFront,  leftFrontT,  torso, llegoff, light);
         renderHumanoidPart(poseStack, vertexConsumer, rightFront, rightFrontT, torso, rlegoff, light);
-
-        // Creepers don't wear armor, so no armor rendering, I will do the same for other non-armor wearing mobs
 
         poseStack.popPose();
     }
