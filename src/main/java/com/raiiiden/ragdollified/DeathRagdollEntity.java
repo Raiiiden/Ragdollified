@@ -153,7 +153,6 @@ public class DeathRagdollEntity extends Entity {
         return physics;
     }
 
-    // 5. UPDATE GETTERS TO USE SYNCED DATA
     // The renderer calls these on the client, and now they will have data!
     public ItemStack getHelmet() { return entityData.get(HEAD_SLOT); }
     public ItemStack getChestplate() { return entityData.get(CHEST_SLOT); }

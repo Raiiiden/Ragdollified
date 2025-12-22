@@ -24,6 +24,7 @@ public class PhysicsHooks {
         if (event.phase == TickEvent.Phase.END && event.level instanceof ServerLevel level) {
             JbulletWorld manager = JbulletWorld.get(level);
             manager.step(1f / 20f);
+            ServerMobPoseCache.cleanup();
         }
     }
 
@@ -53,10 +54,8 @@ public class PhysicsHooks {
         // Handle mob deaths - SERVER SIDE ONLY
         else if (shouldCreateMobRagdoll(entity) && !entity.level().isClientSide) {
             if (entity.level() instanceof ServerLevel serverLevel) {
-                // Make mob invisible before removing
                 entity.setInvisible(true);
 
-                // Check max ragdolls
                 List<MobRagdollEntity> existingMobRagdolls = serverLevel
                         .getEntitiesOfClass(MobRagdollEntity.class,
                                 new AABB(entity.blockPosition()).inflate(10000));
@@ -69,9 +68,13 @@ public class PhysicsHooks {
                             .ifPresent(oldest -> oldest.discard());
                 }
 
-                // NO DELAY - Create ragdoll immediately
-                // Client will look up texture from its cache using original mob ID
-                MobRagdollEntity mobRagdoll = MobRagdollEntity.createFromMob(entity.level(), entity);
+                // Pass damage source and amount for velocity calculation
+                MobRagdollEntity mobRagdoll = MobRagdollEntity.createFromMob(
+                        entity.level(),
+                        entity,
+                        event.getSource(),
+                        entity.getMaxHealth() // Use max health as damage estimate
+                );
                 entity.level().addFreshEntity(mobRagdoll);
             }
         }

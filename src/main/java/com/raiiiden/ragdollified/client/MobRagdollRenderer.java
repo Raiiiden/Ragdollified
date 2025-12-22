@@ -2,6 +2,7 @@ package com.raiiiden.ragdollified.client;
 
 import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.blaze3d.vertex.VertexConsumer;
+import com.raiiiden.ragdollified.MobPoseCapture;
 import com.raiiiden.ragdollified.MobRagdollEntity;
 import com.raiiiden.ragdollified.Ragdollified;
 import com.raiiiden.ragdollified.RagdollPart;
@@ -27,12 +28,9 @@ import org.joml.Quaternionf;
 import org.joml.Vector3f;
 
 public class MobRagdollRenderer extends EntityRenderer<MobRagdollEntity> {
-    // VANILLA MODELS - Created fresh from LayerDefinitions to avoid EMF modifications
     private final ZombieModel<?> vanillaZombieModel;
     private final SkeletonModel<?> vanillaSkeletonModel;
     private final CreeperModel<?> vanillaCreeperModel;
-
-    // Armor models for humanoid mobs
     private final HumanoidModel<?> armorInner;
     private final HumanoidModel<?> armorOuter;
 
@@ -58,20 +56,20 @@ public class MobRagdollRenderer extends EntityRenderer<MobRagdollEntity> {
     public MobRagdollRenderer(EntityRendererProvider.Context context) {
         super(context);
 
-        // CREATE VANILLA MODELS DIRECTLY FROM LAYER DEFINITIONS
-        // This bypasses any EMF modifications
         try {
-            // Zombie/Skeleton use HumanoidModel.createMesh (they extend HumanoidModel)
+            // Zombie uses humanoid mesh (64x64)
             LayerDefinition humanoidDef = LayerDefinition.create(
                     HumanoidModel.createMesh(CubeDeformation.NONE, 0.0F), 64, 64
             );
 
-            // Creeper has its own createBodyLayer that requires CubeDeformation
+            // Skeleton must use its own layer (64x32, thin limbs)
+            LayerDefinition skeletonDef = SkeletonModel.createBodyLayer();
+
+            // Creeper uses its own layer
             LayerDefinition creeperDef = CreeperModel.createBodyLayer(CubeDeformation.NONE);
 
-            // Create models from definitions (pure vanilla, no EMF)
             this.vanillaZombieModel = new ZombieModel<>(humanoidDef.bakeRoot());
-            this.vanillaSkeletonModel = new SkeletonModel<>(humanoidDef.bakeRoot());
+            this.vanillaSkeletonModel = new SkeletonModel<>(skeletonDef.bakeRoot());
             this.vanillaCreeperModel = new CreeperModel<>(creeperDef.bakeRoot());
 
             Ragdollified.LOGGER.info("Successfully created vanilla models for ragdolls (bypassing EMF)");
@@ -80,11 +78,10 @@ public class MobRagdollRenderer extends EntityRenderer<MobRagdollEntity> {
             throw new RuntimeException("Could not initialize ragdoll renderer", e);
         }
 
-        // Create armor models for humanoid mobs
         this.armorInner = new HumanoidModel<>(context.bakeLayer(ModelLayers.PLAYER_INNER_ARMOR));
         this.armorOuter = new HumanoidModel<>(context.bakeLayer(ModelLayers.PLAYER_OUTER_ARMOR));
     }
-
+    
     @Override
     public void render(MobRagdollEntity entity, float entityYaw, float partialTick,
                        PoseStack poseStack, MultiBufferSource buffer, int packedLight) {
@@ -93,6 +90,16 @@ public class MobRagdollRenderer extends EntityRenderer<MobRagdollEntity> {
 
         if (rag == null || !rag.isActive()) {
             return;
+        }
+
+        if (entity.getCapturedPose() == null && entity.tickCount < 20) {
+            MobPoseCapture.MobPose capturedPose = MobPoseCapture.getPose(entity.getOriginalMobId());
+
+            if (capturedPose != null) {
+                entity.setCapturedPose(capturedPose);
+                Ragdollified.LOGGER.debug("Captured pose for mob {} -> ragdoll {} on tick {}",
+                        entity.getOriginalMobId(), entity.getId(), entity.tickCount);
+            }
         }
 
         String mobType = entity.getMobType();
@@ -123,19 +130,16 @@ public class MobRagdollRenderer extends EntityRenderer<MobRagdollEntity> {
         poseStack.translate(-entity.getX(), -entity.getY(), -entity.getZ());
         poseStack.translate(torso.position.x, torso.position.y, torso.position.z);
 
-        // Render mob skin
         ResourceLocation texture = getTextureLocation(entity);
         VertexConsumer vertexConsumer = buffer.getBuffer(RenderType.entityCutoutNoCull(texture));
 
-        // Use vanilla model (never touched by EMF)
-        renderHumanoidPart(poseStack, vertexConsumer, vanillaZombieModel.body, torso, torso, torsoff, light);
-        renderHumanoidPart(poseStack, vertexConsumer, vanillaZombieModel.head, head, torso, headoff, light);
-        renderHumanoidPart(poseStack, vertexConsumer, vanillaZombieModel.leftLeg, lleg, torso, llegoff, light);
-        renderHumanoidPart(poseStack, vertexConsumer, vanillaZombieModel.rightLeg, rleg, torso, rlegoff, light);
-        renderHumanoidPart(poseStack, vertexConsumer, vanillaZombieModel.leftArm, larm, torso, larmoff, light);
-        renderHumanoidPart(poseStack, vertexConsumer, vanillaZombieModel.rightArm, rarm, torso, rarmoff, light);
+        renderHumanoidPart(poseStack, vertexConsumer, vanillaZombieModel.body, torso, torso, torsoff, light, entity, RagdollPart.TORSO);
+        renderHumanoidPart(poseStack, vertexConsumer, vanillaZombieModel.head, head, torso, headoff, light, entity, RagdollPart.HEAD);
+        renderHumanoidPart(poseStack, vertexConsumer, vanillaZombieModel.leftLeg, lleg, torso, llegoff, light, entity, RagdollPart.LEFT_LEG);
+        renderHumanoidPart(poseStack, vertexConsumer, vanillaZombieModel.rightLeg, rleg, torso, rlegoff, light, entity, RagdollPart.RIGHT_LEG);
+        renderHumanoidPart(poseStack, vertexConsumer, vanillaZombieModel.leftArm, larm, torso, larmoff, light, entity, RagdollPart.LEFT_ARM);
+        renderHumanoidPart(poseStack, vertexConsumer, vanillaZombieModel.rightArm, rarm, torso, rarmoff, light, entity, RagdollPart.RIGHT_ARM);
 
-        // Render armor
         renderArmor(entity, poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg);
 
         poseStack.popPose();
@@ -158,19 +162,16 @@ public class MobRagdollRenderer extends EntityRenderer<MobRagdollEntity> {
         poseStack.translate(-entity.getX(), -entity.getY(), -entity.getZ());
         poseStack.translate(torso.position.x, torso.position.y, torso.position.z);
 
-        // Render mob skin
         ResourceLocation texture = getTextureLocation(entity);
         VertexConsumer vertexConsumer = buffer.getBuffer(RenderType.entityCutoutNoCull(texture));
 
-        // Use vanilla model (never touched by EMF)
-        renderHumanoidPart(poseStack, vertexConsumer, vanillaSkeletonModel.body, torso, torso, torsoff, light);
-        renderHumanoidPart(poseStack, vertexConsumer, vanillaSkeletonModel.head, head, torso, headoff, light);
-        renderHumanoidPart(poseStack, vertexConsumer, vanillaSkeletonModel.leftLeg, lleg, torso, llegoff, light);
-        renderHumanoidPart(poseStack, vertexConsumer, vanillaSkeletonModel.rightLeg, rleg, torso, rlegoff, light);
-        renderHumanoidPart(poseStack, vertexConsumer, vanillaSkeletonModel.leftArm, larm, torso, larmoff, light);
-        renderHumanoidPart(poseStack, vertexConsumer, vanillaSkeletonModel.rightArm, rarm, torso, rarmoff, light);
+        renderHumanoidPart(poseStack, vertexConsumer, vanillaSkeletonModel.body, torso, torso, torsoff, light, entity, RagdollPart.TORSO);
+        renderHumanoidPart(poseStack, vertexConsumer, vanillaSkeletonModel.head, head, torso, headoff, light, entity, RagdollPart.HEAD);
+        renderHumanoidPart(poseStack, vertexConsumer, vanillaSkeletonModel.leftLeg, lleg, torso, llegoff, light, entity, RagdollPart.LEFT_LEG);
+        renderHumanoidPart(poseStack, vertexConsumer, vanillaSkeletonModel.rightLeg, rleg, torso, rlegoff, light, entity, RagdollPart.RIGHT_LEG);
+        renderHumanoidPart(poseStack, vertexConsumer, vanillaSkeletonModel.leftArm, larm, torso, larmoff, light, entity, RagdollPart.LEFT_ARM);
+        renderHumanoidPart(poseStack, vertexConsumer, vanillaSkeletonModel.rightArm, rarm, torso, rarmoff, light, entity, RagdollPart.RIGHT_ARM);
 
-        // Render armor
         renderArmor(entity, poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg);
 
         poseStack.popPose();
@@ -182,7 +183,6 @@ public class MobRagdollRenderer extends EntityRenderer<MobRagdollEntity> {
 
         RagdollTransform torso = rag.getPartInterpolated(RagdollPart.TORSO, partialTick);
         RagdollTransform head  = rag.getPartInterpolated(RagdollPart.HEAD, partialTick);
-
         RagdollTransform leftFrontT  = rag.getPartInterpolated(RagdollPart.LEFT_ARM, partialTick);
         RagdollTransform rightFrontT = rag.getPartInterpolated(RagdollPart.RIGHT_ARM, partialTick);
         RagdollTransform leftHindT   = rag.getPartInterpolated(RagdollPart.LEFT_LEG, partialTick);
@@ -197,7 +197,6 @@ public class MobRagdollRenderer extends EntityRenderer<MobRagdollEntity> {
         ResourceLocation texture = getTextureLocation(entity);
         VertexConsumer vertexConsumer = buffer.getBuffer(RenderType.entityCutoutNoCull(texture));
 
-        // Use vanilla model (never touched by EMF)
         ModelPart root = vanillaCreeperModel.root();
         ModelPart body       = root.getChild("body");
         ModelPart headPart   = root.getChild("head");
@@ -206,12 +205,12 @@ public class MobRagdollRenderer extends EntityRenderer<MobRagdollEntity> {
         ModelPart rightFront = root.getChild("right_front_leg");
         ModelPart leftFront  = root.getChild("left_front_leg");
 
-        renderHumanoidPart(poseStack, vertexConsumer, body, torso, torso, torsoff, light);
-        renderHumanoidPart(poseStack, vertexConsumer, headPart, head, torso, headoff, light);
-        renderHumanoidPart(poseStack, vertexConsumer, leftHind,  leftHindT,  torso, llegoff, light);
-        renderHumanoidPart(poseStack, vertexConsumer, rightHind, rightHindT, torso, rlegoff, light);
-        renderHumanoidPart(poseStack, vertexConsumer, leftFront,  leftFrontT,  torso, llegoff, light);
-        renderHumanoidPart(poseStack, vertexConsumer, rightFront, rightFrontT, torso, rlegoff, light);
+        renderHumanoidPart(poseStack, vertexConsumer, body, torso, torso, torsoff, light, entity, RagdollPart.TORSO);
+        renderHumanoidPart(poseStack, vertexConsumer, headPart, head, torso, headoff, light, entity, RagdollPart.HEAD);
+        renderHumanoidPart(poseStack, vertexConsumer, leftHind, leftHindT, torso, llegoff, light, entity, RagdollPart.LEFT_LEG);
+        renderHumanoidPart(poseStack, vertexConsumer, rightHind, rightHindT, torso, rlegoff, light, entity, RagdollPart.RIGHT_LEG);
+        renderHumanoidPart(poseStack, vertexConsumer, leftFront, leftFrontT, torso, llegoff, light, entity, RagdollPart.LEFT_ARM);
+        renderHumanoidPart(poseStack, vertexConsumer, rightFront, rightFrontT, torso, rlegoff, light, entity, RagdollPart.RIGHT_ARM);
 
         poseStack.popPose();
     }
@@ -227,40 +226,36 @@ public class MobRagdollRenderer extends EntityRenderer<MobRagdollEntity> {
         ItemStack leggings = entity.getLeggings();
         ItemStack boots = entity.getBoots();
 
-        // Render helmet
         if (!helmet.isEmpty() && helmet.getItem() instanceof ArmorItem armorItem) {
             ResourceLocation armorTexture = getArmorTexture(armorItem, EquipmentSlot.HEAD);
             VertexConsumer vertexConsumer = buffer.getBuffer(RenderType.armorCutoutNoCull(armorTexture));
-            renderHumanoidPart(poseStack, vertexConsumer, armorOuter.head, head, torso, headoff, light);
+            renderHumanoidPart(poseStack, vertexConsumer, armorOuter.head, head, torso, headoff, light, entity, RagdollPart.HEAD);
         }
 
-        // Render chestplate
         if (!chestplate.isEmpty() && chestplate.getItem() instanceof ArmorItem armorItem) {
             ResourceLocation armorTexture = getArmorTexture(armorItem, EquipmentSlot.CHEST);
             VertexConsumer innerConsumer = buffer.getBuffer(RenderType.armorCutoutNoCull(armorTexture));
 
-            renderHumanoidPart(poseStack, innerConsumer, armorInner.body, torso, torso, torsoff, light);
-            renderHumanoidPart(poseStack, innerConsumer, armorInner.leftArm, larm, torso, larmoff, light);
-            renderHumanoidPart(poseStack, innerConsumer, armorInner.rightArm, rarm, torso, rarmoff, light);
+            renderHumanoidPart(poseStack, innerConsumer, armorInner.body, torso, torso, torsoff, light, entity, RagdollPart.TORSO);
+            renderHumanoidPart(poseStack, innerConsumer, armorInner.leftArm, larm, torso, larmoff, light, entity, RagdollPart.LEFT_ARM);
+            renderHumanoidPart(poseStack, innerConsumer, armorInner.rightArm, rarm, torso, rarmoff, light, entity, RagdollPart.RIGHT_ARM);
         }
 
-        // Render leggings
         if (!leggings.isEmpty() && leggings.getItem() instanceof ArmorItem armorItem) {
             ResourceLocation armorTexture = getArmorTexture(armorItem, EquipmentSlot.LEGS);
             VertexConsumer innerConsumer = buffer.getBuffer(RenderType.armorCutoutNoCull(armorTexture));
 
-            renderHumanoidPart(poseStack, innerConsumer, armorInner.body, torso, torso, torsoff, light);
-            renderHumanoidPart(poseStack, innerConsumer, armorInner.leftLeg, lleg, torso, llegoff, light);
-            renderHumanoidPart(poseStack, innerConsumer, armorInner.rightLeg, rleg, torso, rlegoff, light);
+            renderHumanoidPart(poseStack, innerConsumer, armorInner.body, torso, torso, torsoff, light, entity, RagdollPart.TORSO);
+            renderHumanoidPart(poseStack, innerConsumer, armorInner.leftLeg, lleg, torso, llegoff, light, entity, RagdollPart.LEFT_LEG);
+            renderHumanoidPart(poseStack, innerConsumer, armorInner.rightLeg, rleg, torso, rlegoff, light, entity, RagdollPart.RIGHT_LEG);
         }
 
-        // Render boots
         if (!boots.isEmpty() && boots.getItem() instanceof ArmorItem armorItem) {
             ResourceLocation armorTexture = getArmorTexture(armorItem, EquipmentSlot.FEET);
             VertexConsumer outerConsumer = buffer.getBuffer(RenderType.armorCutoutNoCull(armorTexture));
 
-            renderHumanoidPart(poseStack, outerConsumer, armorOuter.leftLeg, lleg, torso, llegoff, light);
-            renderHumanoidPart(poseStack, outerConsumer, armorOuter.rightLeg, rleg, torso, rlegoff, light);
+            renderHumanoidPart(poseStack, outerConsumer, armorOuter.leftLeg, lleg, torso, llegoff, light, entity, RagdollPart.LEFT_LEG);
+            renderHumanoidPart(poseStack, outerConsumer, armorOuter.rightLeg, rleg, torso, rlegoff, light, entity, RagdollPart.RIGHT_LEG);
         }
     }
 
@@ -274,7 +269,6 @@ public class MobRagdollRenderer extends EntityRenderer<MobRagdollEntity> {
 
         if (texturePath != null && !texturePath.isEmpty()) {
             try {
-                // If it's "modid:material_name" format - convert to texture path
                 if (texturePath.contains(":") && !texturePath.contains("textures/")) {
                     String[] parts = texturePath.split(":", 2);
                     if (parts.length == 2) {
@@ -284,18 +278,13 @@ public class MobRagdollRenderer extends EntityRenderer<MobRagdollEntity> {
                         return new ResourceLocation(namespace, "textures/models/armor/" + materialName + "_" + layer + ".png");
                     }
                 }
-                // Otherwise assume it's a full texture path
                 return new ResourceLocation(texturePath);
             } catch (Exception e) {
-                // Fall through to fallback on error
                 Ragdollified.LOGGER.warn("Failed to parse armor texture path: {}", texturePath, e);
             }
         }
 
-        // Fallback: construct the path manually
         String materialName = item.getMaterial().getName();
-
-        // Parse namespace and path
         String namespace = "minecraft";
         String path = materialName;
 
@@ -311,7 +300,8 @@ public class MobRagdollRenderer extends EntityRenderer<MobRagdollEntity> {
 
     private void renderHumanoidPart(PoseStack poseStack, VertexConsumer vertexConsumer,
                                     ModelPart part, RagdollTransform transform,
-                                    RagdollTransform torso, Vector3f[] pivot, int light) {
+                                    RagdollTransform torso, Vector3f[] pivot, int light,
+                                    MobRagdollEntity entity, RagdollPart ragdollPart) {
         if (transform == null) return;
 
         part.setPos(pivot[0].x, pivot[0].y, pivot[0].z);
@@ -331,6 +321,8 @@ public class MobRagdollRenderer extends EntityRenderer<MobRagdollEntity> {
         poseStack.translate(-rotatedPivot.x, -rotatedPivot.y, -rotatedPivot.z);
         q.rotateZ((float) Math.PI);
         poseStack.mulPose(q);
+
+        // NO POSE APPLICATION HERE - just render what physics gives us
 
         part.render(poseStack, vertexConsumer, light, OverlayTexture.NO_OVERLAY);
         poseStack.popPose();

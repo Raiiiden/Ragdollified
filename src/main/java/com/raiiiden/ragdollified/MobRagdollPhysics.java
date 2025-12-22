@@ -117,13 +117,24 @@ public class MobRagdollPhysics {
         String mobType = entity.getMobType();
         float scale = entity.getMobScale();
 
+        // Get captured pose from SERVER cache (sent via packet from client)
+        MobPoseCapture.MobPose capturedPose = ServerMobPoseCache.getAndRemovePose(entity.getOriginalMobId());
+
+        if (capturedPose != null) {
+            Ragdollified.LOGGER.info("✓ Using captured pose for mob {} -> ragdoll {}",
+                    entity.getOriginalMobId(), entity.getId());
+        } else {
+            Ragdollified.LOGGER.warn("✗ No captured pose found for mob {}, using default T-pose",
+                    entity.getOriginalMobId());
+        }
+
         Vector3f pos = new Vector3f((float) entity.getX(), (float) entity.getY() + 1.3f * scale, (float) entity.getZ());
         Quaternionf q = new Quaternionf().rotateXYZ(
                 (float) Math.toRadians(entity.getXRot()),
                 (float) Math.toRadians(180 - entity.getYRot()),
                 0f
         );
-        Quat4f qq = new Quat4f(q.x, q.y, q.z, q.w);
+        Quat4f baseQuat = new Quat4f(q.x, q.y, q.z, q.w);
 
         java.util.function.Function<Vector3f, Vector3f> worldOffset = (local) -> {
             Vector3f result = new Vector3f(local);
@@ -140,97 +151,215 @@ public class MobRagdollPhysics {
                 (float) entity.getDeltaMovement().z * 20
         );
 
-        // Create bodies based on mob type
+        // Create bodies WITH pose from server cache
         if (mobType.contains("creeper")) {
-            createCreeperBodies(pos, qq, scale, initialVel, worldOffset);
+            createCreeperBodies(pos, baseQuat, scale, initialVel, worldOffset, capturedPose);
         } else {
-            // Default humanoid (zombie, skeleton, etc.)
-            createHumanoidBodies(pos, qq, scale, initialVel, worldOffset);
+            createHumanoidBodies(pos, baseQuat, scale, initialVel, worldOffset, capturedPose);
         }
 
         createJoints();
     }
 
-    private void createHumanoidBodies(Vector3f pos, Quat4f qq, float scale, Vector3f initialVel,
-                                      java.util.function.Function<Vector3f, Vector3f> worldOffset) {
+    private Vector3f calculatePartWorldPosition(Vector3f parentPos, Quat4f parentRot,
+                                                Vector3f localOffset, Quat4f partRot,
+                                                Vector3f partLocalCenter) {
+        // Step 1: Rotate the joint offset by parent's rotation
+        Vector3f rotatedOffset = rotateVecByQuat(parentRot, localOffset);
+
+        // Step 2: Get position at the joint
+        Vector3f jointPos = new Vector3f(parentPos);
+        jointPos.add(rotatedOffset);
+
+        // Step 3: Rotate the part's local center by the part's rotation
+        Vector3f rotatedCenter = rotateVecByQuat(partRot, partLocalCenter);
+
+        // Step 4: Final position is joint position + rotated center offset
+        Vector3f finalPos = new Vector3f(jointPos);
+        finalPos.add(rotatedCenter);
+
+        return finalPos;
+    }
+
+    private void createHumanoidBodies(Vector3f basePos, Quat4f baseQuat, float scale, Vector3f initialVel,
+                                      java.util.function.Function<Vector3f, Vector3f> worldOffset,
+                                      MobPoseCapture.MobPose capturedPose) {
+
+        // Calculate rotations with captured pose
+        Quat4f torsoRot = capturedPose != null ?
+                multiplyQuaternions(baseQuat, capturedPose.getRotationQuaternion(RagdollPart.TORSO)) :
+                baseQuat;
+
+        Quat4f headRot = capturedPose != null ?
+                multiplyQuaternions(baseQuat, capturedPose.getRotationQuaternion(RagdollPart.HEAD)) :
+                baseQuat;
+
+        Quat4f lArmRot = capturedPose != null ?
+                multiplyQuaternions(baseQuat, capturedPose.getRotationQuaternion(RagdollPart.LEFT_ARM)) :
+                baseQuat;
+
+        Quat4f rArmRot = capturedPose != null ?
+                multiplyQuaternions(baseQuat, capturedPose.getRotationQuaternion(RagdollPart.RIGHT_ARM)) :
+                baseQuat;
+
+        Quat4f lLegRot = capturedPose != null ?
+                multiplyQuaternions(baseQuat, capturedPose.getRotationQuaternion(RagdollPart.LEFT_LEG)) :
+                baseQuat;
+
+        Quat4f rLegRot = capturedPose != null ?
+                multiplyQuaternions(baseQuat, capturedPose.getRotationQuaternion(RagdollPart.RIGHT_LEG)) :
+                baseQuat;
+
+        // TORSO - use base position (anchor point)
+        Vector3f torsoPos = basePos;
+
+        // HEAD - positioned relative to torso top
+        Vector3f headJointOffset = new Vector3f(0f, 0.4f * scale, 0f); // Top of torso
+        Vector3f headLocalCenter = new Vector3f(0f, 0.2f * scale, 0f); // Center of head box from its origin
+        Vector3f headPos = calculatePartWorldPosition(torsoPos, torsoRot, headJointOffset, headRot, headLocalCenter);
+
+        // LEFT LEG - positioned relative to torso bottom-left
+        Vector3f lLegJointOffset = new Vector3f(-0.1f * scale, -0.4f * scale, 0f); // Bottom-left of torso
+        Vector3f lLegLocalCenter = new Vector3f(0f, -0.45f * scale, 0f); // Center of leg box from its top
+        Vector3f lLegPos = calculatePartWorldPosition(torsoPos, torsoRot, lLegJointOffset, lLegRot, lLegLocalCenter);
+
+        // RIGHT LEG - positioned relative to torso bottom-right
+        Vector3f rLegJointOffset = new Vector3f(0.1f * scale, -0.4f * scale, 0f);
+        Vector3f rLegLocalCenter = new Vector3f(0f, -0.45f * scale, 0f);
+        Vector3f rLegPos = calculatePartWorldPosition(torsoPos, torsoRot, rLegJointOffset, rLegRot, rLegLocalCenter);
+
+        // LEFT ARM - positioned relative to torso shoulder
+        Vector3f lArmJointOffset = new Vector3f(-0.25f * scale, 0.3f * scale, 0f); // Left shoulder
+        Vector3f lArmLocalCenter = new Vector3f(0f, -0.35f * scale, 0f); // Center of arm box from its top
+        Vector3f lArmPos = calculatePartWorldPosition(torsoPos, torsoRot, lArmJointOffset, lArmRot, lArmLocalCenter);
+
+        // RIGHT ARM - positioned relative to torso shoulder
+        Vector3f rArmJointOffset = new Vector3f(0.25f * scale, 0.3f * scale, 0f);
+        Vector3f rArmLocalCenter = new Vector3f(0f, -0.35f * scale, 0f);
+        Vector3f rArmPos = calculatePartWorldPosition(torsoPos, torsoRot, rArmJointOffset, rArmRot, rArmLocalCenter);
+
+        // Create bodies with pose-aware positions
         ragdollParts.add(createRagdollPart(
                 new BoxShape(new Vector3f(0.25f * scale, 0.4f * scale, 0.15f * scale)),
-                pos, qq, 8 * scale, initialVel
+                torsoPos, torsoRot, 8 * scale, initialVel
         ));
 
         ragdollParts.add(createRagdollPart(
                 new BoxShape(new Vector3f(0.2f * scale, 0.2f * scale, 0.2f * scale)),
-                worldOffset.apply(new Vector3f(0f, 0.55f * scale, 0f)),
-                qq, 4 * scale, initialVel
+                headPos, headRot, 4 * scale, initialVel
         ));
 
         ragdollParts.add(createRagdollPart(
                 new BoxShape(new Vector3f(0.15f * scale, 0.45f * scale, 0.15f * scale)),
-                worldOffset.apply(new Vector3f(-0.1f * scale, -0.75f * scale, 0f)),
-                qq, 6 * scale, initialVel
+                lLegPos, lLegRot, 6 * scale, initialVel
         ));
 
         ragdollParts.add(createRagdollPart(
                 new BoxShape(new Vector3f(0.15f * scale, 0.45f * scale, 0.15f * scale)),
-                worldOffset.apply(new Vector3f(0.1f * scale, -0.75f * scale, 0f)),
-                qq, 6 * scale, initialVel
+                rLegPos, rLegRot, 6 * scale, initialVel
         ));
 
         ragdollParts.add(createRagdollPart(
                 new BoxShape(new Vector3f(0.1f * scale, 0.35f * scale, 0.1f * scale)),
-                worldOffset.apply(new Vector3f(-0.4f * scale, 0.05f * scale, 0f)),
-                qq, 4 * scale, initialVel
+                lArmPos, lArmRot, 4 * scale, initialVel
         ));
 
         ragdollParts.add(createRagdollPart(
                 new BoxShape(new Vector3f(0.1f * scale, 0.35f * scale, 0.1f * scale)),
-                worldOffset.apply(new Vector3f(0.4f * scale, 0.05f * scale, 0f)),
-                qq, 4 * scale, initialVel
+                rArmPos, rArmRot, 4 * scale, initialVel
         ));
     }
 
-    private void createCreeperBodies(Vector3f pos, Quat4f qq, float scale, Vector3f initialVel,
-                                     java.util.function.Function<Vector3f, Vector3f> worldOffset) {
-        // Torso (body)
+    private void createCreeperBodies(Vector3f basePos, Quat4f baseQuat, float scale, Vector3f initialVel,
+                                     java.util.function.Function<Vector3f, Vector3f> worldOffset,
+                                     MobPoseCapture.MobPose capturedPose) {
+
+        // Get rotations
+        Quat4f torsoRot = capturedPose != null ?
+                multiplyQuaternions(baseQuat, capturedPose.getRotationQuaternion(RagdollPart.TORSO)) :
+                baseQuat;
+
+        Quat4f headRot = capturedPose != null ?
+                multiplyQuaternions(baseQuat, capturedPose.getRotationQuaternion(RagdollPart.HEAD)) :
+                baseQuat;
+
+        Quat4f flRot = capturedPose != null ?
+                multiplyQuaternions(baseQuat, capturedPose.getRotationQuaternion(RagdollPart.LEFT_ARM)) :
+                baseQuat;
+
+        Quat4f frRot = capturedPose != null ?
+                multiplyQuaternions(baseQuat, capturedPose.getRotationQuaternion(RagdollPart.RIGHT_ARM)) :
+                baseQuat;
+
+        Quat4f blRot = capturedPose != null ?
+                multiplyQuaternions(baseQuat, capturedPose.getRotationQuaternion(RagdollPart.LEFT_LEG)) :
+                baseQuat;
+
+        Quat4f brRot = capturedPose != null ?
+                multiplyQuaternions(baseQuat, capturedPose.getRotationQuaternion(RagdollPart.RIGHT_LEG)) :
+                baseQuat;
+
+        // TORSO
+        Vector3f torsoPos = basePos;
+
+        // HEAD
+        Vector3f headPos = calculatePartWorldPosition(torsoPos, torsoRot,
+                new Vector3f(0f, 0.5f * scale, 0f), headRot, new Vector3f(0f, 0.25f * scale, 0f));
+
+        // FRONT LEFT LEG
+        Vector3f flPos = calculatePartWorldPosition(torsoPos, torsoRot,
+                new Vector3f(-0.2f * scale, -0.3f * scale, -0.2f * scale), flRot, new Vector3f(0f, -0.3f * scale, 0f));
+
+        // FRONT RIGHT LEG
+        Vector3f frPos = calculatePartWorldPosition(torsoPos, torsoRot,
+                new Vector3f(0.2f * scale, -0.3f * scale, -0.2f * scale), frRot, new Vector3f(0f, -0.3f * scale, 0f));
+
+        // BACK LEFT LEG
+        Vector3f blPos = calculatePartWorldPosition(torsoPos, torsoRot,
+                new Vector3f(-0.2f * scale, -0.3f * scale, 0.2f * scale), blRot, new Vector3f(0f, -0.3f * scale, 0f));
+
+        // BACK RIGHT LEG
+        Vector3f brPos = calculatePartWorldPosition(torsoPos, torsoRot,
+                new Vector3f(0.2f * scale, -0.3f * scale, 0.2f * scale), brRot, new Vector3f(0f, -0.3f * scale, 0f));
+
+        // Create bodies
         ragdollParts.add(createRagdollPart(
                 new BoxShape(new Vector3f(0.3f * scale, 0.5f * scale, 0.3f * scale)),
-                pos, qq, 10 * scale, initialVel
+                torsoPos, torsoRot, 10 * scale, initialVel
         ));
 
-        // Head
         ragdollParts.add(createRagdollPart(
                 new BoxShape(new Vector3f(0.25f * scale, 0.25f * scale, 0.25f * scale)),
-                worldOffset.apply(new Vector3f(0f, 0.6f * scale, 0f)),
-                qq, 4 * scale, initialVel
+                headPos, headRot, 4 * scale, initialVel
         ));
 
-        // Front Left Leg
         ragdollParts.add(createRagdollPart(
                 new BoxShape(new Vector3f(0.12f * scale, 0.3f * scale, 0.12f * scale)),
-                worldOffset.apply(new Vector3f(-0.2f * scale, -0.6f * scale, -0.2f * scale)),
-                qq, 3 * scale, initialVel
+                flPos, flRot, 3 * scale, initialVel
         ));
 
-        // Front Right Leg
         ragdollParts.add(createRagdollPart(
                 new BoxShape(new Vector3f(0.12f * scale, 0.3f * scale, 0.12f * scale)),
-                worldOffset.apply(new Vector3f(0.2f * scale, -0.6f * scale, -0.2f * scale)),
-                qq, 3 * scale, initialVel
+                frPos, frRot, 3 * scale, initialVel
         ));
 
-        // Back Left Leg (stored as LEFT_ARM slot)
         ragdollParts.add(createRagdollPart(
                 new BoxShape(new Vector3f(0.12f * scale, 0.3f * scale, 0.12f * scale)),
-                worldOffset.apply(new Vector3f(-0.2f * scale, -0.6f * scale, 0.2f * scale)),
-                qq, 3 * scale, initialVel
+                blPos, blRot, 3 * scale, initialVel
         ));
 
-        // Back Right Leg (stored as RIGHT_ARM slot)
         ragdollParts.add(createRagdollPart(
                 new BoxShape(new Vector3f(0.12f * scale, 0.3f * scale, 0.12f * scale)),
-                worldOffset.apply(new Vector3f(0.2f * scale, -0.6f * scale, 0.2f * scale)),
-                qq, 3 * scale, initialVel
+                brPos, brRot, 3 * scale, initialVel
         ));
+    }
+
+    private Quat4f multiplyQuaternions(Quat4f q1, Quat4f q2) {
+        float w = q1.w * q2.w - q1.x * q2.x - q1.y * q2.y - q1.z * q2.z;
+        float x = q1.w * q2.x + q1.x * q2.w + q1.y * q2.z - q1.z * q2.y;
+        float y = q1.w * q2.y - q1.x * q2.z + q1.y * q2.w + q1.z * q2.x;
+        float z = q1.w * q2.z + q1.x * q2.y - q1.y * q2.x + q1.z * q2.w;
+        return new Quat4f(x, y, z, w);
     }
 
     private RigidBody createRagdollPart(CollisionShape shape, Vector3f position, Quat4f rotation,

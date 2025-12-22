@@ -59,7 +59,7 @@ public class GeckoLibArmorHelper {
             if (renderer == null) return;
 
             cache.prepareRenderer(renderer, entity, stack, slot, baseModel);
-            cache.render(renderer, poseStack, buffer, light, overlay);
+            cache.renderArmor(renderer, poseStack, buffer, light, overlay);
         } catch (Exception e) {
             Ragdollified.LOGGER.error("Failed to render GeckoLib armor: " + e.getMessage(), e);
         }
@@ -97,6 +97,7 @@ public class GeckoLibArmorHelper {
 
         private void initializeReflection() throws Exception {
             try {
+                // Original methods for getting the renderer
                 this.initializeClient = itemClass.getMethod("initializeClient", java.util.function.Consumer.class);
 
                 Class<?> clientExtensions = Class.forName("net.minecraftforge.client.extensions.common.IClientItemExtensions");
@@ -104,9 +105,13 @@ public class GeckoLibArmorHelper {
                         LivingEntity.class, ItemStack.class, EquipmentSlot.class, HumanoidModel.class);
 
                 Class<?> geoArmorRenderer = Class.forName("software.bernie.geckolib.renderer.GeoArmorRenderer");
+
+                // Method to prepare the renderer with base model transforms
                 this.prepForRender = geoArmorRenderer.getMethod("prepForRender",
                         net.minecraft.world.entity.Entity.class, ItemStack.class, EquipmentSlot.class, HumanoidModel.class);
 
+                // GeoArmorRenderer extends HumanoidModel, so we can call its renderToBuffer method
+                // This is the standard Minecraft method that all HumanoidModels use
                 this.renderToBuffer = HumanoidModel.class.getMethod("renderToBuffer",
                         PoseStack.class, VertexConsumer.class, int.class, int.class,
                         float.class, float.class, float.class, float.class);
@@ -159,11 +164,32 @@ public class GeckoLibArmorHelper {
             }
         }
 
-        public void render(Object renderer, PoseStack poseStack, MultiBufferSource buffer, int light, int overlay) {
+        public void renderArmor(Object renderer, PoseStack poseStack, MultiBufferSource buffer,
+                                int light, int overlay) {
             try {
-                renderToBuffer.invoke(renderer, poseStack, (VertexConsumer) null, light, overlay, 1.0f, 1.0f, 1.0f, 1.0f);
+                // GeckoLib renders in its own coordinate space, so we need to undo the ragdoll transforms
+                // that are already applied to the PoseStack, then let GeckoLib apply them via the model parts
+                poseStack.pushPose();
+
+                // GeoArmorRenderer is a HumanoidModel, and GeckoLib overrides renderToBuffer
+                // to handle getting its own VertexConsumer from the buffer
+                // We pass null for the VertexConsumer because GeckoLib gets it internally
+                // The color values (1.0f, 1.0f, 1.0f, 1.0f) represent RGBA white with full alpha
+                renderToBuffer.invoke(renderer,
+                        poseStack,           // PoseStack
+                        null,                // VertexConsumer - GeckoLib gets this internally from the buffer
+                        light,               // packedLight
+                        overlay,             // packedOverlay
+                        1.0f,                // red
+                        1.0f,                // green
+                        1.0f,                // blue
+                        1.0f                 // alpha
+                );
+
+                poseStack.popPose();
             } catch (Exception e) {
                 Ragdollified.LOGGER.error("Error rendering GeckoLib armor: " + e.getMessage(), e);
+                e.printStackTrace();
             }
         }
     }

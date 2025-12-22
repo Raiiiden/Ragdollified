@@ -11,6 +11,7 @@ import net.minecraft.network.syncher.EntityDataAccessor;
 import net.minecraft.network.syncher.EntityDataSerializers;
 import net.minecraft.network.syncher.SynchedEntityData;
 import net.minecraft.resources.ResourceLocation;
+import net.minecraft.world.damagesource.DamageSource;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.EquipmentSlot;
@@ -22,6 +23,7 @@ import net.minecraft.world.phys.Vec3;
 import net.minecraftforge.network.NetworkHooks;
 import net.minecraftforge.network.PacketDistributor;
 
+import javax.annotation.Nullable;
 import javax.vecmath.Vector3f;
 
 public class MobRagdollEntity extends Entity {
@@ -45,6 +47,9 @@ public class MobRagdollEntity extends Entity {
     // Client-side cached texture (looked up once, then stored)
     private ResourceLocation cachedTexture = null;
 
+    // Store captured pose data
+    private MobPoseCapture.MobPose capturedPose = null;
+
     private static final EntityDataAccessor<ItemStack> HEAD_SLOT =
             SynchedEntityData.defineId(MobRagdollEntity.class, EntityDataSerializers.ITEM_STACK);
     private static final EntityDataAccessor<ItemStack> CHEST_SLOT =
@@ -62,7 +67,7 @@ public class MobRagdollEntity extends Entity {
         this.lifetime = RagdollifiedConfig.getRagdollLifetime();
     }
 
-    public static MobRagdollEntity createFromMob(Level level, LivingEntity mob) {
+    public static MobRagdollEntity createFromMob(Level level, LivingEntity mob, @Nullable DamageSource lastDamage, float damageAmount) {
         Vec3 spawnPos = mob.position();
         MobRagdollEntity ragdoll = new MobRagdollEntity(ModEntities.MOB_RAGDOLL.get(), level);
 
@@ -88,20 +93,82 @@ public class MobRagdollEntity extends Entity {
         // Save mob data for texture/variant
         mob.saveWithoutId(ragdoll.mobData);
 
+        // Try to get captured pose from client (if available)
+        if (level.isClientSide) {
+            ragdoll.capturedPose = MobPoseCapture.getAndRemovePose(mob.getId());
+        }
+
         if (!level.isClientSide) {
             JbulletWorld world = JbulletWorld.get((net.minecraft.server.level.ServerLevel) level);
             ragdoll.physics = new MobRagdollPhysics(ragdoll, world);
 
             // Apply velocity after physics bodies are created
+            Vec3 mobDelta = mob.getDeltaMovement();
             Vector3f mobVel = new Vector3f(
-                    (float) mob.getDeltaMovement().x * 8,
-                    (float) mob.getDeltaMovement().y * 6,
-                    (float) mob.getDeltaMovement().z * 8
+                    (float) mobDelta.x * 8,
+                    (float) mobDelta.y * 6,
+                    (float) mobDelta.z * 8
             );
+
+            // Check if velocity is very small (includes tiny knockback)
+            boolean hasLowVelocity = mobDelta.lengthSqr() < 0.5;
+
+            // Apply velocity based on damage source
+            if (lastDamage != null) {
+                String damageType = lastDamage.getMsgId();
+
+                // Handle TACZ bullet damage
+                if (damageType.contains("tacz.bullet") && hasLowVelocity) {
+                    Vec3 damagePos = lastDamage.getSourcePosition();
+                    if (damagePos != null) {
+                        Vec3 direction = mob.position().subtract(damagePos).normalize();
+
+                        mobVel = new Vector3f(
+                                (float) direction.x * 3.0f,
+                                (float) direction.y * 4.0f + 2.0f,
+                                (float) direction.z * 3.0f
+                        );
+                    } else {
+                        Vec3 lookVec = mob.getLookAngle();
+                        mobVel = new Vector3f(
+                                (float) lookVec.x * 5.0f,
+                                2.0f,
+                                (float) lookVec.z * 5.0f
+                        );
+                    }
+                }
+
+                // Handle explosion damage
+                if (damageType.contains("explosion")) {
+                    Vec3 explosionCenter = lastDamage.getSourcePosition();
+                    if (explosionCenter != null) {
+                        Vec3 direction = mob.position().subtract(explosionCenter).normalize();
+                        float distance = (float) mob.position().distanceTo(explosionCenter);
+
+                        float baseStrength = Math.min(damageAmount / 10f, 5f);
+                        float distanceFalloff = Math.max(0.5f, 1.0f - (distance / 10f));
+                        float explosionStrength = baseStrength * distanceFalloff;
+
+                        mobVel = new Vector3f(
+                                (float) direction.x * 10.0f * explosionStrength,
+                                (float) direction.y * 8.0f * explosionStrength + 3.0f,
+                                (float) direction.z * 10.0f * explosionStrength
+                        );
+                    }
+                }
+            }
 
             ragdoll.physics.applyInitialVelocity(mobVel);
         }
         return ragdoll;
+    }
+
+    public MobPoseCapture.MobPose getCapturedPose() {
+        return capturedPose;
+    }
+
+    public void setCapturedPose(MobPoseCapture.MobPose pose) {
+        this.capturedPose = pose;
     }
 
     @Override

@@ -133,19 +133,173 @@ public class DeathRagdollRenderer extends EntityRenderer<DeathRagdollEntity> {
                                      RagdollTransform larm, RagdollTransform rarm, RagdollTransform lleg, RagdollTransform rleg, boolean isSlim) {
         HumanoidModel<AbstractClientPlayer> baseModel = isSlim ? slimArmorInner : normalArmorInner;
 
-        baseModel.setAllVisible(true);
+        baseModel.setAllVisible(false);
         baseModel.young = false;
         baseModel.crouching = false;
         baseModel.riding = false;
 
-        applyRagdollToModelPart(baseModel.head, head, torso, headoff);
-        applyRagdollToModelPart(baseModel.body, torso, torso, torsoff);
-        applyRagdollToModelPart(baseModel.leftArm, larm, torso, larmoff);
-        applyRagdollToModelPart(baseModel.rightArm, rarm, torso, rarmoff);
-        applyRagdollToModelPart(baseModel.leftLeg, lleg, torso, llegoff);
-        applyRagdollToModelPart(baseModel.rightLeg, rleg, torso, rlegoff);
+        // For GeckoLib, we need to NOT double-transform
+        // We'll set the model part rotations to zero and only use PoseStack transforms
+        switch (slot) {
+            case HEAD:
+                if (head != null) {
+                    baseModel.head.visible = true;
+                    // Reset rotation - we'll apply it via PoseStack only
+                    baseModel.head.setPos(0, 0, 0);
+                    baseModel.head.xRot = 0;
+                    baseModel.head.yRot = 0;
+                    baseModel.head.zRot = 0;
+                    renderGeckoLibPart(stack, slot, entity, poseStack, buffer, light, baseModel, head, torso, headoff);
+                    baseModel.head.visible = false;
+                }
+                break;
+            case CHEST:
+                if (torso != null && larm != null && rarm != null) {
+                    baseModel.body.visible = true;
+                    baseModel.leftArm.visible = false;  // Render arms separately
+                    baseModel.rightArm.visible = false;
 
+                    // Reset body
+                    baseModel.body.setPos(0, 0, 0);
+                    baseModel.body.xRot = 0;
+                    baseModel.body.yRot = 0;
+                    baseModel.body.zRot = 0;
+
+                    // Render body from torso position
+                    renderGeckoLibPart(stack, slot, entity, poseStack, buffer, light, baseModel, torso, torso, torsoff);
+
+                    baseModel.body.visible = false;
+
+                    // Now render left arm separately from its own position
+                    baseModel.leftArm.visible = true;
+                    baseModel.leftArm.setPos(4, 4, 0);
+                    baseModel.leftArm.xRot = 0;
+                    baseModel.leftArm.yRot = 0;
+                    baseModel.leftArm.zRot = 0;
+                    renderGeckoLibPart(stack, slot, entity, poseStack, buffer, light, baseModel, larm, torso, larmoff);
+                    baseModel.leftArm.visible = false;
+
+                    // Now render right arm separately from its own position
+                    baseModel.rightArm.visible = true;
+                    baseModel.rightArm.setPos(-4, 4, 0);
+                    baseModel.rightArm.xRot = 0;
+                    baseModel.rightArm.yRot = 0;
+                    baseModel.rightArm.zRot = 0;
+                    renderGeckoLibPart(stack, slot, entity, poseStack, buffer, light, baseModel, rarm, torso, rarmoff);
+                    baseModel.rightArm.visible = false;
+                }
+                break;
+            case LEGS:
+                if (torso != null && lleg != null && rleg != null) {
+                    // --- 1. Render Body (Attached to Torso, No Offset) ---
+                    baseModel.body.visible = true;
+                    baseModel.leftLeg.visible = false;
+                    baseModel.rightLeg.visible = false;
+
+                    // Reset body model transforms
+                    baseModel.body.setPos(0, 0, 0);
+                    baseModel.body.xRot = 0;
+                    baseModel.body.yRot = 0;
+                    baseModel.body.zRot = 0;
+
+                    renderGeckoLibPart(stack, slot, entity, poseStack, buffer, light, baseModel, torso, torso, torsoff);
+                    baseModel.body.visible = false;
+
+                    baseModel.leftLeg.visible = true;
+
+                    baseModel.leftLeg.setPos(1.9F, 5.5F, 0);
+                    baseModel.leftLeg.xRot = 0;
+                    baseModel.leftLeg.yRot = 0;
+                    baseModel.leftLeg.zRot = 0;
+
+                    poseStack.pushPose();
+                    poseStack.translate(0, 0F, 0);
+
+                    renderGeckoLibPart(stack, slot, entity, poseStack, buffer, light, baseModel, lleg, torso, llegoff);
+                    poseStack.popPose();
+
+                    baseModel.leftLeg.visible = false;
+
+                    baseModel.rightLeg.visible = true;
+
+                    baseModel.rightLeg.setPos(-1.9F, 5.5F, 0);
+                    baseModel.rightLeg.xRot = 0;
+                    baseModel.rightLeg.yRot = 0;
+                    baseModel.rightLeg.zRot = 0;
+
+                    poseStack.pushPose();
+                    poseStack.translate(0, 0F, 0);
+
+                    // Use 'rleg' transform so the armor follows the physics leg
+                    renderGeckoLibPart(stack, slot, entity, poseStack, buffer, light, baseModel, rleg, torso, rlegoff);
+                    poseStack.popPose();
+
+                    baseModel.rightLeg.visible = false;
+                }
+                break;
+            case FEET:
+                if (lleg != null && rleg != null) {
+                    baseModel.leftLeg.visible = true;
+                    baseModel.rightLeg.visible = true;
+
+                    baseModel.leftLeg.setPos(1.9F, 12, 0);
+                    baseModel.leftLeg.xRot = 0;
+                    baseModel.leftLeg.yRot = 0;
+                    baseModel.leftLeg.zRot = 0;
+
+                    baseModel.rightLeg.setPos(-1.9F, 12, 0);
+                    baseModel.rightLeg.xRot = 0;
+                    baseModel.rightLeg.yRot = 0;
+                    baseModel.rightLeg.zRot = 0;
+
+                    Quaternionf torsoRot = new Quaternionf(torso.rotation.x, torso.rotation.y, torso.rotation.z, torso.rotation.w);
+
+                    Quaternionf llegRot = new Quaternionf(lleg.rotation.x, lleg.rotation.y, lleg.rotation.z, lleg.rotation.w);
+                    Quaternionf llegRelative = new Quaternionf(torsoRot).conjugate().mul(llegRot);
+                    Vector3f llegAngles = llegRelative.getEulerAnglesXYZ(new Vector3f());
+                    baseModel.leftLeg.xRot = -llegAngles.x;
+                    baseModel.leftLeg.yRot = -llegAngles.y;
+                    baseModel.leftLeg.zRot = llegAngles.z;
+
+                    Quaternionf rlegRot = new Quaternionf(rleg.rotation.x, rleg.rotation.y, rleg.rotation.z, rleg.rotation.w);
+                    Quaternionf rlegRelative = new Quaternionf(torsoRot).conjugate().mul(rlegRot);
+                    Vector3f rlegAngles = rlegRelative.getEulerAnglesXYZ(new Vector3f());
+                    baseModel.rightLeg.xRot = -rlegAngles.x;
+                    baseModel.rightLeg.yRot = -rlegAngles.y;
+                    baseModel.rightLeg.zRot = rlegAngles.z;
+
+                    renderGeckoLibPart(stack, slot, entity, poseStack, buffer, light, baseModel, torso, torso, torsoff);
+
+                    baseModel.leftLeg.visible = false;
+                    baseModel.rightLeg.visible = false;
+                }
+                break;
+        }
+    }
+
+    private void renderGeckoLibPart(ItemStack stack, EquipmentSlot slot, DeathRagdollEntity entity,
+                                    PoseStack poseStack, MultiBufferSource buffer, int light,
+                                    HumanoidModel<AbstractClientPlayer> baseModel,
+                                    RagdollTransform transform, RagdollTransform torso, Vector3f[] pivot) {
+        if (transform == null) return;
+
+        poseStack.pushPose();
+
+        // Apply the same transforms we use for vanilla armor
+        Quaternionf torsoRot = new Quaternionf(torso.rotation.x, torso.rotation.y, torso.rotation.z, torso.rotation.w);
+        Vector3f rotatedPivot = new Vector3f(pivot[1]);
+        torsoRot.transform(rotatedPivot);
+
+        Quaternionf q = new Quaternionf(transform.rotation.x, transform.rotation.y, transform.rotation.z, transform.rotation.w);
+
+        poseStack.translate(-rotatedPivot.x, -rotatedPivot.y, -rotatedPivot.z);
+        q.rotateZ((float) Math.PI);
+        poseStack.mulPose(q);
+
+        // Now render the GeckoLib armor with these transforms
         GeckoLibArmorHelper.renderGeckoLibArmor(stack, slot, entity, poseStack, buffer, light, OverlayTexture.NO_OVERLAY, baseModel);
+
+        poseStack.popPose();
     }
 
     private void applyRagdollToModelPart(ModelPart part, RagdollTransform transform, RagdollTransform torso, Vector3f[] pivot) {
