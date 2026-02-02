@@ -34,7 +34,9 @@ public class PhysicsHooks {
 
         // Handle player deaths
         if (entity instanceof ServerPlayer player){
-            player.setInvisible(true);
+            entity.setInvisible(true);
+            entity.clearFire();
+            entity.setCustomNameVisible(false);
 
             List<DeathRagdollEntity> existingRagdolls = player.serverLevel()
                     .getEntitiesOfClass(DeathRagdollEntity.class,
@@ -55,6 +57,7 @@ public class PhysicsHooks {
         else if (shouldCreateMobRagdoll(entity) && !entity.level().isClientSide) {
             if (entity.level() instanceof ServerLevel serverLevel) {
                 entity.setInvisible(true);
+                entity.clearFire();
 
                 List<MobRagdollEntity> existingMobRagdolls = serverLevel
                         .getEntitiesOfClass(MobRagdollEntity.class,

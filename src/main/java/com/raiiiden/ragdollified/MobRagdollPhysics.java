@@ -484,8 +484,8 @@ public class MobRagdollPhysics {
         ragdollJoints.add(createJointAtWorldAnchor(
                 torso, lLeg, lLegAnchor,
                 new Vector3f(-0.05f, -0.05f, -0.05f), new Vector3f(0.05f, 0.05f, 0.05f),
-                new Vector3f((float) -Math.toRadians(40), 0f, (float) -Math.toRadians(10)),
-                new Vector3f((float) Math.toRadians(80), 0f, (float) Math.toRadians(10))
+                new Vector3f((float) -Math.toRadians(10), 0f, (float) -Math.toRadians(10)),
+                new Vector3f((float) Math.toRadians(40), 0f, (float) Math.toRadians(10))
         ));
 
         Vector3f torsoRightHip = torsoLocalToWorld.apply(new Vector3f(0.1f * scale, -0.55f * scale, 0f));
@@ -500,8 +500,8 @@ public class MobRagdollPhysics {
         ragdollJoints.add(createJointAtWorldAnchor(
                 torso, rLeg, rLegAnchor,
                 new Vector3f(-0.05f, -0.05f, -0.05f), new Vector3f(0.05f, 0.05f, 0.05f),
-                new Vector3f((float) -Math.toRadians(40), 0f, (float) -Math.toRadians(10)),
-                new Vector3f((float) Math.toRadians(80), 0f, (float) Math.toRadians(10))
+                new Vector3f((float) -Math.toRadians(10), 0f, (float) -Math.toRadians(10)),
+                new Vector3f((float) Math.toRadians(40), 0f, (float) Math.toRadians(10))
         ));
 
         Vector3f torsoLeftShoulder = torsoLocalToWorld.apply(new Vector3f(-0.35f * scale, 0.05f * scale, 0f));

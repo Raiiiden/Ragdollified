@@ -101,8 +101,8 @@ public class MobPoseCaptureHandler {
                         ModNetwork.CHANNEL.sendToServer(new MobPoseSyncPacket(entity.getId(), pose));
                         SENT_POSES.add(entity.getId());
 
-                        Ragdollified.LOGGER.debug("Sent damage pose for entity {} to server (health: {}/{})",
-                                entity.getId(), (int)currentHealth, (int)entity.getMaxHealth());
+                        /*Ragdollified.LOGGER.debug("Sent damage pose for entity {} to server (health: {}/{})",
+                                entity.getId(), (int)currentHealth, (int)entity.getMaxHealth());*/
                     }
                 }
 

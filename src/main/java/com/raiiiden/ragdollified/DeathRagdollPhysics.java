@@ -264,8 +264,8 @@ public class DeathRagdollPhysics {
         ragdollJoints.add(createJointAtWorldAnchor(
                 torso, lLeg, lLegAnchor,
                 new Vector3f(-0.05f,-0.05f,-0.05f), new Vector3f(0.05f,0.05f,0.05f),
-                new Vector3f((float)-Math.toRadians(40), 0f, (float)-Math.toRadians(10)),
-                new Vector3f((float)Math.toRadians(80), 0f, (float)Math.toRadians(10))
+                new Vector3f((float)-Math.toRadians(10), 0f, (float)-Math.toRadians(10)),
+                new Vector3f((float)Math.toRadians(40), 0f, (float)Math.toRadians(10))
         ));
 
         // Right Leg <-> Torso
@@ -279,8 +279,8 @@ public class DeathRagdollPhysics {
         ragdollJoints.add(createJointAtWorldAnchor(
                 torso, rLeg, rLegAnchor,
                 new Vector3f(-0.05f,-0.05f,-0.05f), new Vector3f(0.05f,0.05f,0.05f),
-                new Vector3f((float)-Math.toRadians(40), 0f, (float)-Math.toRadians(10)),
-                new Vector3f((float)Math.toRadians(80), 0f, (float)Math.toRadians(10))
+                new Vector3f((float)-Math.toRadians(10), 0f, (float)-Math.toRadians(10)),
+                new Vector3f((float)Math.toRadians(40), 0f, (float)Math.toRadians(10))
         ));
 
         // Left Arm <-> Torso

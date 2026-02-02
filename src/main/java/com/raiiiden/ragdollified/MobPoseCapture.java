@@ -134,28 +134,17 @@ public class MobPoseCapture {
             return partPoses.getOrDefault(part, new PartPose(0, 0, 0));
         }
 
-        /**
-         * Convert model part rotation to a quaternion
-         */
         public Quat4f getRotationQuaternion(RagdollPart part) {
             PartPose pose = getPose(part);
 
-            // Model coordinates need adjustment for physics
-            // The model uses different conventions than physics simulation
             float xRot = pose.xRot;
             float yRot = pose.yRot;
             float zRot = pose.zRot;
 
-            // For arms specifically, we need to flip certain rotations
-            // because the physics body coordinate system is different from model
             if (part == RagdollPart.LEFT_ARM || part == RagdollPart.RIGHT_ARM) {
-                // Invert X rotation for arms (up/down becomes down/up in physics)
-                xRot = -xRot;
-                // Adjust Y rotation to account for coordinate system difference
-                yRot = -yRot;
+                xRot += (float) Math.PI;
             }
 
-            // Convert Euler angles (XYZ) to quaternion
             Quaternionf q = new Quaternionf()
                     .rotateXYZ(xRot, yRot, zRot);
 
