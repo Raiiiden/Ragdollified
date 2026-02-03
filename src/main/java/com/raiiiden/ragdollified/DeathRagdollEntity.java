@@ -75,11 +75,62 @@ public class DeathRagdollEntity extends Entity {
             JbulletWorld world = JbulletWorld.get((net.minecraft.server.level.ServerLevel) level);
             ragdoll.physics = new DeathRagdollPhysics(ragdoll, world);
 
+            // Apply velocity after physics bodies are created
+            Vec3 playerDelta = player.getDeltaMovement();
             Vector3f playerVel = new Vector3f(
-                    (float) player.getDeltaMovement().x * 8,
-                    (float) player.getDeltaMovement().y * 6,
-                    (float) player.getDeltaMovement().z * 8
+                    (float) playerDelta.x * 8,
+                    (float) playerDelta.y * 6,
+                    (float) playerDelta.z * 8
             );
+
+            // Check if velocity is very small (includes tiny knockback)
+            boolean hasLowVelocity = playerDelta.lengthSqr() < 0.5;
+
+            // Apply velocity based on damage source
+            net.minecraft.world.damagesource.DamageSource lastDamage = player.getLastDamageSource();
+            if (lastDamage != null) {
+                String damageType = lastDamage.getMsgId();
+
+                // Handle TACZ bullet damage
+                if (damageType.contains("tacz.bullet") && hasLowVelocity) {
+                    Vec3 damagePos = lastDamage.getSourcePosition();
+                    if (damagePos != null) {
+                        Vec3 direction = player.position().subtract(damagePos).normalize();
+
+                        playerVel = new Vector3f(
+                                (float) direction.x * 3.0f,
+                                (float) direction.y * 4.0f + 2.0f,
+                                (float) direction.z * 3.0f
+                        );
+                    } else {
+                        Vec3 lookVec = player.getLookAngle();
+                        playerVel = new Vector3f(
+                                (float) lookVec.x * 5.0f,
+                                2.0f,
+                                (float) lookVec.z * 5.0f
+                        );
+                    }
+                }
+
+                // Handle explosion damage
+                if (damageType.contains("explosion")) {
+                    Vec3 explosionCenter = lastDamage.getSourcePosition();
+                    if (explosionCenter != null) {
+                        Vec3 direction = player.position().subtract(explosionCenter).normalize();
+                        float distance = (float) player.position().distanceTo(explosionCenter);
+
+                        float baseStrength = Math.min(player.getMaxHealth() / 10f, 5f);
+                        float distanceFalloff = Math.max(0.5f, 1.0f - (distance / 10f));
+                        float explosionStrength = baseStrength * distanceFalloff;
+
+                        playerVel = new Vector3f(
+                                (float) direction.x * 10.0f * explosionStrength,
+                                (float) direction.y * 8.0f * explosionStrength + 3.0f,
+                                (float) direction.z * 10.0f * explosionStrength
+                        );
+                    }
+                }
+            }
 
             ragdoll.physics.applyInitialVelocity(playerVel);
         }

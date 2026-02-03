@@ -45,6 +45,7 @@ public class MobRagdollPhysics {
     private final int networkRagdollId;
     private BlockPos lastCollisionCenter = BlockPos.ZERO;
     private List<RigidBody> currentCachedBodies = null;
+    private int lastUpdateTick = 0;
 
     public MobRagdollPhysics(MobRagdollEntity entity, JbulletWorld manager) {
         this.entity = entity;
@@ -694,7 +695,11 @@ public class MobRagdollPhysics {
         Vector3f torsoPos = getTorsoPosition();
         BlockPos center = new BlockPos((int) torsoPos.x, (int) torsoPos.y, (int) torsoPos.z);
 
-        if (center.equals(lastCollisionCenter)) return; // Use equals instead of distManhattan
+        // Update if: center moved OR 1 second has passed (to catch block changes)
+        boolean shouldUpdate = !center.equals(lastCollisionCenter) ||
+                (entity.tickCount - lastUpdateTick) >= 20;
+
+        if (!shouldUpdate) return;
 
         // Release old collision geometry
         if (currentCachedBodies != null && !lastCollisionCenter.equals(BlockPos.ZERO)) {
@@ -706,6 +711,7 @@ public class MobRagdollPhysics {
         }
 
         lastCollisionCenter = center;
+        lastUpdateTick = entity.tickCount;
 
         // Get or create collision geometry (cached if other ragdolls nearby)
         currentCachedBodies = manager.getOrCreateCollisionGeometry(center, () -> {
@@ -749,6 +755,29 @@ public class MobRagdollPhysics {
         });
 
         localStaticCollision.addAll(currentCachedBodies);
+
+        wakeUpAndClearContacts();
+    }
+
+    private void wakeUpAndClearContacts() {
+        // Wake up all ragdoll parts
+        for (RigidBody body : ragdollParts) {
+            body.activate(true); // Force activation
+            body.clearForces(); // Clear any stale forces
+        }
+
+        // Clear all cached contact points between ragdoll and world
+        int numManifolds = world.getDispatcher().getNumManifolds();
+        for (int i = numManifolds - 1; i >= 0; i--) {
+            PersistentManifold manifold = world.getDispatcher().getManifoldByIndexInternal(i);
+            CollisionObject obj0 = (CollisionObject) manifold.getBody0();
+            CollisionObject obj1 = (CollisionObject) manifold.getBody1();
+
+            // If either object is part of this ragdoll, clear the manifold
+            if (ragdollParts.contains(obj0) || ragdollParts.contains(obj1)) {
+                manifold.clearManifold();
+            }
+        }
     }
 
     private boolean isCompletelySurrounded(BlockPos pos) {

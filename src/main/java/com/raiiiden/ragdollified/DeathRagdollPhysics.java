@@ -47,6 +47,8 @@ public class DeathRagdollPhysics {
     private final int networkRagdollId;
     private BlockPos lastCollisionCenter = BlockPos.ZERO;
     private boolean ignoreNext;
+    private List<RigidBody> currentCachedBodies = null;
+    private int lastUpdateTick = 0;
 
     public DeathRagdollPhysics(DeathRagdollEntity entity, JbulletWorld manager) {
         this.entity = entity;
@@ -462,48 +464,91 @@ public class DeathRagdollPhysics {
 
     private void updateLocalWorldCollision() {
         Vector3f torsoPos = getTorsoPosition();
-        BlockPos center = new BlockPos((int)torsoPos.x, (int)torsoPos.y, (int)torsoPos.z);
+        BlockPos center = new BlockPos((int) torsoPos.x, (int) torsoPos.y, (int) torsoPos.z);
 
-        if (center.distManhattan(lastCollisionCenter) < 2) return;
+        // Update if: center moved OR 1 second has passed (to catch block changes)
+        boolean shouldUpdate = !center.equals(lastCollisionCenter) ||
+                (entity.tickCount - lastUpdateTick) >= 20;
+
+        if (!shouldUpdate) return;
+
+        // Release old collision geometry
+        if (currentCachedBodies != null && !lastCollisionCenter.equals(BlockPos.ZERO)) {
+            manager.releaseCollisionGeometry(lastCollisionCenter);
+            for (CollisionObject c : localStaticCollision) {
+                world.removeRigidBody((RigidBody) c);
+            }
+            localStaticCollision.clear();
+        }
+
         lastCollisionCenter = center;
+        lastUpdateTick = entity.tickCount;
 
-        for (CollisionObject c : localStaticCollision) world.removeCollisionObject(c);
-        localStaticCollision.clear();
+        // Get or create collision geometry (cached if other ragdolls nearby)
+        currentCachedBodies = manager.getOrCreateCollisionGeometry(center, () -> {
+            List<RigidBody> newBodies = new ArrayList<>();
+            int radius = 3;
+            for (int dx = -radius; dx <= radius; dx++)
+                for (int dy = -radius; dy <= radius; dy++)
+                    for (int dz = -radius; dz <= radius; dz++) {
+                        BlockPos pos = center.offset(dx, dy, dz);
+                        BlockState state = entity.level().getBlockState(pos);
+                        if (state.isAir() || state.getFluidState().isSource()) continue;
+                        if (isCompletelySurrounded(pos)) continue;
 
-        int radius = 3;
-        for (int dx=-radius; dx<=radius; dx++)
-            for (int dy=-radius; dy<=radius; dy++)
-                for (int dz=-radius; dz<=radius; dz++) {
-                    BlockPos pos = center.offset(dx, dy, dz);
-                    BlockState state = entity.level().getBlockState(pos);
-                    if (state.isAir() || state.getFluidState().isSource()) continue;
-                    if (isCompletelySurrounded(pos)) continue;
+                        VoxelShape shape = state.getCollisionShape(entity.level(), pos);
+                        if (shape.isEmpty()) continue;
 
-                    VoxelShape shape = state.getCollisionShape(entity.level(), pos);
-                    if (shape.isEmpty()) continue;
+                        for (AABB box : shape.toAabbs()) {
+                            Vector3f halfExtents = new Vector3f(
+                                    (float) (box.getXsize() / 2),
+                                    (float) (box.getYsize() / 2),
+                                    (float) (box.getZsize() / 2)
+                            );
+                            CollisionShape cs = new BoxShape(halfExtents);
 
-                    for (AABB box : shape.toAabbs()) {
-                        Vector3f halfExtents = new Vector3f(
-                                (float)(box.getXsize()/2),
-                                (float)(box.getYsize()/2),
-                                (float)(box.getZsize()/2)
-                        );
-                        CollisionShape cs = new BoxShape(halfExtents);
+                            Transform t = new Transform();
+                            t.setIdentity();
+                            t.origin.set(
+                                    (float) (pos.getX() + box.minX + box.getXsize() / 2),
+                                    (float) (pos.getY() + box.minY + box.getYsize() / 2),
+                                    (float) (pos.getZ() + box.minZ + box.getZsize() / 2)
+                            );
 
-                        Transform t = new Transform();
-                        t.setIdentity();
-                        t.origin.set(
-                                (float)(pos.getX() + box.minX + box.getXsize()/2),
-                                (float)(pos.getY() + box.minY + box.getYsize()/2),
-                                (float)(pos.getZ() + box.minZ + box.getZsize()/2)
-                        );
-
-                        RigidBody rb = new RigidBody(new RigidBodyConstructionInfo(0f, new DefaultMotionState(t), cs, new Vector3f()));
-                        rb.setCollisionFlags(rb.getCollisionFlags() | CollisionFlags.STATIC_OBJECT);
-                        world.addRigidBody(rb);
-                        localStaticCollision.add(rb);
+                            RigidBody rb = new RigidBody(new RigidBodyConstructionInfo(
+                                    0f, new DefaultMotionState(t), cs, new Vector3f()));
+                            rb.setCollisionFlags(rb.getCollisionFlags() | CollisionFlags.STATIC_OBJECT);
+                            world.addRigidBody(rb);
+                            newBodies.add(rb);
+                        }
                     }
-                }
+            return newBodies;
+        });
+
+        localStaticCollision.addAll(currentCachedBodies);
+
+        wakeUpAndClearContacts();
+    }
+
+    private void wakeUpAndClearContacts() {
+        // Wake up all ragdoll parts
+        for (RigidBody body : ragdollParts) {
+            body.activate(true); // Force activation
+            body.clearForces(); // Clear any stale forces
+        }
+
+        // Clear all cached contact points between ragdoll and world
+        int numManifolds = world.getDispatcher().getNumManifolds();
+        for (int i = numManifolds - 1; i >= 0; i--) {
+            PersistentManifold manifold = world.getDispatcher().getManifoldByIndexInternal(i);
+            CollisionObject obj0 = (CollisionObject) manifold.getBody0();
+            CollisionObject obj1 = (CollisionObject) manifold.getBody1();
+
+            // If either object is part of this ragdoll, clear the manifold
+            if (ragdollParts.contains(obj0) || ragdollParts.contains(obj1)) {
+                manifold.clearManifold();
+            }
+        }
     }
 
     private boolean isCompletelySurrounded(BlockPos pos) {
@@ -555,15 +600,21 @@ public class DeathRagdollPhysics {
     }
 
     public void destroy() {
+        // Release cached collision geometry
+        if (currentCachedBodies != null && !lastCollisionCenter.equals(BlockPos.ZERO)) {
+            manager.releaseCollisionGeometry(lastCollisionCenter);
+            for (CollisionObject c : localStaticCollision) {
+                world.removeRigidBody((RigidBody) c);
+            }
+        }
+
         for (RigidBody r : ragdollParts) {
             world.removeRigidBody(r);
         }
         for (TypedConstraint c : ragdollJoints) {
             world.removeConstraint(c);
         }
-        for (CollisionObject co : localStaticCollision) {
-            world.removeCollisionObject(co);
-        }
+
         ragdollParts.clear();
         ragdollJoints.clear();
         localStaticCollision.clear();
