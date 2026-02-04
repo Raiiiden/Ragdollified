@@ -5,27 +5,40 @@ import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Server-side cache for mob poses received from clients
- * Stores poses temporarily until the mob dies and ragdoll is created
+ * Continuously updated - always has the latest pose before death
  */
 public class ServerMobPoseCache {
 
     private static final Map<Integer, CachedPose> SERVER_POSES = new ConcurrentHashMap<>();
 
     private static class CachedPose {
-        final MobPoseCapture.MobPose pose;
-        final long timestamp;
+        MobPoseCapture.MobPose pose; // Mutable - gets updated
+        long timestamp;
 
         CachedPose(MobPoseCapture.MobPose pose) {
             this.pose = pose;
             this.timestamp = System.currentTimeMillis();
         }
+
+        void update(MobPoseCapture.MobPose newPose) {
+            this.pose = newPose;
+            this.timestamp = System.currentTimeMillis();
+        }
     }
 
     /**
-     * Store a pose received from client (called by packet handler)
+     * Store/update a pose received from client (called by packet handler)
+     * Continuously updates - always keeps latest pose
      */
     public static void storePose(int entityId, MobPoseCapture.MobPose pose) {
-        SERVER_POSES.put(entityId, new CachedPose(pose));
+        CachedPose cached = SERVER_POSES.get(entityId);
+        if (cached != null) {
+            // Update existing
+            cached.update(pose);
+        } else {
+            // Store new
+            SERVER_POSES.put(entityId, new CachedPose(pose));
+        }
     }
 
     /**
@@ -37,7 +50,7 @@ public class ServerMobPoseCache {
     }
 
     /**
-     * Cleanup old poses that were never used
+     * Cleanup old poses that were never used (mob didn't die)
      */
     public static void cleanup() {
         if (SERVER_POSES.isEmpty()) return;
@@ -45,7 +58,7 @@ public class ServerMobPoseCache {
         long now = System.currentTimeMillis();
         SERVER_POSES.entrySet().removeIf(entry -> {
             long age = now - entry.getValue().timestamp;
-            return age > 5000; // Remove poses older than 5 seconds
+            return age > 10000; // Remove poses older than 10 seconds
         });
     }
 }
