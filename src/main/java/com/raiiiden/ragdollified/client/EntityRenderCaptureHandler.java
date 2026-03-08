@@ -1,5 +1,6 @@
 package com.raiiiden.ragdollified.client;
 
+import com.raiiiden.ragdollified.MobModelHelper;
 import com.raiiiden.ragdollified.Ragdollified;
 import com.raiiiden.ragdollified.client.compat.ETFCompatibilityHelper;
 import net.minecraft.resources.ResourceLocation;
@@ -9,9 +10,6 @@ import net.minecraftforge.client.event.RenderLivingEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
 
-/**
- * Captures textures during entity rendering where ETF data is available
- */
 @Mod.EventBusSubscriber(modid = Ragdollified.MODID, bus = Mod.EventBusSubscriber.Bus.FORGE, value = Dist.CLIENT)
 public class EntityRenderCaptureHandler {
 
@@ -22,28 +20,23 @@ public class EntityRenderCaptureHandler {
 
         LivingEntity entity = event.getEntity();
 
-        // Only cache for mobs we support
-        if (!shouldCaptureMobTexture(entity)) return;
+        // Skip players
+        if (entity instanceof net.minecraft.world.entity.player.Player) return;
+
+        // Check if supported model type
+        MobModelHelper.ModelType modelType = MobModelHelper.getActualModelType(entity);
+        if (modelType == MobModelHelper.ModelType.UNSUPPORTED) return;
 
         try {
-            // Get default texture
             ResourceLocation defaultTexture = ((net.minecraft.client.renderer.entity.LivingEntityRenderer<T, M>) event.getRenderer())
                     .getTextureLocation((T) entity);
 
-            // Get ETF variant if available (uses reflection, safe without ETF)
             ResourceLocation actualTexture = ETFCompatibilityHelper.getVariantTexture(entity, defaultTexture);
 
-            // Store in cache - when this mob dies, we'll use this texture
             ClientMobTextureCache.cacheTexture(entity.getId(), actualTexture);
 
         } catch (Exception e) {
-            // Ignore errors - will fall back to default texture
+            // Ignore
         }
-    }
-
-    private static boolean shouldCaptureMobTexture(LivingEntity entity) {
-        return entity instanceof net.minecraft.world.entity.monster.Zombie ||
-                entity instanceof net.minecraft.world.entity.monster.Skeleton ||
-                entity instanceof net.minecraft.world.entity.monster.Creeper;
     }
 }

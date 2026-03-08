@@ -5,9 +5,6 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.LivingEntity;
-import net.minecraft.world.entity.monster.Zombie;
-import net.minecraft.world.entity.monster.Skeleton;
-import net.minecraft.world.entity.monster.Creeper;
 import net.minecraft.world.phys.AABB;
 import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.event.entity.living.LivingDeathEvent;
@@ -19,6 +16,7 @@ import java.util.List;
 
 @Mod.EventBusSubscriber(modid = Ragdollified.MODID)
 public class PhysicsHooks {
+
     @SubscribeEvent
     public static void onServerTick(TickEvent.LevelTickEvent event) {
         if (event.phase == TickEvent.Phase.END && event.level instanceof ServerLevel level) {
@@ -54,7 +52,7 @@ public class PhysicsHooks {
             player.level().addFreshEntity(deathRagdoll);
         }
         // Handle mob deaths - SERVER SIDE ONLY
-        else if (shouldCreateMobRagdoll(entity) && !entity.level().isClientSide) {
+        else if (MobModelHelper.shouldHaveRagdoll(entity) && !entity.level().isClientSide) {
             if (entity.level() instanceof ServerLevel serverLevel) {
                 entity.setInvisible(true);
                 entity.clearFire();
@@ -71,27 +69,14 @@ public class PhysicsHooks {
                             .ifPresent(oldest -> oldest.discard());
                 }
 
-                // Pass damage source and amount for velocity calculation
                 MobRagdollEntity mobRagdoll = MobRagdollEntity.createFromMob(
                         entity.level(),
                         entity,
                         event.getSource(),
-                        entity.getMaxHealth() // Use max health as damage estimate
+                        entity.getMaxHealth()
                 );
                 entity.level().addFreshEntity(mobRagdoll);
             }
         }
-    }
-
-    /**
-     * Determines which mobs should have ragdolls.
-     * Add more mob types here as you implement their renderers.
-     */
-    private static boolean shouldCreateMobRagdoll(LivingEntity entity) {
-        // Only create ragdolls for specific mob types
-        return entity instanceof Zombie ||
-                entity instanceof Skeleton ||
-                entity instanceof Creeper;
-        // Add more: entity instanceof Spider, etc.
     }
 }

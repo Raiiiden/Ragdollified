@@ -2,16 +2,13 @@ package com.raiiiden.ragdollified.client;
 
 import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.blaze3d.vertex.VertexConsumer;
-import com.raiiiden.ragdollified.MobPoseCapture;
-import com.raiiiden.ragdollified.MobRagdollEntity;
-import com.raiiiden.ragdollified.Ragdollified;
-import com.raiiiden.ragdollified.RagdollPart;
-import com.raiiiden.ragdollified.RagdollTransform;
+import com.raiiiden.ragdollified.*;
 import com.raiiiden.ragdollified.client.compat.GeckoLibArmorHelper;
 import net.minecraft.client.model.HumanoidModel;
-import net.minecraft.client.model.ZombieModel;
 import net.minecraft.client.model.SkeletonModel;
 import net.minecraft.client.model.CreeperModel;
+import net.minecraft.client.model.IllagerModel;
+import net.minecraft.client.model.DrownedModel;
 import net.minecraft.client.model.geom.ModelLayers;
 import net.minecraft.client.model.geom.ModelPart;
 import net.minecraft.client.model.geom.builders.CubeDeformation;
@@ -30,12 +27,18 @@ import org.joml.Quaternionf;
 import org.joml.Vector3f;
 
 public class MobRagdollRenderer extends EntityRenderer<MobRagdollEntity> {
-    private final ZombieModel<?> vanillaZombieModel;
-    private final SkeletonModel<?> vanillaSkeletonModel;
-    private final CreeperModel<?> vanillaCreeperModel;
+    // Different model types for different mob proportions
+    private final HumanoidModel<?> standardHumanoidModel;  // Zombies, husks, piglins, etc.
+    private final SkeletonModel<?> skeletonModel;          // Skeletons (64x32, thin)
+    private final IllagerModel<?> illagerModel;            // Pillagers, vindicators, etc. (big head)
+    private final DrownedModel<?> drownedModel;            // Drowned (different arms)
+    private final CreeperModel<?> creeperModel;            // Creepers
+
+    // Armor models
     private final HumanoidModel<?> armorInner;
     private final HumanoidModel<?> armorOuter;
 
+    // Standard pivot offsets
     private static final Vector3f[] headoff = new Vector3f[]{
             new Vector3f(0.0f, 0.0f, 0.0f), new Vector3f(0.0f, -6.0f/16, 0.0f)
     };
@@ -59,32 +62,36 @@ public class MobRagdollRenderer extends EntityRenderer<MobRagdollEntity> {
         super(context);
 
         try {
-            // Zombie uses humanoid mesh (64x64)
-            LayerDefinition humanoidDef = LayerDefinition.create(
+            // Standard humanoid model (64x64)
+            LayerDefinition standardHumanoidDef = LayerDefinition.create(
                     HumanoidModel.createMesh(CubeDeformation.NONE, 0.0F), 64, 64
             );
+            this.standardHumanoidModel = new HumanoidModel<>(standardHumanoidDef.bakeRoot());
 
-            // Skeleton must use its own layer (64x32, thin limbs)
+            // Skeleton model (64x32, thin limbs)
             LayerDefinition skeletonDef = SkeletonModel.createBodyLayer();
+            this.skeletonModel = new SkeletonModel<>(skeletonDef.bakeRoot());
 
-            // Creeper uses its own layer
+            // Illager model (big head, different proportions)
+            LayerDefinition illagerDef = IllagerModel.createBodyLayer();
+            this.illagerModel = new IllagerModel<>(illagerDef.bakeRoot());
+
+            // Drowned model (different arms for holding items)
+            LayerDefinition drownedDef = DrownedModel.createBodyLayer(CubeDeformation.NONE);
+            this.drownedModel = new DrownedModel<>(drownedDef.bakeRoot());
+
+            // Creeper model
             LayerDefinition creeperDef = CreeperModel.createBodyLayer(CubeDeformation.NONE);
+            this.creeperModel = new CreeperModel<>(creeperDef.bakeRoot());
 
-            this.vanillaZombieModel = new ZombieModel<>(humanoidDef.bakeRoot());
-            this.vanillaSkeletonModel = new SkeletonModel<>(skeletonDef.bakeRoot());
-            this.vanillaCreeperModel = new CreeperModel<>(creeperDef.bakeRoot());
-
-            Ragdollified.LOGGER.info("Successfully created vanilla models for ragdolls (bypassing EMF)");
+            Ragdollified.LOGGER.info("Successfully created all ragdoll renderer models");
         } catch (Exception e) {
-            Ragdollified.LOGGER.error("Failed to create vanilla models directly", e);
+            Ragdollified.LOGGER.error("Failed to create ragdoll renderer models", e);
             throw new RuntimeException("Could not initialize ragdoll renderer", e);
         }
 
         this.armorInner = new HumanoidModel<>(context.bakeLayer(ModelLayers.PLAYER_INNER_ARMOR));
         this.armorOuter = new HumanoidModel<>(context.bakeLayer(ModelLayers.PLAYER_OUTER_ARMOR));
-
-//        Ragdollified.LOGGER.info("MobRagdollRenderer created with " +
-//                (GeckoLibArmorHelper.isGeckoLibAvailable() ? "GeckoLib" : "vanilla only") + " support");
     }
 
     @Override
@@ -97,6 +104,7 @@ public class MobRagdollRenderer extends EntityRenderer<MobRagdollEntity> {
             return;
         }
 
+        // Try to capture pose if not yet available
         if (entity.getCapturedPose() == null && entity.tickCount < 20) {
             MobPoseCapture.MobPose capturedPose = MobPoseCapture.getPose(entity.getOriginalMobId());
 
@@ -109,18 +117,36 @@ public class MobRagdollRenderer extends EntityRenderer<MobRagdollEntity> {
 
         String mobType = entity.getMobType();
 
-        if (mobType.contains("zombie")) {
-            renderZombie(entity, rag, partialTick, poseStack, buffer, packedLight);
-        } else if (mobType.contains("skeleton")) {
-            renderSkeleton(entity, rag, partialTick, poseStack, buffer, packedLight);
-        } else if (mobType.contains("creeper")) {
-            renderCreeper(entity, rag, partialTick, poseStack, buffer, packedLight);
+        // Use MobModelHelper to determine which model to use
+        MobModelHelper.ModelType modelType = MobModelHelper.getModelTypeFromMobType(mobType);
+
+        // Route to appropriate renderer based on model type
+        switch (modelType) {
+            case CREEPER:
+                renderCreeper(entity, rag, partialTick, poseStack, buffer, packedLight);
+                break;
+            case ILLAGER:
+                renderIllager(entity, rag, partialTick, poseStack, buffer, packedLight);
+                break;
+            case HUMANOID_SKELETON:
+                renderHumanoid(entity, rag, partialTick, poseStack, buffer, packedLight, skeletonModel);
+                break;
+            case HUMANOID_DROWNED:
+                renderHumanoid(entity, rag, partialTick, poseStack, buffer, packedLight, drownedModel);
+                break;
+            case HUMANOID_STANDARD:
+            default:
+                renderHumanoid(entity, rag, partialTick, poseStack, buffer, packedLight, standardHumanoidModel);
+                break;
         }
     }
 
-    private void renderZombie(MobRagdollEntity entity, RagdollManager.ClientRagdoll rag,
-                              float partialTick, PoseStack poseStack,
-                              MultiBufferSource buffer, int light) {
+    /**
+     * Render illagers (they have a different model hierarchy)
+     */
+    private void renderIllager(MobRagdollEntity entity, RagdollManager.ClientRagdoll rag,
+                               float partialTick, PoseStack poseStack,
+                               MultiBufferSource buffer, int light) {
 
         RagdollTransform torso = rag.getPartInterpolated(RagdollPart.TORSO, partialTick);
         RagdollTransform head = rag.getPartInterpolated(RagdollPart.HEAD, partialTick);
@@ -138,21 +164,53 @@ public class MobRagdollRenderer extends EntityRenderer<MobRagdollEntity> {
         ResourceLocation texture = getTextureLocation(entity);
         VertexConsumer vertexConsumer = buffer.getBuffer(RenderType.entityCutoutNoCull(texture));
 
-        renderHumanoidPart(poseStack, vertexConsumer, vanillaZombieModel.body, torso, torso, torsoff, light, entity, RagdollPart.TORSO);
-        renderHumanoidPart(poseStack, vertexConsumer, vanillaZombieModel.head, head, torso, headoff, light, entity, RagdollPart.HEAD);
-        renderHumanoidPart(poseStack, vertexConsumer, vanillaZombieModel.leftLeg, lleg, torso, llegoff, light, entity, RagdollPart.LEFT_LEG);
-        renderHumanoidPart(poseStack, vertexConsumer, vanillaZombieModel.rightLeg, rleg, torso, rlegoff, light, entity, RagdollPart.RIGHT_LEG);
-        renderHumanoidPart(poseStack, vertexConsumer, vanillaZombieModel.leftArm, larm, torso, larmoff, light, entity, RagdollPart.LEFT_ARM);
-        renderHumanoidPart(poseStack, vertexConsumer, vanillaZombieModel.rightArm, rarm, torso, rarmoff, light, entity, RagdollPart.RIGHT_ARM);
+        // Get illager model parts from the root
+        ModelPart root = illagerModel.root();
+        ModelPart body = root.getChild("body");
+        ModelPart headPart = root.getChild("head");
+        ModelPart leftLeg = root.getChild("left_leg");
+        ModelPart rightLeg = root.getChild("right_leg");
+        ModelPart leftArm = root.getChild("left_arm");
+        ModelPart rightArm = root.getChild("right_arm");
 
+        // Hide the "arms" (crossed arms) part and show individual arms
+        try {
+            ModelPart arms = root.getChild("arms");
+            arms.visible = false;
+        } catch (Exception e) {
+            // arms part might not exist for some models
+        }
+        leftArm.visible = true;
+        rightArm.visible = true;
+
+        // Make sure all child parts are visible (nose, ears, etc.)
+        makeAllChildrenVisible(headPart);
+        makeAllChildrenVisible(body);
+        makeAllChildrenVisible(leftArm);
+        makeAllChildrenVisible(rightArm);
+        makeAllChildrenVisible(leftLeg);
+        makeAllChildrenVisible(rightLeg);
+
+        // Render body parts
+        renderHumanoidPart(poseStack, vertexConsumer, body, torso, torso, torsoff, light, entity, RagdollPart.TORSO);
+        renderHumanoidPart(poseStack, vertexConsumer, headPart, head, torso, headoff, light, entity, RagdollPart.HEAD);
+        renderHumanoidPart(poseStack, vertexConsumer, leftLeg, lleg, torso, llegoff, light, entity, RagdollPart.LEFT_LEG);
+        renderHumanoidPart(poseStack, vertexConsumer, rightLeg, rleg, torso, rlegoff, light, entity, RagdollPart.RIGHT_LEG);
+        renderHumanoidPart(poseStack, vertexConsumer, leftArm, larm, torso, larmoff, light, entity, RagdollPart.LEFT_ARM);
+        renderHumanoidPart(poseStack, vertexConsumer, rightArm, rarm, torso, rarmoff, light, entity, RagdollPart.RIGHT_ARM);
+
+        // Render armor
         renderArmor(entity, poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg);
 
         poseStack.popPose();
     }
 
-    private void renderSkeleton(MobRagdollEntity entity, RagdollManager.ClientRagdoll rag,
+    /**
+     * Universal humanoid renderer - works with any HumanoidModel
+     */
+    private void renderHumanoid(MobRagdollEntity entity, RagdollManager.ClientRagdoll rag,
                                 float partialTick, PoseStack poseStack,
-                                MultiBufferSource buffer, int light) {
+                                MultiBufferSource buffer, int light, HumanoidModel<?> model) {
 
         RagdollTransform torso = rag.getPartInterpolated(RagdollPart.TORSO, partialTick);
         RagdollTransform head = rag.getPartInterpolated(RagdollPart.HEAD, partialTick);
@@ -170,13 +228,23 @@ public class MobRagdollRenderer extends EntityRenderer<MobRagdollEntity> {
         ResourceLocation texture = getTextureLocation(entity);
         VertexConsumer vertexConsumer = buffer.getBuffer(RenderType.entityCutoutNoCull(texture));
 
-        renderHumanoidPart(poseStack, vertexConsumer, vanillaSkeletonModel.body, torso, torso, torsoff, light, entity, RagdollPart.TORSO);
-        renderHumanoidPart(poseStack, vertexConsumer, vanillaSkeletonModel.head, head, torso, headoff, light, entity, RagdollPart.HEAD);
-        renderHumanoidPart(poseStack, vertexConsumer, vanillaSkeletonModel.leftLeg, lleg, torso, llegoff, light, entity, RagdollPart.LEFT_LEG);
-        renderHumanoidPart(poseStack, vertexConsumer, vanillaSkeletonModel.rightLeg, rleg, torso, rlegoff, light, entity, RagdollPart.RIGHT_LEG);
-        renderHumanoidPart(poseStack, vertexConsumer, vanillaSkeletonModel.leftArm, larm, torso, larmoff, light, entity, RagdollPart.LEFT_ARM);
-        renderHumanoidPart(poseStack, vertexConsumer, vanillaSkeletonModel.rightArm, rarm, torso, rarmoff, light, entity, RagdollPart.RIGHT_ARM);
+        // Make sure all child parts are visible (for decorations like piglin ears/nose)
+        makeAllChildrenVisible(model.head);
+        makeAllChildrenVisible(model.body);
+        makeAllChildrenVisible(model.leftArm);
+        makeAllChildrenVisible(model.rightArm);
+        makeAllChildrenVisible(model.leftLeg);
+        makeAllChildrenVisible(model.rightLeg);
 
+        // Render body parts
+        renderHumanoidPart(poseStack, vertexConsumer, model.body, torso, torso, torsoff, light, entity, RagdollPart.TORSO);
+        renderHumanoidPart(poseStack, vertexConsumer, model.head, head, torso, headoff, light, entity, RagdollPart.HEAD);
+        renderHumanoidPart(poseStack, vertexConsumer, model.leftLeg, lleg, torso, llegoff, light, entity, RagdollPart.LEFT_LEG);
+        renderHumanoidPart(poseStack, vertexConsumer, model.rightLeg, rleg, torso, rlegoff, light, entity, RagdollPart.RIGHT_LEG);
+        renderHumanoidPart(poseStack, vertexConsumer, model.leftArm, larm, torso, larmoff, light, entity, RagdollPart.LEFT_ARM);
+        renderHumanoidPart(poseStack, vertexConsumer, model.rightArm, rarm, torso, rarmoff, light, entity, RagdollPart.RIGHT_ARM);
+
+        // Render armor
         renderArmor(entity, poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg);
 
         poseStack.popPose();
@@ -202,7 +270,7 @@ public class MobRagdollRenderer extends EntityRenderer<MobRagdollEntity> {
         ResourceLocation texture = getTextureLocation(entity);
         VertexConsumer vertexConsumer = buffer.getBuffer(RenderType.entityCutoutNoCull(texture));
 
-        ModelPart root = vanillaCreeperModel.root();
+        ModelPart root = creeperModel.root();
         ModelPart body       = root.getChild("body");
         ModelPart headPart   = root.getChild("head");
         ModelPart rightHind  = root.getChild("right_hind_leg");
@@ -216,6 +284,7 @@ public class MobRagdollRenderer extends EntityRenderer<MobRagdollEntity> {
         renderHumanoidPart(poseStack, vertexConsumer, rightHind, rightHindT, torso, rlegoff, light, entity, RagdollPart.RIGHT_LEG);
         renderHumanoidPart(poseStack, vertexConsumer, leftFront, leftFrontT, torso, llegoff, light, entity, RagdollPart.LEFT_ARM);
         renderHumanoidPart(poseStack, vertexConsumer, rightFront, rightFrontT, torso, rlegoff, light, entity, RagdollPart.RIGHT_ARM);
+
         poseStack.popPose();
     }
 
@@ -512,18 +581,55 @@ public class MobRagdollRenderer extends EntityRenderer<MobRagdollEntity> {
         }
 
         String mobType = entity.getMobType();
-        ResourceLocation fallback;
-        if (mobType.contains("zombie")) {
-            fallback = new ResourceLocation("minecraft", "textures/entity/zombie/zombie.png");
-        } else if (mobType.contains("skeleton")) {
-            fallback = new ResourceLocation("minecraft", "textures/entity/skeleton/skeleton.png");
-        } else if (mobType.contains("creeper")) {
-            fallback = new ResourceLocation("minecraft", "textures/entity/creeper/creeper.png");
-        } else {
-            fallback = new ResourceLocation("minecraft", "textures/entity/zombie/zombie.png");
-        }
+        ResourceLocation fallback = getFallbackTexture(mobType);
 
         entity.setCachedTexture(fallback);
         return fallback;
+    }
+
+    private ResourceLocation getFallbackTexture(String mobType) {
+        // Zombies and variants
+        if (mobType.contains("zombie") && !mobType.contains("piglin")) {
+            if (mobType.contains("husk")) return new ResourceLocation("minecraft", "textures/entity/zombie/husk.png");
+            if (mobType.contains("drowned")) return new ResourceLocation("minecraft", "textures/entity/zombie/drowned.png");
+            if (mobType.contains("villager")) return new ResourceLocation("minecraft", "textures/entity/zombie_villager/zombie_villager.png");
+            return new ResourceLocation("minecraft", "textures/entity/zombie/zombie.png");
+        }
+
+        // Skeletons and variants
+        if (mobType.contains("skeleton")) {
+            if (mobType.contains("wither")) return new ResourceLocation("minecraft", "textures/entity/skeleton/wither_skeleton.png");
+            if (mobType.contains("stray")) return new ResourceLocation("minecraft", "textures/entity/skeleton/stray.png");
+            return new ResourceLocation("minecraft", "textures/entity/skeleton/skeleton.png");
+        }
+
+        // Piglins and variants
+        if (mobType.contains("piglin")) {
+            if (mobType.contains("brute")) return new ResourceLocation("minecraft", "textures/entity/piglin/piglin_brute.png");
+            if (mobType.contains("zombified")) return new ResourceLocation("minecraft", "textures/entity/piglin/zombified_piglin.png");
+            return new ResourceLocation("minecraft", "textures/entity/piglin/piglin.png");
+        }
+
+        // Illagers
+        if (mobType.contains("pillager")) return new ResourceLocation("minecraft", "textures/entity/illager/pillager.png");
+        if (mobType.contains("vindicator")) return new ResourceLocation("minecraft", "textures/entity/illager/vindicator.png");
+        if (mobType.contains("evoker")) return new ResourceLocation("minecraft", "textures/entity/illager/evoker.png");
+        if (mobType.contains("illusioner")) return new ResourceLocation("minecraft", "textures/entity/illager/illusioner.png");
+
+        // Villagers
+        if (mobType.contains("villager")) return new ResourceLocation("minecraft", "textures/entity/villager/villager.png");
+        if (mobType.contains("wandering_trader")) return new ResourceLocation("minecraft", "textures/entity/wandering_trader.png");
+
+        // Creeper
+        if (mobType.contains("creeper")) return new ResourceLocation("minecraft", "textures/entity/creeper/creeper.png");
+
+        // Default fallback
+        return new ResourceLocation("minecraft", "textures/entity/zombie/zombie.png");
+    }
+
+    private void makeAllChildrenVisible(ModelPart part) {
+        part.visible = true;
+        // Iterate through all parts in the hierarchy and make them visible
+        part.getAllParts().forEach(p -> p.visible = true);
     }
 }
