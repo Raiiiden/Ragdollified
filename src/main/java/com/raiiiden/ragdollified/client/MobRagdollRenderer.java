@@ -740,23 +740,35 @@ public class MobRagdollRenderer extends EntityRenderer<MobRagdollEntity> {
                                     MobRagdollEntity entity, RagdollPart ragdollPart) {
         if (transform == null) return;
 
-        part.setPos(pivot[0].x, pivot[0].y, pivot[0].z);
         poseStack.pushPose();
 
-        Quaternionf torsoRot = new Quaternionf(
-                torso.rotation.x, torso.rotation.y, torso.rotation.z, torso.rotation.w
+        // Translate to this part's physics world position (relative to torso)
+        poseStack.translate(
+                transform.position.x - torso.position.x,
+                transform.position.y - torso.position.y,
+                transform.position.z - torso.position.z
         );
 
-        Vector3f rotatedPivot = new Vector3f(pivot[1]);
-        torsoRot.transform(rotatedPivot);
-
+        // Apply physics rotation with Minecraft Y-down coordinate flip
         Quaternionf q = new Quaternionf(
                 transform.rotation.x, transform.rotation.y, transform.rotation.z, transform.rotation.w
         );
-
-        poseStack.translate(-rotatedPivot.x, -rotatedPivot.y, -rotatedPivot.z);
         q.rotateZ((float) Math.PI);
         poseStack.mulPose(q);
+
+        // Center model geometry on the physics body position
+        // Offsets computed from each humanoid cube's center point
+        switch (ragdollPart) {
+            case HEAD:    part.setPos(0, 4, 0);    break; // cube(-4,-8,-4, 8,8,8) center Y=-4
+            case TORSO:   part.setPos(0, -6, 0);   break; // cube(-4,0,-2, 8,12,4) center Y=6
+            case LEFT_ARM:  part.setPos(-1, -4, 0); break; // cube(-1,-2,-2, 4,12,4) center (1,4,0)
+            case RIGHT_ARM: part.setPos(1, -4, 0);  break; // cube(-3,-2,-2, 4,12,4) center (-1,4,0)
+            case LEFT_LEG:
+            case RIGHT_LEG: part.setPos(0, -6, 0);  break; // cube(-2,0,-2, 4,12,4) center Y=6
+        }
+        part.xRot = 0;
+        part.yRot = 0;
+        part.zRot = 0;
 
         part.render(poseStack, vertexConsumer, light, OverlayTexture.NO_OVERLAY);
         poseStack.popPose();
