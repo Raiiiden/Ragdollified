@@ -128,7 +128,6 @@ public class MobRagdollPhysics {
                     entity.getOriginalMobId());
         }
 
-        // Match DeathRagdollPhysics exactly — torso origin at getY() + 1.3f
         Vector3f pos = new Vector3f(
                 (float) entity.getX(),
                 (float) entity.getY() + 1.3f,
@@ -157,13 +156,321 @@ public class MobRagdollPhysics {
                 (float) entity.getDeltaMovement().z * 20
         );
 
-        if (mobType.contains("creeper")) {
-            createCreeperBodies(pos, baseQuat, scale, initialVel, worldOffset, capturedPose);
-        } else {
-            createHumanoidBodies(pos, baseQuat, scale, initialVel, worldOffset, capturedPose);
+        MobModelHelper.ModelType modelType = MobModelHelper.getModelTypeFromMobType(mobType);
+
+        switch (modelType) {
+            case CREEPER:
+                createCreeperBodies(pos, baseQuat, scale, initialVel, worldOffset, capturedPose);
+                break;
+            case QUADRUPED:
+            case CHICKEN:
+                createQuadrupedBodies(pos, baseQuat, scale, initialVel, worldOffset, capturedPose, modelType);
+                break;
+            default:
+                createHumanoidBodies(pos, baseQuat, scale, initialVel, worldOffset, capturedPose);
+                break;
         }
 
         createJoints();
+    }
+
+    private void createQuadrupedBodies(Vector3f basePos, Quat4f baseQuat, float scale, Vector3f initialVel,
+                                       java.util.function.Function<Vector3f, Vector3f> worldOffset,
+                                       MobPoseCapture.MobPose capturedPose,
+                                       MobModelHelper.ModelType modelType) {
+
+        boolean isChicken = (modelType == MobModelHelper.ModelType.CHICKEN);
+
+        Quat4f torsoRot = capturedPose != null ?
+                multiplyQuaternions(baseQuat, capturedPose.getRotationQuaternion(RagdollPart.TORSO)) :
+                baseQuat;
+        Quat4f headRot = capturedPose != null ?
+                multiplyQuaternions(baseQuat, capturedPose.getRotationQuaternion(RagdollPart.HEAD)) :
+                baseQuat;
+        Quat4f flRot = capturedPose != null ?
+                multiplyQuaternions(baseQuat, capturedPose.getRotationQuaternion(RagdollPart.LEFT_ARM)) :
+                baseQuat;
+        Quat4f frRot = capturedPose != null ?
+                multiplyQuaternions(baseQuat, capturedPose.getRotationQuaternion(RagdollPart.RIGHT_ARM)) :
+                baseQuat;
+        Quat4f blRot = capturedPose != null ?
+                multiplyQuaternions(baseQuat, capturedPose.getRotationQuaternion(RagdollPart.LEFT_LEG)) :
+                baseQuat;
+        Quat4f brRot = capturedPose != null ?
+                multiplyQuaternions(baseQuat, capturedPose.getRotationQuaternion(RagdollPart.RIGHT_LEG)) :
+                baseQuat;
+
+        if (isChicken) {
+            // Chicken: upright, spawn at ground level + small offset
+            Vector3f torsoPos = new Vector3f(
+                    (float) entity.getX(),
+                    (float) entity.getY() + 0.4f * scale,
+                    (float) entity.getZ()
+            );
+
+            Vector3f headPos = calculatePartWorldPosition(torsoPos, torsoRot,
+                    new Vector3f(0f, 0.3f * scale, -0.2f * scale), headRot,
+                    new Vector3f(0f, 0.15f * scale, 0f));
+            Vector3f llPos = calculatePartWorldPosition(torsoPos, torsoRot,
+                    new Vector3f(-0.1f * scale, -0.2f * scale, 0f), blRot,
+                    new Vector3f(0f, -0.15f * scale, 0f));
+            Vector3f rlPos = calculatePartWorldPosition(torsoPos, torsoRot,
+                    new Vector3f(0.1f * scale, -0.2f * scale, 0f), brRot,
+                    new Vector3f(0f, -0.15f * scale, 0f));
+            Vector3f lwPos = calculatePartWorldPosition(torsoPos, torsoRot,
+                    new Vector3f(-0.25f * scale, 0.05f * scale, 0f), flRot,
+                    new Vector3f(-0.1f * scale, 0f, 0f));
+            Vector3f rwPos = calculatePartWorldPosition(torsoPos, torsoRot,
+                    new Vector3f(0.25f * scale, 0.05f * scale, 0f), frRot,
+                    new Vector3f(0.1f * scale, 0f, 0f));
+
+            ragdollParts.add(createRagdollPart(
+                    new BoxShape(new Vector3f(0.2f * scale, 0.22f * scale, 0.15f * scale)),
+                    torsoPos, torsoRot, 5 * scale, initialVel));
+            ragdollParts.add(createRagdollPart(
+                    new BoxShape(new Vector3f(0.12f * scale, 0.12f * scale, 0.12f * scale)),
+                    headPos, headRot, 2 * scale, initialVel));
+            ragdollParts.add(createRagdollPart(
+                    new BoxShape(new Vector3f(0.06f * scale, 0.18f * scale, 0.06f * scale)),
+                    llPos, blRot, 1 * scale, initialVel));
+            ragdollParts.add(createRagdollPart(
+                    new BoxShape(new Vector3f(0.06f * scale, 0.18f * scale, 0.06f * scale)),
+                    rlPos, brRot, 1 * scale, initialVel));
+            ragdollParts.add(createRagdollPart(
+                    new BoxShape(new Vector3f(0.05f * scale, 0.18f * scale, 0.12f * scale)),
+                    lwPos, flRot, 1 * scale, initialVel));
+            ragdollParts.add(createRagdollPart(
+                    new BoxShape(new Vector3f(0.05f * scale, 0.18f * scale, 0.12f * scale)),
+                    rwPos, frRot, 1 * scale, initialVel));
+
+        } else {
+            // Standard quadruped (cow, sheep, pig)
+            // Torso spawns at ~mid-body height. Cow body height is ~1.4 blocks,
+            // center of body is roughly at getY() + 0.7
+            Vector3f torsoPos = new Vector3f(
+                    (float) entity.getX(),
+                    (float) entity.getY() + 0.7f * scale,
+                    (float) entity.getZ()
+            );
+
+            // Head is forward (negative Z in Minecraft = forward) and at same height as torso
+            // Cow head offset from body center: forward ~0.65, slightly up ~0.1
+            Vector3f headPos = calculatePartWorldPosition(torsoPos, torsoRot,
+                    new Vector3f(0f, 0.1f * scale, -0.65f * scale), headRot,
+                    new Vector3f(0f, 0f, -0.2f * scale));
+
+            // Legs hang straight down from torso corners
+            // Front legs: forward ~0.35, down ~0.55 from torso center
+            Vector3f flPos = calculatePartWorldPosition(torsoPos, torsoRot,
+                    new Vector3f(-0.2f * scale, -0.35f * scale, -0.35f * scale), flRot,
+                    new Vector3f(0f, -0.2f * scale, 0f));
+            Vector3f frPos = calculatePartWorldPosition(torsoPos, torsoRot,
+                    new Vector3f(0.2f * scale, -0.35f * scale, -0.35f * scale), frRot,
+                    new Vector3f(0f, -0.2f * scale, 0f));
+
+            // Hind legs: back ~0.35
+            Vector3f blPos = calculatePartWorldPosition(torsoPos, torsoRot,
+                    new Vector3f(-0.2f * scale, -0.35f * scale, 0.35f * scale), blRot,
+                    new Vector3f(0f, -0.2f * scale, 0f));
+            Vector3f brPos = calculatePartWorldPosition(torsoPos, torsoRot,
+                    new Vector3f(0.2f * scale, -0.35f * scale, 0.35f * scale), brRot,
+                    new Vector3f(0f, -0.2f * scale, 0f));
+
+            // Torso: wide on X (left/right), tall on Y, long on Z (front/back)
+            ragdollParts.add(createRagdollPart(
+                    new BoxShape(new Vector3f(0.28f * scale, 0.38f * scale, 0.48f * scale)),
+                    torsoPos, torsoRot, 10 * scale, initialVel));
+
+            // Head
+            ragdollParts.add(createRagdollPart(
+                    new BoxShape(new Vector3f(0.2f * scale, 0.2f * scale, 0.28f * scale)),
+                    headPos, headRot, 3 * scale, initialVel));
+
+            // Hind left (LEFT_LEG slot)
+            ragdollParts.add(createRagdollPart(
+                    new BoxShape(new Vector3f(0.1f * scale, 0.28f * scale, 0.1f * scale)),
+                    blPos, blRot, 3 * scale, initialVel));
+
+            // Hind right (RIGHT_LEG slot)
+            ragdollParts.add(createRagdollPart(
+                    new BoxShape(new Vector3f(0.1f * scale, 0.28f * scale, 0.1f * scale)),
+                    brPos, brRot, 3 * scale, initialVel));
+
+            // Front left (LEFT_ARM slot)
+            ragdollParts.add(createRagdollPart(
+                    new BoxShape(new Vector3f(0.1f * scale, 0.28f * scale, 0.1f * scale)),
+                    flPos, flRot, 3 * scale, initialVel));
+
+            // Front right (RIGHT_ARM slot)
+            ragdollParts.add(createRagdollPart(
+                    new BoxShape(new Vector3f(0.1f * scale, 0.28f * scale, 0.1f * scale)),
+                    frPos, frRot, 3 * scale, initialVel));
+        }
+    }
+
+    private void createQuadrupedJoints(RigidBody torso, RigidBody head,
+                                       RigidBody frontLeft, RigidBody frontRight,
+                                       RigidBody hindLeft, RigidBody hindRight,
+                                       Transform tTorso, Transform tHead,
+                                       Transform tFL, Transform tFR,
+                                       Transform tHL, Transform tHR,
+                                       java.util.function.Function<Vector3f, Vector3f> torsoLocalToWorld,
+                                       float scale) {
+        float legLimit = (float) Math.toRadians(40);
+        float headLimit = (float) Math.toRadians(35);
+
+        // Head <-> Torso — anchor at front face of torso
+        Vector3f torsoFront = torsoLocalToWorld.apply(new Vector3f(0f, 0.1f * scale, -0.48f * scale));
+        Quat4f hrot = tHead.getRotation(new Quat4f());
+        Vector3f headBack = rotateVecByQuat(hrot, new Vector3f(0f, 0f, 0.25f * scale));
+        headBack.add(tHead.origin);
+        Vector3f headAnchor = new Vector3f(
+                (torsoFront.x + headBack.x) * 0.5f,
+                (torsoFront.y + headBack.y) * 0.5f,
+                (torsoFront.z + headBack.z) * 0.5f);
+        ragdollJoints.add(createJointAtWorldAnchor(torso, head, headAnchor,
+                new Vector3f(0, 0, 0), new Vector3f(0, 0, 0),
+                new Vector3f(-headLimit, (float) -Math.toRadians(25), (float) -Math.toRadians(20)),
+                new Vector3f(headLimit, (float) Math.toRadians(25), (float) Math.toRadians(20))));
+
+        // Front Left Leg <-> Torso
+        Vector3f flAnchor = torsoLocalToWorld.apply(new Vector3f(-0.2f * scale, -0.35f * scale, -0.35f * scale));
+        ragdollJoints.add(createJointAtWorldAnchor(torso, frontLeft, flAnchor,
+                new Vector3f(-0.02f, -0.02f, -0.02f), new Vector3f(0.02f, 0.02f, 0.02f),
+                new Vector3f(-legLimit, (float) -Math.toRadians(10), (float) -Math.toRadians(10)),
+                new Vector3f(legLimit, (float) Math.toRadians(10), (float) Math.toRadians(10))));
+
+        // Front Right Leg <-> Torso
+        Vector3f frAnchor = torsoLocalToWorld.apply(new Vector3f(0.2f * scale, -0.35f * scale, -0.35f * scale));
+        ragdollJoints.add(createJointAtWorldAnchor(torso, frontRight, frAnchor,
+                new Vector3f(-0.02f, -0.02f, -0.02f), new Vector3f(0.02f, 0.02f, 0.02f),
+                new Vector3f(-legLimit, (float) -Math.toRadians(10), (float) -Math.toRadians(10)),
+                new Vector3f(legLimit, (float) Math.toRadians(10), (float) Math.toRadians(10))));
+
+        // Hind Left Leg <-> Torso
+        Vector3f hlAnchor = torsoLocalToWorld.apply(new Vector3f(-0.2f * scale, -0.35f * scale, 0.35f * scale));
+        ragdollJoints.add(createJointAtWorldAnchor(torso, hindLeft, hlAnchor,
+                new Vector3f(-0.02f, -0.02f, -0.02f), new Vector3f(0.02f, 0.02f, 0.02f),
+                new Vector3f(-legLimit, (float) -Math.toRadians(10), (float) -Math.toRadians(10)),
+                new Vector3f(legLimit, (float) Math.toRadians(10), (float) Math.toRadians(10))));
+
+        // Hind Right Leg <-> Torso
+        Vector3f hrAnchor = torsoLocalToWorld.apply(new Vector3f(0.2f * scale, -0.35f * scale, 0.35f * scale));
+        ragdollJoints.add(createJointAtWorldAnchor(torso, hindRight, hrAnchor,
+                new Vector3f(-0.02f, -0.02f, -0.02f), new Vector3f(0.02f, 0.02f, 0.02f),
+                new Vector3f(-legLimit, (float) -Math.toRadians(10), (float) -Math.toRadians(10)),
+                new Vector3f(legLimit, (float) Math.toRadians(10), (float) Math.toRadians(10))));
+    }
+
+    private void createJoints() {
+        if (ragdollParts.size() < 6) return;
+
+        String mobType = entity.getMobType();
+        float scale = entity.getMobScale();
+
+        RigidBody torso = ragdollParts.get(RagdollPart.TORSO.index);
+        RigidBody head  = ragdollParts.get(RagdollPart.HEAD.index);
+        RigidBody lLeg  = ragdollParts.get(RagdollPart.LEFT_LEG.index);
+        RigidBody rLeg  = ragdollParts.get(RagdollPart.RIGHT_LEG.index);
+        RigidBody lArm  = ragdollParts.get(RagdollPart.LEFT_ARM.index);
+        RigidBody rArm  = ragdollParts.get(RagdollPart.RIGHT_ARM.index);
+
+        Transform tTorso = new Transform(); torso.getMotionState().getWorldTransform(tTorso);
+        Transform tHead  = new Transform(); head.getMotionState().getWorldTransform(tHead);
+        Transform tLLeg  = new Transform(); lLeg.getMotionState().getWorldTransform(tLLeg);
+        Transform tRLeg  = new Transform(); rLeg.getMotionState().getWorldTransform(tRLeg);
+        Transform tLArm  = new Transform(); lArm.getMotionState().getWorldTransform(tLArm);
+        Transform tRArm  = new Transform(); rArm.getMotionState().getWorldTransform(tRArm);
+
+        java.util.function.Function<Vector3f, Vector3f> torsoLocalToWorld = (local) -> {
+            Quat4f trot = tTorso.getRotation(new Quat4f());
+            Vector3f out = rotateVecByQuat(trot, local);
+            out.add(tTorso.origin);
+            return out;
+        };
+
+        MobModelHelper.ModelType modelType = MobModelHelper.getModelTypeFromMobType(mobType);
+
+        switch (modelType) {
+            case CREEPER:
+                createCreeperJoints(
+                        torso, head, lArm, rArm, lLeg, rLeg,
+                        tTorso, tHead, tLArm, tRArm, tLLeg, tRLeg,
+                        torsoLocalToWorld, scale);
+                break;
+            case QUADRUPED:
+                createQuadrupedJoints(
+                        torso, head, lArm, rArm, lLeg, rLeg,
+                        tTorso, tHead, tLArm, tRArm, tLLeg, tRLeg,
+                        torsoLocalToWorld, scale);
+                break;
+            case CHICKEN:
+                createChickenJoints(
+                        torso, head, lArm, rArm, lLeg, rLeg,
+                        tTorso, tHead, tLArm, tRArm, tLLeg, tRLeg,
+                        torsoLocalToWorld, scale);
+                break;
+            default:
+                createHumanoidJoints(torso, head, lLeg, rLeg, lArm, rArm,
+                        tTorso, tHead, tLLeg, tRLeg, tLArm, tRArm,
+                        torsoLocalToWorld, scale);
+                break;
+        }
+    }
+
+    private void createChickenJoints(RigidBody torso, RigidBody head,
+                                     RigidBody leftWing, RigidBody rightWing,
+                                     RigidBody leftLeg, RigidBody rightLeg,
+                                     Transform tTorso, Transform tHead,
+                                     Transform tLW, Transform tRW,
+                                     Transform tLL, Transform tRL,
+                                     java.util.function.Function<Vector3f, Vector3f> torsoLocalToWorld,
+                                     float scale) {
+        float wingLimit  = (float) Math.toRadians(50);
+        float legLimit   = (float) Math.toRadians(40);
+        float headLimit  = (float) Math.toRadians(30);
+
+        // Head <-> Torso
+        Vector3f torsoTop = torsoLocalToWorld.apply(new Vector3f(0f, 0.25f * scale, -0.15f * scale));
+        Quat4f hrot = tHead.getRotation(new Quat4f());
+        Vector3f headBottom = rotateVecByQuat(hrot, new Vector3f(0f, -0.15f * scale, 0f));
+        headBottom.add(tHead.origin);
+        Vector3f headAnchor = new Vector3f(
+                (torsoTop.x + headBottom.x) * 0.5f,
+                (torsoTop.y + headBottom.y) * 0.5f,
+                (torsoTop.z + headBottom.z) * 0.5f);
+        ragdollJoints.add(createJointAtWorldAnchor(torso, head, headAnchor,
+                new Vector3f(0, 0, 0), new Vector3f(0, 0, 0),
+                new Vector3f(-headLimit, (float) -Math.toRadians(20), -headLimit),
+                new Vector3f(headLimit, (float) Math.toRadians(20), headLimit)));
+
+        // Left Wing <-> Torso
+        Vector3f lwAnchor = torsoLocalToWorld.apply(new Vector3f(-0.2f * scale, 0.1f * scale, 0f));
+        ragdollJoints.add(createJointAtWorldAnchor(torso, leftWing, lwAnchor,
+                new Vector3f(-0.01f, -0.01f, -0.01f), new Vector3f(0.01f, 0.01f, 0.01f),
+                new Vector3f(-wingLimit, (float) -Math.toRadians(20), -wingLimit),
+                new Vector3f(wingLimit, (float) Math.toRadians(20), wingLimit)));
+
+        // Right Wing <-> Torso
+        Vector3f rwAnchor = torsoLocalToWorld.apply(new Vector3f(0.2f * scale, 0.1f * scale, 0f));
+        ragdollJoints.add(createJointAtWorldAnchor(torso, rightWing, rwAnchor,
+                new Vector3f(-0.01f, -0.01f, -0.01f), new Vector3f(0.01f, 0.01f, 0.01f),
+                new Vector3f(-wingLimit, (float) -Math.toRadians(20), -wingLimit),
+                new Vector3f(wingLimit, (float) Math.toRadians(20), wingLimit)));
+
+        // Left Leg <-> Torso
+        Vector3f llAnchor = torsoLocalToWorld.apply(new Vector3f(-0.1f * scale, -0.2f * scale, 0f));
+        ragdollJoints.add(createJointAtWorldAnchor(torso, leftLeg, llAnchor,
+                new Vector3f(-0.02f, -0.02f, -0.02f), new Vector3f(0.02f, 0.02f, 0.02f),
+                new Vector3f(-legLimit, (float) -Math.toRadians(10), (float) -Math.toRadians(10)),
+                new Vector3f(legLimit, (float) Math.toRadians(10), (float) Math.toRadians(10))));
+
+        // Right Leg <-> Torso
+        Vector3f rlAnchor = torsoLocalToWorld.apply(new Vector3f(0.1f * scale, -0.2f * scale, 0f));
+        ragdollJoints.add(createJointAtWorldAnchor(torso, rightLeg, rlAnchor,
+                new Vector3f(-0.02f, -0.02f, -0.02f), new Vector3f(0.02f, 0.02f, 0.02f),
+                new Vector3f(-legLimit, (float) -Math.toRadians(10), (float) -Math.toRadians(10)),
+                new Vector3f(legLimit, (float) Math.toRadians(10), (float) Math.toRadians(10))));
     }
 
     private void createHumanoidBodies(Vector3f basePos, Quat4f baseQuat, float scale, Vector3f initialVel,
@@ -352,57 +659,6 @@ public class MobRagdollPhysics {
 
         world.addRigidBody(body);
         return body;
-    }
-
-    private void createJoints() {
-        if (ragdollParts.size() < 6) return;
-
-        String mobType = entity.getMobType();
-        float scale = entity.getMobScale();
-
-        RigidBody torso = ragdollParts.get(RagdollPart.TORSO.index);
-        RigidBody head = ragdollParts.get(RagdollPart.HEAD.index);
-        RigidBody lLeg = ragdollParts.get(RagdollPart.LEFT_LEG.index);
-        RigidBody rLeg = ragdollParts.get(RagdollPart.RIGHT_LEG.index);
-        RigidBody lArm = ragdollParts.get(RagdollPart.LEFT_ARM.index);
-        RigidBody rArm = ragdollParts.get(RagdollPart.RIGHT_ARM.index);
-
-        Transform tTorso = new Transform();
-        torso.getMotionState().getWorldTransform(tTorso);
-        Transform tHead = new Transform();
-        head.getMotionState().getWorldTransform(tHead);
-        Transform tLLeg = new Transform();
-        lLeg.getMotionState().getWorldTransform(tLLeg);
-        Transform tRLeg = new Transform();
-        rLeg.getMotionState().getWorldTransform(tRLeg);
-        Transform tLArm = new Transform();
-        lArm.getMotionState().getWorldTransform(tLArm);
-        Transform tRArm = new Transform();
-        rArm.getMotionState().getWorldTransform(tRArm);
-
-        java.util.function.Function<Vector3f, Vector3f> torsoLocalToWorld = (local) -> {
-            Quat4f trot = tTorso.getRotation(new Quat4f());
-            Vector3f out = rotateVecByQuat(trot, local);
-            out.add(tTorso.origin);
-            return out;
-        };
-
-        if (mobType.contains("creeper")) {
-            createCreeperJoints(
-                    torso, head,
-                    lArm, rArm,     // FRONT legs
-                    lLeg, rLeg,     // BACK legs
-                    tTorso, tHead,
-                    tLArm, tRArm,   // FRONT transforms
-                    tLLeg, tRLeg,   // BACK transforms
-                    torsoLocalToWorld,
-                    scale
-            );
-    } else {
-            createHumanoidJoints(torso, head, lLeg, rLeg, lArm, rArm,
-                    tTorso, tHead, tLLeg, tRLeg, tLArm, tRArm,
-                    torsoLocalToWorld, scale);
-        }
     }
 
     private void createHumanoidJoints(RigidBody torso, RigidBody head, RigidBody lLeg, RigidBody rLeg,

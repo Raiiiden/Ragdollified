@@ -4,11 +4,7 @@ import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.blaze3d.vertex.VertexConsumer;
 import com.raiiiden.ragdollified.*;
 import com.raiiiden.ragdollified.client.compat.GeckoLibArmorHelper;
-import net.minecraft.client.model.HumanoidModel;
-import net.minecraft.client.model.SkeletonModel;
-import net.minecraft.client.model.CreeperModel;
-import net.minecraft.client.model.IllagerModel;
-import net.minecraft.client.model.DrownedModel;
+import net.minecraft.client.model.*;
 import net.minecraft.client.model.geom.ModelLayers;
 import net.minecraft.client.model.geom.ModelPart;
 import net.minecraft.client.model.geom.builders.CubeDeformation;
@@ -37,6 +33,11 @@ public class MobRagdollRenderer extends EntityRenderer<MobRagdollEntity> {
     // Armor models
     private final HumanoidModel<?> armorInner;
     private final HumanoidModel<?> armorOuter;
+    // Change all four quadruped fields to ModelPart instead
+    private final ModelPart cowRoot;
+    private final ModelPart sheepRoot;
+    private final ModelPart pigRoot;
+    private final ModelPart chickenRoot;
 
     // Standard pivot offsets
     private static final Vector3f[] headoff = new Vector3f[]{
@@ -84,6 +85,19 @@ public class MobRagdollRenderer extends EntityRenderer<MobRagdollEntity> {
             LayerDefinition creeperDef = CreeperModel.createBodyLayer(CubeDeformation.NONE);
             this.creeperModel = new CreeperModel<>(creeperDef.bakeRoot());
 
+            // Quadruped animal models
+            LayerDefinition cowDef = net.minecraft.client.model.CowModel.createBodyLayer();
+            this.cowRoot = cowDef.bakeRoot();
+
+            LayerDefinition sheepDef = net.minecraft.client.model.SheepModel.createBodyLayer();
+            this.sheepRoot = sheepDef.bakeRoot();
+
+            LayerDefinition pigDef = net.minecraft.client.model.PigModel.createBodyLayer(CubeDeformation.NONE);
+            this.pigRoot = pigDef.bakeRoot();
+
+            LayerDefinition chickenDef = ChickenModel.createBodyLayer();
+            this.chickenRoot = chickenDef.bakeRoot();
+
             Ragdollified.LOGGER.info("Successfully created all ragdoll renderer models");
         } catch (Exception e) {
             Ragdollified.LOGGER.error("Failed to create ragdoll renderer models", e);
@@ -104,26 +118,26 @@ public class MobRagdollRenderer extends EntityRenderer<MobRagdollEntity> {
             return;
         }
 
-        // Try to capture pose if not yet available
         if (entity.getCapturedPose() == null && entity.tickCount < 20) {
             MobPoseCapture.MobPose capturedPose = MobPoseCapture.getPose(entity.getOriginalMobId());
-
             if (capturedPose != null) {
                 entity.setCapturedPose(capturedPose);
-                Ragdollified.LOGGER.debug("Captured pose for mob {} -> ragdoll {} on tick {}",
-                        entity.getOriginalMobId(), entity.getId(), entity.tickCount);
             }
         }
 
         String mobType = entity.getMobType();
-
-        // Use MobModelHelper to determine which model to use
         MobModelHelper.ModelType modelType = MobModelHelper.getModelTypeFromMobType(mobType);
 
-        // Route to appropriate renderer based on model type
         switch (modelType) {
             case CREEPER:
                 renderCreeper(entity, rag, partialTick, poseStack, buffer, packedLight);
+                break;
+            case QUADRUPED:
+                renderQuadruped(entity, rag, partialTick, poseStack, buffer, packedLight,
+                        getQuadrupedRoot(mobType));
+                break;
+            case CHICKEN:
+                renderChicken(entity, rag, partialTick, poseStack, buffer, packedLight);
                 break;
             case ILLAGER:
                 renderIllager(entity, rag, partialTick, poseStack, buffer, packedLight);
@@ -250,6 +264,143 @@ public class MobRagdollRenderer extends EntityRenderer<MobRagdollEntity> {
         poseStack.popPose();
     }
 
+    private ModelPart getQuadrupedRoot(String mobType) {
+        if (mobType.contains("cow") || mobType.contains("mooshroom")) return cowRoot;
+        if (mobType.contains("sheep")) return sheepRoot;
+        if (mobType.contains("pig")) return pigRoot;
+        return cowRoot;
+    }
+
+    private void renderQuadruped(MobRagdollEntity entity, RagdollManager.ClientRagdoll rag,
+                                 float partialTick, PoseStack poseStack,
+                                 MultiBufferSource buffer, int light, ModelPart root) {
+
+        RagdollTransform torso      = rag.getPartInterpolated(RagdollPart.TORSO,     partialTick);
+        RagdollTransform head       = rag.getPartInterpolated(RagdollPart.HEAD,      partialTick);
+        RagdollTransform leftFrontT = rag.getPartInterpolated(RagdollPart.LEFT_ARM,  partialTick);
+        RagdollTransform rightFrontT= rag.getPartInterpolated(RagdollPart.RIGHT_ARM, partialTick);
+        RagdollTransform leftHindT  = rag.getPartInterpolated(RagdollPart.LEFT_LEG,  partialTick);
+        RagdollTransform rightHindT = rag.getPartInterpolated(RagdollPart.RIGHT_LEG, partialTick);
+
+        if (torso == null) return;
+
+        poseStack.pushPose();
+        poseStack.translate(-entity.getX(), -entity.getY(), -entity.getZ());
+        poseStack.translate(torso.position.x, torso.position.y, torso.position.z);
+
+        ResourceLocation texture = getTextureLocation(entity);
+        VertexConsumer vertexConsumer = buffer.getBuffer(RenderType.entityCutoutNoCull(texture));
+
+        ModelPart body       = root.getChild("body");
+        ModelPart headPart   = root.getChild("head");
+        ModelPart rightHind  = root.getChild("right_hind_leg");
+        ModelPart leftHind   = root.getChild("left_hind_leg");
+        ModelPart rightFront = root.getChild("right_front_leg");
+        ModelPart leftFront  = root.getChild("left_front_leg");
+
+        makeAllChildrenVisible(body);
+        makeAllChildrenVisible(headPart);
+        makeAllChildrenVisible(leftHind);
+        makeAllChildrenVisible(rightHind);
+        makeAllChildrenVisible(leftFront);
+        makeAllChildrenVisible(rightFront);
+
+        // Centering offsets per animal — computed from cube geometry centers
+        // so the model visuals are centered on each physics body position.
+        // Body has xRot=PI/2 because QuadrupedModel defines body vertically then rotates it horizontal.
+        String mobType = entity.getMobType();
+        float bodyY, bodyZ, headY, headZ, legY;
+        if (mobType.contains("cow") || mobType.contains("mooshroom")) {
+            // Body cube(-6,-10,-7, 12,18,10) center after xRot: (0,2,-1)
+            bodyY = -2; bodyZ = 1;
+            // Head cube(-4,-4,-6, 8,8,6) center: (0,0,-3)
+            headY = 0; headZ = 3;
+            // Legs cube(-2,0,-2, 4,12,4) center: (0,6,0)
+            legY = -6;
+        } else if (mobType.contains("pig")) {
+            // Body cube(-5,-10,-7, 10,16,8) center after xRot: (0,3,-2)
+            bodyY = -3; bodyZ = 2;
+            // Head cube(-4,-4,-8, 8,8,8) center: (0,0,-4)
+            headY = 0; headZ = 4;
+            // Legs cube(-2,0,-2, 4,6,4) center: (0,3,0)
+            legY = -3;
+        } else {
+            // Sheep: Body cube(-4,-10,-7, 8,16,6) center after xRot: (0,4,-2)
+            bodyY = -4; bodyZ = 2;
+            // Head cube(-3,-4,-6, 6,6,8) center: (0,-1,-2)
+            headY = 1; headZ = 2;
+            // Legs cube(-2,0,-2, 4,12,4) center: (0,6,0)
+            legY = -6;
+        }
+
+        float halfPI = (float) (Math.PI / 2);
+
+        renderAnimalPart(poseStack, vertexConsumer, body,       torso,       torso, 0, bodyY, bodyZ, halfPI, light);
+        renderAnimalPart(poseStack, vertexConsumer, headPart,   head,        torso, 0, headY, headZ, 0, light);
+        renderAnimalPart(poseStack, vertexConsumer, leftHind,   leftHindT,   torso, 0, legY, 0, 0, light);
+        renderAnimalPart(poseStack, vertexConsumer, rightHind,  rightHindT,  torso, 0, legY, 0, 0, light);
+        renderAnimalPart(poseStack, vertexConsumer, leftFront,  leftFrontT,  torso, 0, legY, 0, 0, light);
+        renderAnimalPart(poseStack, vertexConsumer, rightFront, rightFrontT, torso, 0, legY, 0, 0, light);
+
+        poseStack.popPose();
+    }
+
+    private void renderChicken(MobRagdollEntity entity, RagdollManager.ClientRagdoll rag,
+                               float partialTick, PoseStack poseStack,
+                               MultiBufferSource buffer, int light) {
+
+        RagdollTransform torso  = rag.getPartInterpolated(RagdollPart.TORSO,     partialTick);
+        RagdollTransform head   = rag.getPartInterpolated(RagdollPart.HEAD,      partialTick);
+        RagdollTransform lWing  = rag.getPartInterpolated(RagdollPart.LEFT_ARM,  partialTick);
+        RagdollTransform rWing  = rag.getPartInterpolated(RagdollPart.RIGHT_ARM, partialTick);
+        RagdollTransform lLeg   = rag.getPartInterpolated(RagdollPart.LEFT_LEG,  partialTick);
+        RagdollTransform rLeg   = rag.getPartInterpolated(RagdollPart.RIGHT_LEG, partialTick);
+
+        if (torso == null) return;
+
+        poseStack.pushPose();
+        poseStack.translate(-entity.getX(), -entity.getY(), -entity.getZ());
+        poseStack.translate(torso.position.x, torso.position.y, torso.position.z);
+
+        ResourceLocation texture = getTextureLocation(entity);
+        VertexConsumer vertexConsumer = buffer.getBuffer(RenderType.entityCutoutNoCull(texture));
+
+        ModelPart root = chickenRoot;
+        ModelPart body       = root.getChild("body");
+        ModelPart headPart   = root.getChild("head");
+        ModelPart beak       = root.getChild("beak");
+        ModelPart redThing   = root.getChild("red_thing");
+        ModelPart leftLeg    = root.getChild("left_leg");
+        ModelPart rightLeg   = root.getChild("right_leg");
+        ModelPart leftWing   = root.getChild("left_wing");
+        ModelPart rightWing  = root.getChild("right_wing");
+
+        makeAllChildrenVisible(body);
+        makeAllChildrenVisible(headPart);
+
+        float halfPI = (float) (Math.PI / 2);
+
+        // Body cube(-3,-4,-3, 6,8,6) center (0,0,0) — perfectly centered, xRot=PI/2
+        renderAnimalPart(poseStack, vertexConsumer, body,       torso, torso, 0, 0, 0, halfPI, light);
+
+        // Head group: all use head centering so beak/wattle stay attached
+        // Head cube(-2,-6,-2, 4,6,3) center (0,-3,-0.5)
+        renderAnimalPart(poseStack, vertexConsumer, headPart,   head,  torso, 0, 3, 0.5f, 0, light);
+        renderAnimalPart(poseStack, vertexConsumer, beak,       head,  torso, 0, 3, 0.5f, 0, light);
+        renderAnimalPart(poseStack, vertexConsumer, redThing,   head,  torso, 0, 3, 0.5f, 0, light);
+
+        // Legs cube(-1,0,-3, 3,5,3) center (0.5,2.5,-1.5)
+        renderAnimalPart(poseStack, vertexConsumer, leftLeg,    lLeg,  torso, -0.5f, -2.5f, 1.5f, 0, light);
+        renderAnimalPart(poseStack, vertexConsumer, rightLeg,   rLeg,  torso, -0.5f, -2.5f, 1.5f, 0, light);
+
+        // Wings: left cube(0,0,-3, 1,4,6) center (0.5,2,0); right cube(-1,0,-3, 1,4,6) center (-0.5,2,0)
+        renderAnimalPart(poseStack, vertexConsumer, leftWing,   lWing, torso, -0.5f, -2, 0, 0, light);
+        renderAnimalPart(poseStack, vertexConsumer, rightWing,  rWing, torso, 0.5f, -2, 0, 0, light);
+
+        poseStack.popPose();
+    }
+
+
     private void renderCreeper(MobRagdollEntity entity, RagdollManager.ClientRagdoll rag,
                                float partialTick, PoseStack poseStack,
                                MultiBufferSource buffer, int light) {
@@ -278,12 +429,16 @@ public class MobRagdollRenderer extends EntityRenderer<MobRagdollEntity> {
         ModelPart rightFront = root.getChild("right_front_leg");
         ModelPart leftFront  = root.getChild("left_front_leg");
 
-        renderHumanoidPart(poseStack, vertexConsumer, body, torso, torso, torsoff, light, entity, RagdollPart.TORSO);
-        renderHumanoidPart(poseStack, vertexConsumer, headPart, head, torso, headoff, light, entity, RagdollPart.HEAD);
-        renderHumanoidPart(poseStack, vertexConsumer, leftHind, leftHindT, torso, llegoff, light, entity, RagdollPart.LEFT_LEG);
-        renderHumanoidPart(poseStack, vertexConsumer, rightHind, rightHindT, torso, rlegoff, light, entity, RagdollPart.RIGHT_LEG);
-        renderHumanoidPart(poseStack, vertexConsumer, leftFront, leftFrontT, torso, llegoff, light, entity, RagdollPart.LEFT_ARM);
-        renderHumanoidPart(poseStack, vertexConsumer, rightFront, rightFrontT, torso, rlegoff, light, entity, RagdollPart.RIGHT_ARM);
+        // Body and head use humanoid-style rendering (relative to torso) — works well for creeper proportions
+        renderHumanoidPart(poseStack, vertexConsumer, body,     torso, torso, torsoff, light, entity, RagdollPart.TORSO);
+        renderHumanoidPart(poseStack, vertexConsumer, headPart, head,  torso, headoff, light, entity, RagdollPart.HEAD);
+
+        // Legs use animal-style rendering (physics world position) for correct placement at corners
+        // Creeper legs cube(-2,0,-2, 4,6,4) center (0,3,0)
+        renderAnimalPart(poseStack, vertexConsumer, leftHind,   leftHindT,   torso, 0, -3, 0, 0, light);
+        renderAnimalPart(poseStack, vertexConsumer, rightHind,  rightHindT,  torso, 0, -3, 0, 0, light);
+        renderAnimalPart(poseStack, vertexConsumer, leftFront,  leftFrontT,  torso, 0, -3, 0, 0, light);
+        renderAnimalPart(poseStack, vertexConsumer, rightFront, rightFrontT, torso, 0, -3, 0, 0, light);
 
         poseStack.popPose();
     }
@@ -536,6 +691,49 @@ public class MobRagdollRenderer extends EntityRenderer<MobRagdollEntity> {
         return new ResourceLocation(namespace, "textures/models/armor/" + path + "_" + layer + ".png");
     }
 
+    /**
+     * Renders an animal/non-humanoid model part using its physics world position.
+     * Unlike renderHumanoidPart which keeps everything relative to the torso origin,
+     * this translates to each part's actual physics position so limbs track correctly.
+     *
+     * @param setPosX/Y/Z  Centering offset in model pixels — shifts the cube geometry
+     *                     so its visual center aligns with the physics body center.
+     * @param defaultXRot  Default model rotation (e.g. PI/2 for horizontal body parts).
+     */
+    private void renderAnimalPart(PoseStack poseStack, VertexConsumer vc,
+                                   ModelPart part, RagdollTransform transform,
+                                   RagdollTransform torso,
+                                   float setPosX, float setPosY, float setPosZ,
+                                   float defaultXRot, int light) {
+        if (transform == null) return;
+
+        poseStack.pushPose();
+
+        // Translate from torso world position to this part's physics world position
+        poseStack.translate(
+                transform.position.x - torso.position.x,
+                transform.position.y - torso.position.y,
+                transform.position.z - torso.position.z
+        );
+
+        // Apply physics rotation with Minecraft Y-down coordinate flip
+        Quaternionf q = new Quaternionf(
+                transform.rotation.x, transform.rotation.y,
+                transform.rotation.z, transform.rotation.w
+        );
+        q.rotateZ((float) Math.PI);
+        poseStack.mulPose(q);
+
+        // Center the model geometry on the physics body and apply default model rotation
+        part.setPos(setPosX, setPosY, setPosZ);
+        part.xRot = defaultXRot;
+        part.yRot = 0;
+        part.zRot = 0;
+
+        part.render(poseStack, vc, light, OverlayTexture.NO_OVERLAY);
+        poseStack.popPose();
+    }
+
     private void renderHumanoidPart(PoseStack poseStack, VertexConsumer vertexConsumer,
                                     ModelPart part, RagdollTransform transform,
                                     RagdollTransform torso, Vector3f[] pivot, int light,
@@ -622,6 +820,12 @@ public class MobRagdollRenderer extends EntityRenderer<MobRagdollEntity> {
 
         // Creeper
         if (mobType.contains("creeper")) return new ResourceLocation("minecraft", "textures/entity/creeper/creeper.png");
+
+        if (mobType.contains("cow"))      return new ResourceLocation("minecraft", "textures/entity/cow/cow.png");
+        if (mobType.contains("mooshroom"))return new ResourceLocation("minecraft", "textures/entity/cow/mooshroom.png");
+        if (mobType.contains("sheep"))    return new ResourceLocation("minecraft", "textures/entity/sheep/sheep.png");
+        if (mobType.contains("pig"))      return new ResourceLocation("minecraft", "textures/entity/pig/pig.png");
+        if (mobType.contains("chicken"))  return new ResourceLocation("minecraft", "textures/entity/chicken.png");
 
         // Default fallback
         return new ResourceLocation("minecraft", "textures/entity/zombie/zombie.png");
