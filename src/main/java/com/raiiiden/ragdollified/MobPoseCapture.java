@@ -142,12 +142,10 @@ public class MobPoseCapture {
             float zRot = pose.zRot;
 
             if (part == RagdollPart.LEFT_ARM || part == RagdollPart.RIGHT_ARM) {
-                xRot += (float) Math.PI;
+                xRot = -pose.xRot;
             }
 
-            Quaternionf q = new Quaternionf()
-                    .rotateXYZ(xRot, yRot, zRot);
-
+            Quaternionf q = new Quaternionf().rotateXYZ(xRot, yRot, zRot);
             return new Quat4f(q.x, q.y, q.z, q.w);
         }
     }

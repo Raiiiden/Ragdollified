@@ -36,9 +36,15 @@ public class ModNetwork {
                 DeathRagdollEndPacket::encode,
                 DeathRagdollEndPacket::decode,
                 DeathRagdollEndPacket::handle);
+
         CHANNEL.registerMessage(nextId(), MobPoseSyncPacket.class,
                 MobPoseSyncPacket::encode,
                 MobPoseSyncPacket::new,
                 MobPoseSyncPacket::handle);
+
+        CHANNEL.registerMessage(nextId(), RagdollRaycastPacket.class,
+                RagdollRaycastPacket::encode,
+                RagdollRaycastPacket::decode,
+                RagdollRaycastPacket::handle);
     }
 }

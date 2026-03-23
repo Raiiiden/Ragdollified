@@ -37,6 +37,7 @@ public class Ragdollified {
     private void commonSetup(final FMLCommonSetupEvent event) {
         event.enqueueWork(ModNetwork::register);
     }
+
     private void clientSetup(final FMLClientSetupEvent event) {
         event.enqueueWork(() -> {
             EntityRenderers.register(ModEntities.DEATH_RAGDOLL.get(), DeathRagdollRenderer::new);
@@ -44,6 +45,7 @@ public class Ragdollified {
             ETFCompatibilityHelper.initialize();
         });
     }
+
     @SubscribeEvent
     public static void onRegisterCommands(RegisterCommandsEvent event) {
         SpawnRagdollCommand.register(event.getDispatcher());
