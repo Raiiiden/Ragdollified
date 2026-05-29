@@ -1,23 +1,21 @@
 package com.raiiiden.ragdollified;
 
-import net.minecraft.client.Minecraft;
-import net.minecraft.client.model.HumanoidModel;
-import net.minecraft.client.model.EntityModel;
-import net.minecraft.client.model.IllagerModel;
-import net.minecraft.client.model.QuadrupedModel;
-import net.minecraft.client.model.ChickenModel;
-import net.minecraft.client.renderer.entity.EntityRenderer;
-import net.minecraft.client.renderer.entity.LivingEntityRenderer;
 import net.minecraft.world.entity.LivingEntity;
-import net.minecraft.world.entity.animal.*;
-import net.minecraft.world.entity.monster.*;
+import net.minecraft.world.entity.animal.Cow;
+import net.minecraft.world.entity.animal.Pig;
+import net.minecraft.world.entity.animal.Sheep;
+import net.minecraft.world.entity.monster.AbstractIllager;
+import net.minecraft.world.entity.monster.AbstractSkeleton;
+import net.minecraft.world.entity.monster.Creeper;
+import net.minecraft.world.entity.monster.Drowned;
+import net.minecraft.world.entity.monster.Monster;
+import net.minecraft.world.entity.monster.Zombie;
+import net.minecraft.world.entity.monster.ZombieVillager;
+import net.minecraft.world.entity.monster.ZombifiedPiglin;
 import net.minecraft.world.entity.monster.piglin.Piglin;
 import net.minecraft.world.entity.npc.AbstractVillager;
-import net.minecraftforge.api.distmarker.Dist;
-import net.minecraftforge.api.distmarker.OnlyIn;
 
 public class MobModelHelper {
-
     public enum ModelType {
         HUMANOID_STANDARD,
         HUMANOID_SKELETON,
@@ -31,22 +29,18 @@ public class MobModelHelper {
 
     public static boolean shouldHaveRagdoll(LivingEntity entity) {
         if (entity instanceof net.minecraft.world.entity.player.Player) return false;
-        if (entity instanceof Creeper) return true;
-        if (entity instanceof AbstractSkeleton) return true;
-        if (entity instanceof Zombie) return true;
-        if (entity instanceof AbstractIllager) return true;
-        if (entity instanceof Piglin || entity instanceof ZombifiedPiglin) return true;
-        if (entity instanceof AbstractVillager) return true;
+        return getModelTypeFromEntity(entity) != ModelType.UNSUPPORTED;
+    }
 
-        // Animals
-        if (entity instanceof Cow) return true;
-        if (entity instanceof Sheep) return true;
-        if (entity instanceof Pig) return true;
-        if (entity instanceof net.minecraft.world.entity.animal.Chicken) return true;
+    public static boolean isSupportedModelType(ModelType type) {
+        return type != null && type != ModelType.UNSUPPORTED;
+    }
 
-        if (entity instanceof net.minecraft.world.entity.PathfinderMob) return true;
-
-        return false;
+    public static boolean isHumanoidModelType(ModelType type) {
+        return type == ModelType.HUMANOID_STANDARD ||
+                type == ModelType.HUMANOID_SKELETON ||
+                type == ModelType.HUMANOID_DROWNED ||
+                type == ModelType.ILLAGER;
     }
 
     public static ModelType getModelTypeFromMobType(String mobType) {
@@ -65,11 +59,14 @@ public class MobModelHelper {
                 mobType.contains("wandering_trader")) {
             return ModelType.ILLAGER;
         }
+        if (mobType.contains("zombie") ||
+                mobType.contains("husk") ||
+                mobType.contains("piglin")) {
+            return ModelType.HUMANOID_STANDARD;
+        }
         if (mobType.contains("creeper")) {
             return ModelType.CREEPER;
         }
-
-        // Quadrupeds
         if (mobType.contains("cow") || mobType.contains("mooshroom")) {
             return ModelType.QUADRUPED;
         }
@@ -83,7 +80,7 @@ public class MobModelHelper {
             return ModelType.CHICKEN;
         }
 
-        return ModelType.HUMANOID_STANDARD;
+        return ModelType.UNSUPPORTED;
     }
 
     public static ModelType getModelTypeFromEntity(LivingEntity entity) {
@@ -92,46 +89,34 @@ public class MobModelHelper {
         if (entity instanceof AbstractIllager) return ModelType.ILLAGER;
         if (entity instanceof ZombieVillager) return ModelType.ILLAGER;
         if (entity instanceof AbstractVillager) return ModelType.ILLAGER;
+        if (entity instanceof Zombie) return ModelType.HUMANOID_STANDARD;
+        if (entity instanceof Piglin || entity instanceof ZombifiedPiglin) return ModelType.HUMANOID_STANDARD;
         if (entity instanceof Creeper) return ModelType.CREEPER;
         if (entity instanceof net.minecraft.world.entity.animal.Chicken) return ModelType.CHICKEN;
         if (entity instanceof Cow || entity instanceof Sheep || entity instanceof Pig) return ModelType.QUADRUPED;
-        return ModelType.HUMANOID_STANDARD;
-    }
 
-    @OnlyIn(Dist.CLIENT)
-    public static ModelType getActualModelType(LivingEntity entity) {
-        try {
-            Minecraft mc = Minecraft.getInstance();
-            EntityRenderer<?> renderer = mc.getEntityRenderDispatcher().getRenderer(entity);
-
-            if (!(renderer instanceof LivingEntityRenderer)) {
-                return ModelType.UNSUPPORTED;
-            }
-
-            EntityModel<?> model = ((LivingEntityRenderer<?, ?>) renderer).getModel();
-
-            if (model instanceof IllagerModel) return ModelType.ILLAGER;
-            if (model instanceof net.minecraft.client.model.CreeperModel) return ModelType.CREEPER;
-            if (model instanceof net.minecraft.client.model.SkeletonModel) return ModelType.HUMANOID_SKELETON;
-            if (model instanceof net.minecraft.client.model.DrownedModel) return ModelType.HUMANOID_DROWNED;
-            if (model instanceof ChickenModel) return ModelType.CHICKEN;
-            if (model instanceof QuadrupedModel) return ModelType.QUADRUPED;
-            if (model instanceof HumanoidModel) return ModelType.HUMANOID_STANDARD;
-
-            return ModelType.UNSUPPORTED;
-
-        } catch (Exception e) {
-            return ModelType.UNSUPPORTED;
+        if (entity instanceof Monster && isLikelyHumanoidByClass(entity)) {
+            return ModelType.HUMANOID_STANDARD;
         }
+
+        return ModelType.UNSUPPORTED;
     }
 
-    @OnlyIn(Dist.CLIENT)
-    public static boolean isHumanoidLike(LivingEntity entity) {
-        ModelType type = getActualModelType(entity);
-        return type == ModelType.HUMANOID_STANDARD ||
-                type == ModelType.HUMANOID_SKELETON ||
-                type == ModelType.HUMANOID_DROWNED ||
-                type == ModelType.ILLAGER;
+    private static boolean isLikelyHumanoidByClass(LivingEntity entity) {
+        Class<?> cls = entity.getClass();
+        while (cls != null && cls != Object.class) {
+            String name = cls.getSimpleName().toLowerCase();
+            if (name.contains("unit")
+                    || name.contains("soldier")
+                    || name.contains("guard")
+                    || name.contains("bandit")
+                    || name.contains("operative")
+                    || name.contains("pmc")) {
+                return true;
+            }
+            cls = cls.getSuperclass();
+        }
+        return false;
     }
 
     public static String getModelTypeDescription(ModelType type) {

@@ -2,7 +2,6 @@ package com.raiiiden.ragdollified.client;
 
 import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.blaze3d.vertex.*;
-import com.raiiiden.ragdollified.Ragdollified;
 import com.raiiiden.ragdollified.RagdollPart;
 import com.raiiiden.ragdollified.RagdollTransform;
 import net.minecraft.client.Minecraft;
@@ -15,17 +14,12 @@ import net.minecraftforge.fml.common.Mod;
 import org.joml.Quaternionf;
 import org.joml.Vector3f;
 
-import java.util.Map;
-
 @Mod.EventBusSubscriber(value = Dist.CLIENT, bus = Mod.EventBusSubscriber.Bus.FORGE)
 public class RagdollDebugRenderer {
 
     @SubscribeEvent
     public static void onRenderLevelStage(RenderLevelStageEvent event) {
-        // Only render when F3+B hitboxes are enabled — same as prototype
         if (!Minecraft.getInstance().getEntityRenderDispatcher().shouldRenderHitBoxes()) return;
-
-        // Use AFTER_ENTITIES like prototype does
         if (event.getStage() != RenderLevelStageEvent.Stage.AFTER_ENTITIES) return;
 
         Minecraft mc = Minecraft.getInstance();
@@ -33,43 +27,46 @@ public class RagdollDebugRenderer {
 
         Vec3 camera = mc.gameRenderer.getMainCamera().getPosition();
         PoseStack poseStack = event.getPoseStack();
-        float partial = mc.getFrameTime();
 
         var bufferSource = mc.renderBuffers().bufferSource();
         VertexConsumer buffer = bufferSource.getBuffer(RenderType.lines());
 
         RenderSystem.disableCull();
+        RenderSystem.disableDepthTest();
 
-        // Read from client-side DeathRagdollManager (same pattern as prototype RagdollManager)
-        for (RagdollManager.ClientRagdoll rag : DeathRagdollManager.getAll()) {
-            if (rag == null || !rag.isActive()) continue;
+        for (ClientRagdoll ragdoll : ClientRagdollManager.getAll()) {
+            if (ragdoll == null) continue;
+            // Read from the published snapshot — physics runs on a worker thread, so we
+            // can't touch cachedTransforms directly.
+            ClientRagdoll.TransformSnapshot snap = ragdoll.getSnapshot();
+            if (snap == null || snap.destroyed) continue;
 
-            for (Map.Entry<RagdollPart, RagdollTransform> entry : rag.getAllPartsInterpolated(partial).entrySet()) {
-                RagdollPart part = entry.getKey();
-                RagdollTransform t = entry.getValue();
-                if (t == null) continue;
+            for (RagdollPart part : RagdollPart.values()) {
+                int i = part.index;
+                if (i >= snap.positions.length || snap.positions[i] == null) continue;
 
-                Vector3f pos = new Vector3f(t.position.x, t.position.y, t.position.z);
-                Quaternionf rot = new Quaternionf(t.rotation.x, t.rotation.y, t.rotation.z, t.rotation.w);
+                javax.vecmath.Vector3f sp = snap.positions[i];
+                javax.vecmath.Quat4f sr = snap.rotations[i];
+                Vector3f pos = new Vector3f(sp.x, sp.y, sp.z);
+                Quaternionf rot = new Quaternionf(sr.x, sr.y, sr.z, sr.w);
+                Vector3f halfExtents = getHalfExtents(snap, part);
 
-                drawDebugBox(poseStack, buffer, camera, pos, rot, getHalfExtentsForPart(part), part.index);
+                drawDebugBox(poseStack, buffer, camera, pos, rot, halfExtents, part.index);
             }
         }
 
         bufferSource.endBatch(RenderType.lines());
+        RenderSystem.enableDepthTest();
         RenderSystem.enableCull();
     }
 
-    /** Half-extents match the physics body sizes in DeathRagdollPhysics */
-    private static Vector3f getHalfExtentsForPart(RagdollPart part) {
-        return switch (part) {
-            case HEAD      -> new Vector3f(0.2f,  0.2f,  0.2f);
-            case TORSO     -> new Vector3f(0.25f, 0.4f,  0.15f);
-            case LEFT_ARM,
-                 RIGHT_ARM -> new Vector3f(0.1f,  0.35f, 0.1f);
-            case LEFT_LEG,
-                 RIGHT_LEG -> new Vector3f(0.15f, 0.45f, 0.15f);
-        };
+    private static Vector3f getHalfExtents(ClientRagdoll.TransformSnapshot snap, RagdollPart part) {
+        int i = part.index;
+        if (snap.halfExtents != null && i < snap.halfExtents.length && snap.halfExtents[i] != null) {
+            javax.vecmath.Vector3f h = snap.halfExtents[i];
+            return new Vector3f(h.x, h.y, h.z);
+        }
+        return new Vector3f(0.1f, 0.1f, 0.1f);
     }
 
     private static void drawDebugBox(PoseStack poseStack, VertexConsumer buffer, Vec3 camPos,

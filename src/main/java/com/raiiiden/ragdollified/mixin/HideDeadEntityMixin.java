@@ -1,10 +1,9 @@
 package com.raiiiden.ragdollified.mixin;
 
+import com.raiiiden.ragdollified.MobModelHelper;
+import com.raiiiden.ragdollified.client.ClientMobModelHelper;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.player.Player;
-import net.minecraft.world.entity.monster.Zombie;
-import net.minecraft.world.entity.monster.Skeleton;
-import net.minecraft.world.entity.monster.Creeper;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
@@ -27,9 +26,7 @@ public class HideDeadEntityMixin {
         if (entity.isDeadOrDying() && entity.isInvisible()) {
             // Only cancel for entities that have ragdolls
             if (entity instanceof Player ||
-                    entity instanceof Zombie ||
-                    entity instanceof Skeleton ||
-                    entity instanceof Creeper) {
+                    MobModelHelper.isSupportedModelType(ClientMobModelHelper.getActualModelType(entity))) {
                 ci.cancel(); // Don't render this entity at all (including armor)
             }
         }

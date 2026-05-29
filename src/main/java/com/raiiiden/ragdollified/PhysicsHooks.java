@@ -1,82 +1,170 @@
 package com.raiiiden.ragdollified;
 
-import com.raiiiden.ragdollified.config.RagdollifiedConfig;
-import net.minecraft.core.BlockPos;
-import net.minecraft.server.level.ServerLevel;
+import com.raiiiden.ragdollified.network.ModNetwork;
+import com.raiiiden.ragdollified.network.RagdollSpawnPacket;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.entity.EquipmentSlot;
+import net.minecraft.world.entity.AgeableMob;
 import net.minecraft.world.entity.LivingEntity;
-import net.minecraft.world.phys.AABB;
-import net.minecraftforge.event.TickEvent;
+import net.minecraft.world.entity.Pose;
+import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.phys.Vec3;
 import net.minecraftforge.event.entity.living.LivingDeathEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
-
-import java.util.Comparator;
-import java.util.List;
+import net.minecraftforge.network.PacketDistributor;
 
 @Mod.EventBusSubscriber(modid = Ragdollified.MODID)
 public class PhysicsHooks {
 
     @SubscribeEvent
-    public static void onServerTick(TickEvent.LevelTickEvent event) {
-        if (event.phase == TickEvent.Phase.END && event.level instanceof ServerLevel level) {
-            JbulletWorld manager = JbulletWorld.get(level);
-            manager.step(1f / 20f);
-            ServerMobPoseCache.cleanup();
-        }
-    }
-
-    @SubscribeEvent
-    public static void onLivingDeath(LivingDeathEvent event){
+    public static void onLivingDeath(LivingDeathEvent event) {
         LivingEntity entity = event.getEntity();
+        if (entity.level().isClientSide) return;
 
-        // Handle player deaths
-        if (entity instanceof ServerPlayer player){
+        boolean isPlayer = entity instanceof ServerPlayer;
+        MobModelHelper.ModelType modelType = isPlayer
+                ? MobModelHelper.ModelType.HUMANOID_STANDARD
+                : MobModelHelper.getModelTypeFromEntity(entity);
+
+        if (!isPlayer && modelType == MobModelHelper.ModelType.UNSUPPORTED) {
+            String mobType = net.minecraft.world.entity.EntityType.getKey(entity.getType()).toString();
+            Ragdollified.LOGGER.debug("Sending ragdoll candidate for client-side model detection: {}", mobType);
+        }
+
+        if (isPlayer || MobModelHelper.isSupportedModelType(modelType)) {
             entity.setInvisible(true);
             entity.clearFire();
+        }
+        if (isPlayer) {
             entity.setCustomNameVisible(false);
-
-            List<DeathRagdollEntity> existingRagdolls = player.serverLevel()
-                    .getEntitiesOfClass(DeathRagdollEntity.class,
-                            new AABB(player.blockPosition()).inflate(10000));
-
-            int maxRagdolls = RagdollifiedConfig.getMaxRagdolls();
-
-            if (existingRagdolls.size() >= maxRagdolls) {
-                existingRagdolls.stream()
-                        .max(Comparator.comparingInt(r -> r.ticksExisted))
-                        .ifPresent(oldest -> oldest.discard());
-            }
-
-            DeathRagdollEntity deathRagdoll = DeathRagdollEntity.createFromPlayer(player.level(), player);
-            player.level().addFreshEntity(deathRagdoll);
         }
-        // Handle mob deaths - SERVER SIDE ONLY
-        else if (MobModelHelper.shouldHaveRagdoll(entity) && !entity.level().isClientSide) {
-            if (entity.level() instanceof ServerLevel serverLevel) {
-                entity.setInvisible(true);
-                entity.clearFire();
 
-                List<MobRagdollEntity> existingMobRagdolls = serverLevel
-                        .getEntitiesOfClass(MobRagdollEntity.class,
-                                new AABB(entity.blockPosition()).inflate(10000));
+        Vec3 vel = calculateDeathVelocity(entity, event.getSource());
 
-                int maxRagdolls = RagdollifiedConfig.getMaxRagdolls();
+        String mobType = net.minecraft.world.entity.EntityType.getKey(entity.getType()).toString();
+        float scale = isPlayer ? 1.0f : entity.getBbHeight() / 1.8f;
+        boolean isBaby = entity instanceof AgeableMob ageable && ageable.isBaby();
 
-                if (existingMobRagdolls.size() >= maxRagdolls) {
-                    existingMobRagdolls.stream()
-                            .max(Comparator.comparingInt(r -> r.ticksExisted))
-                            .ifPresent(oldest -> oldest.discard());
+        // Sheep need wool-state captured at the moment of death so client renderers can
+        // draw the fur layer with the correct dye color (or skip it if the sheep had been
+        // sheared). For non-sheep mobs the byte is just zero — clients ignore it.
+        byte sheepState = 0;
+        if (entity instanceof net.minecraft.world.entity.animal.Sheep sheep) {
+            sheepState = RagdollSpawnPacket.packSheepState(sheep.isSheared(), sheep.getColor().getId());
+        }
+
+        // Generic overlay-state bits for mobs whose corpse needs an extra layer based on
+        // a single boolean (charged creeper → energy swirl, saddled pig → saddle, …).
+        // bit 0 = creeper.isPowered(), bit 1 = pig.isSaddled(). Reserved bits 2-7.
+        byte overlayState = 0;
+        if (entity instanceof net.minecraft.world.entity.monster.Creeper creeper && creeper.isPowered()) {
+            overlayState |= 0x1;
+        }
+        if (entity instanceof net.minecraft.world.entity.animal.Pig pig && pig.isSaddled()) {
+            overlayState |= 0x2;
+        }
+
+        // Villager / zombie villager profession state. Captured as registry-key strings
+        // so mod-added biomes/professions ride along without an id remap. Empty for
+        // non-villager mobs (the renderer skips the profession overlay in that case).
+        String villagerType = "";
+        String villagerProfession = "";
+        byte villagerLevel = 0;
+        if (entity instanceof net.minecraft.world.entity.npc.VillagerDataHolder vdh) {
+            net.minecraft.world.entity.npc.VillagerData vd = vdh.getVillagerData();
+            if (vd != null) {
+                net.minecraft.resources.ResourceLocation typeKey =
+                        net.minecraft.core.registries.BuiltInRegistries.VILLAGER_TYPE.getKey(vd.getType());
+                net.minecraft.resources.ResourceLocation profKey =
+                        net.minecraft.core.registries.BuiltInRegistries.VILLAGER_PROFESSION.getKey(vd.getProfession());
+                villagerType = typeKey != null ? typeKey.toString() : "";
+                villagerProfession = profKey != null ? profKey.toString() : "";
+                villagerLevel = (byte) Math.max(0, Math.min(127, vd.getLevel()));
+            }
+        }
+
+        // Pull any directional hit captured by ServerRagdollHitTracker (TACZ Pre +
+        // vanilla LivingHurtEvent). Resolve part + impulse here on the server so every
+        // client sees the same kick — no per-client tracker race.
+        ServerRagdollHitTracker.HitInfo hitInfo = ServerRagdollHitTracker.consume(entity.getId());
+        byte hitPartIndex = -1;
+        float hitImpulseX = 0f, hitImpulseY = 0f, hitImpulseZ = 0f;
+        if (hitInfo != null) {
+            Vec3 impulse = RagdollHitMapper.computeImpulse(
+                    hitInfo.direction, hitInfo.isHeadShot, hitInfo.isTaczBullet, hitInfo.damage);
+            if (impulse != null) {
+                RagdollPart part = RagdollHitMapper.map(entity, hitInfo.hitPos, hitInfo.direction, hitInfo.isHeadShot);
+                hitPartIndex = (byte) part.index;
+                hitImpulseX = (float) impulse.x;
+                hitImpulseY = (float) impulse.y;
+                hitImpulseZ = (float) impulse.z;
+            }
+        }
+
+        RagdollSpawnPacket packet = new RagdollSpawnPacket(
+                entity.getId(),
+                isPlayer,
+                mobType,
+                modelType,
+                scale,
+                isPlayer ? entity.getUUID().toString() : "",
+                isPlayer ? entity.getName().getString() : "",
+                entity.getX(), entity.getY(), entity.getZ(),
+                entity.getYRot(), entity.getXRot(),
+                vel.x, vel.y, vel.z,
+                entity.getPose() == Pose.SWIMMING,
+                isBaby,
+                entity.getItemBySlot(EquipmentSlot.HEAD).copy(),
+                entity.getItemBySlot(EquipmentSlot.CHEST).copy(),
+                entity.getItemBySlot(EquipmentSlot.LEGS).copy(),
+                entity.getItemBySlot(EquipmentSlot.FEET).copy(),
+                sheepState,
+                hitPartIndex, hitImpulseX, hitImpulseY, hitImpulseZ,
+                overlayState,
+                villagerType, villagerProfession, villagerLevel
+        );
+
+        ModNetwork.CHANNEL.send(PacketDistributor.ALL.noArg(), packet);
+    }
+
+    private static Vec3 calculateDeathVelocity(LivingEntity entity, net.minecraft.world.damagesource.DamageSource damageSource) {
+        Vec3 delta = entity.getDeltaMovement();
+        Vec3 vel = new Vec3(delta.x * 8, delta.y * 6, delta.z * 8);
+
+        boolean hasLowVelocity = delta.lengthSqr() < 0.5;
+
+        if (damageSource != null) {
+            String damageType = damageSource.getMsgId();
+
+            if (damageType.contains("tacz.bullet") && hasLowVelocity) {
+                Vec3 damagePos = damageSource.getSourcePosition();
+                if (damagePos != null) {
+                    Vec3 direction = entity.position().subtract(damagePos).normalize();
+                    vel = new Vec3(direction.x * 3.0, direction.y * 4.0 + 2.0, direction.z * 3.0);
+                } else {
+                    Vec3 lookVec = entity.getLookAngle();
+                    vel = new Vec3(lookVec.x * 5.0, 2.0, lookVec.z * 5.0);
                 }
+            }
 
-                MobRagdollEntity mobRagdoll = MobRagdollEntity.createFromMob(
-                        entity.level(),
-                        entity,
-                        event.getSource(),
-                        entity.getMaxHealth()
-                );
-                entity.level().addFreshEntity(mobRagdoll);
+            if (damageType.contains("explosion")) {
+                Vec3 explosionCenter = damageSource.getSourcePosition();
+                if (explosionCenter != null) {
+                    Vec3 direction = entity.position().subtract(explosionCenter).normalize();
+                    float distance = (float) entity.position().distanceTo(explosionCenter);
+                    float baseStrength = Math.min(entity.getMaxHealth() / 10f, 5f);
+                    float distanceFalloff = Math.max(0.5f, 1.0f - (distance / 10f));
+                    float explosionStrength = baseStrength * distanceFalloff;
+                    vel = new Vec3(
+                            direction.x * 10.0 * explosionStrength,
+                            direction.y * 8.0 * explosionStrength + 3.0,
+                            direction.z * 10.0 * explosionStrength
+                    );
+                }
             }
         }
+
+        return vel;
     }
 }

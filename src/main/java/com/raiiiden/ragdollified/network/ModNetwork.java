@@ -6,12 +6,13 @@ import net.minecraftforge.network.NetworkRegistry;
 import net.minecraftforge.network.simple.SimpleChannel;
 
 public class ModNetwork {
-    private static final String PROTOCOL_VERSION = "1";
+    private static final String PROTOCOL_VERSION = "3";
     public static final SimpleChannel CHANNEL = NetworkRegistry.newSimpleChannel(
             new ResourceLocation(Ragdollified.MODID, "main"),
             () -> PROTOCOL_VERSION,
-            PROTOCOL_VERSION::equals,
-            PROTOCOL_VERSION::equals
+            // Accept any version on both sides so the mod works on vanilla servers
+            v -> true,
+            v -> true
     );
 
     private static int packetId = 0;
@@ -21,30 +22,14 @@ public class ModNetwork {
     }
 
     public static void register() {
-        // Death ragdoll packets
-        CHANNEL.registerMessage(nextId(), DeathRagdollStartPacket.class,
-                DeathRagdollStartPacket::encode,
-                DeathRagdollStartPacket::decode,
-                DeathRagdollStartPacket::handle);
+        CHANNEL.registerMessage(nextId(), RagdollSpawnPacket.class,
+                RagdollSpawnPacket::encode,
+                RagdollSpawnPacket::decode,
+                RagdollSpawnPacket::handle);
 
-        CHANNEL.registerMessage(nextId(), DeathRagdollUpdatePacket.class,
-                DeathRagdollUpdatePacket::encode,
-                DeathRagdollUpdatePacket::decode,
-                DeathRagdollUpdatePacket::handle);
-
-        CHANNEL.registerMessage(nextId(), DeathRagdollEndPacket.class,
-                DeathRagdollEndPacket::encode,
-                DeathRagdollEndPacket::decode,
-                DeathRagdollEndPacket::handle);
-
-        CHANNEL.registerMessage(nextId(), MobPoseSyncPacket.class,
-                MobPoseSyncPacket::encode,
-                MobPoseSyncPacket::new,
-                MobPoseSyncPacket::handle);
-
-        CHANNEL.registerMessage(nextId(), RagdollRaycastPacket.class,
-                RagdollRaycastPacket::encode,
-                RagdollRaycastPacket::decode,
-                RagdollRaycastPacket::handle);
+        CHANNEL.registerMessage(nextId(), RagdollImpulsePacket.class,
+                RagdollImpulsePacket::encode,
+                RagdollImpulsePacket::decode,
+                RagdollImpulsePacket::handle);
     }
 }

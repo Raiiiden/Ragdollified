@@ -28,7 +28,7 @@ public class ClientMobTextureCache {
         return TEXTURE_CACHE.remove(mobEntityId); // Remove after use
     }
 
-    /**
+    /**con
      * Cleanup old entries
      */
     public static void cleanup() {

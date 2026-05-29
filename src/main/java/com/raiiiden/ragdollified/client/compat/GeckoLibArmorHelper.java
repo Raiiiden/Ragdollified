@@ -1,12 +1,14 @@
 package com.raiiiden.ragdollified.client.compat;
 
 import com.mojang.blaze3d.vertex.PoseStack;
-import com.mojang.blaze3d.vertex.VertexConsumer;
 import com.raiiiden.ragdollified.Ragdollified;
+import net.minecraft.client.Minecraft;
 import net.minecraft.client.model.HumanoidModel;
 import net.minecraft.client.renderer.MultiBufferSource;
+import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.entity.decoration.ArmorStand;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 
@@ -18,6 +20,8 @@ public class GeckoLibArmorHelper {
     private static boolean geckoLibChecked = false;
     private static boolean geckoLibAvailable = false;
     private static final Map<Class<?>, ArmorReflectionCache> cacheMap = new HashMap<>();
+    // Cached proxy ArmorStand used as a LivingEntity stand-in for GeckoLib when the real entity isn't available
+    private static ArmorStand proxyEntity = null;
 
     public static boolean isGeckoLibAvailable() {
         if (!geckoLibChecked) {
@@ -50,19 +54,41 @@ public class GeckoLibArmorHelper {
                                            HumanoidModel<?> baseModel) {
         if (!isGeckoLibAvailable()) return;
 
+        // GeckoLib requires a LivingEntity — use a proxy ArmorStand if the real entity isn't one
+        LivingEntity livingEntity;
+        if (entity instanceof LivingEntity le) {
+            livingEntity = le;
+        } else {
+            livingEntity = getOrCreateProxy();
+            if (livingEntity == null) return;
+        }
+
         try {
             Item item = stack.getItem();
             ArmorReflectionCache cache = getOrCreateCache(item.getClass());
             if (cache == null || !cache.isValid()) return;
 
-            Object renderer = cache.getRenderer(item, entity, stack, slot);
+            Object renderer = cache.getRenderer(item, livingEntity, stack, slot);
             if (renderer == null) return;
 
-            cache.prepareRenderer(renderer, entity, stack, slot, baseModel);
+            cache.prepareRenderer(renderer, livingEntity, stack, slot, baseModel);
             cache.renderArmor(renderer, poseStack, buffer, light, overlay);
         } catch (Exception e) {
             Ragdollified.LOGGER.error("Failed to render GeckoLib armor: " + e.getMessage(), e);
         }
+    }
+
+    private static ArmorStand getOrCreateProxy() {
+        if (proxyEntity != null) return proxyEntity;
+        Minecraft mc = Minecraft.getInstance();
+        if (mc.level == null) return null;
+        proxyEntity = new ArmorStand(EntityType.ARMOR_STAND, mc.level);
+        proxyEntity.setInvisible(true);
+        return proxyEntity;
+    }
+
+    public static void onWorldUnload() {
+        proxyEntity = null;
     }
 
     private static ArmorReflectionCache getOrCreateCache(Class<?> itemClass) {
@@ -87,7 +113,6 @@ public class GeckoLibArmorHelper {
         private Method initializeClient;
         private Method getHumanoidArmorModel;
         private Method prepForRender;
-        private Method renderToBuffer;
         private boolean valid = false;
 
         public ArmorReflectionCache(Class<?> itemClass) throws Exception {
@@ -109,12 +134,6 @@ public class GeckoLibArmorHelper {
                 // Method to prepare the renderer with base model transforms
                 this.prepForRender = geoArmorRenderer.getMethod("prepForRender",
                         net.minecraft.world.entity.Entity.class, ItemStack.class, EquipmentSlot.class, HumanoidModel.class);
-
-                // GeoArmorRenderer extends HumanoidModel, so we can call its renderToBuffer method
-                // This is the standard Minecraft method that all HumanoidModels use
-                this.renderToBuffer = HumanoidModel.class.getMethod("renderToBuffer",
-                        PoseStack.class, VertexConsumer.class, int.class, int.class,
-                        float.class, float.class, float.class, float.class);
 
                 this.valid = true;
                 Ragdollified.LOGGER.debug("Successfully initialized GeckoLib reflection for " + itemClass.getSimpleName());
@@ -166,18 +185,13 @@ public class GeckoLibArmorHelper {
 
         public void renderArmor(Object renderer, PoseStack poseStack, MultiBufferSource buffer,
                                 int light, int overlay) {
-            try {
-                // GeckoLib renders in its own coordinate space, so we need to undo the ragdoll transforms
-                // that are already applied to the PoseStack, then let GeckoLib apply them via the model parts
-                poseStack.pushPose();
+            if (!(renderer instanceof HumanoidModel<?> armorModel)) return;
 
-                // GeoArmorRenderer is a HumanoidModel, and GeckoLib overrides renderToBuffer
-                // to handle getting its own VertexConsumer from the buffer
-                // We pass null for the VertexConsumer because GeckoLib gets it internally
-                // The color values (1.0f, 1.0f, 1.0f, 1.0f) represent RGBA white with full alpha
-                renderToBuffer.invoke(renderer,
+            poseStack.pushPose();
+            try {
+                armorModel.renderToBuffer(
                         poseStack,           // PoseStack
-                        null,                // VertexConsumer - GeckoLib gets this internally from the buffer
+                        null,                // VertexConsumer - GeckoLib gets this internally
                         light,               // packedLight
                         overlay,             // packedOverlay
                         1.0f,                // red
@@ -185,11 +199,10 @@ public class GeckoLibArmorHelper {
                         1.0f,                // blue
                         1.0f                 // alpha
                 );
-
-                poseStack.popPose();
             } catch (Exception e) {
-                Ragdollified.LOGGER.error("Error rendering GeckoLib armor: " + e.getMessage(), e);
-                e.printStackTrace();
+                Ragdollified.LOGGER.error("Error rendering GeckoLib armor: " + e.getMessage());
+            } finally {
+                poseStack.popPose();
             }
         }
     }

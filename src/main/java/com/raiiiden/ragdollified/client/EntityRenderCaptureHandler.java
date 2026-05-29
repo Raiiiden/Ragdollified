@@ -24,7 +24,7 @@ public class EntityRenderCaptureHandler {
         if (entity instanceof net.minecraft.world.entity.player.Player) return;
 
         // Check if supported model type
-        MobModelHelper.ModelType modelType = MobModelHelper.getActualModelType(entity);
+        MobModelHelper.ModelType modelType = ClientMobModelHelper.getActualModelType(entity);
         if (modelType == MobModelHelper.ModelType.UNSUPPORTED) return;
 
         try {
