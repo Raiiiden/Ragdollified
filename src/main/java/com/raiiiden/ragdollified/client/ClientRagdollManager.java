@@ -106,12 +106,10 @@ public class ClientRagdollManager {
     // bodies + N×5 joints + up to MAX_NEW_CACHE_ENTRIES_PER_TICK static-geometry caches
     // (~200 bodies each) all going through broadphase insertion in a single frame.
     // createFromEntity captures the live entity into a SpawnData snapshot and enqueues
-    // it; tickAll pops up to MAX_SPAWNS_PER_TICK each tick. Spreads a 250ms hitch into
+    // it; tickAll pops up to the configured spawn-per-tick limit. Spreads a 250ms hitch into
     // ~5 manageable ticks. Visible delay between death and ragdoll appearing is small
     // (matches MAX_NEW_CACHE_ENTRIES_PER_TICK so each spawned ragdoll can immediately
-    // get its static-collision cache).
-    private static final int MAX_SPAWNS_PER_TICK = 3;
-    private static final int MAX_SPAWN_QUEUE_SIZE = 60;
+    // get its static-collision cache). The per-tick and queue limits are config-backed.
     private static final ConcurrentLinkedQueue<ClientRagdoll.SpawnData> spawnQueue = new ConcurrentLinkedQueue<>();
 
     // Cross-thread input queues. Inputs from main/render thread (clicks, block changes,
@@ -217,8 +215,7 @@ public class ClientRagdollManager {
     // fires, the oldest active ragdolls (LinkedHashMap insertion order) are
     // force-settled — they keep rendering at their last pose and can still be woken
     // by player click or block change. Set high enough that normal play doesn't
-    // trigger it; pile-up explosions of >25 mobs will.
-    private static final int MAX_ACTIVE_RAGDOLLS = 25;
+    // trigger it; pile-up explosions over the configured active cap will.
 
     public static void tickAll() {
         if (ragdolls.isEmpty() && spawnQueue.isEmpty()) return;
@@ -232,6 +229,7 @@ public class ClientRagdollManager {
         }
 
         ClientJbulletWorld physicsWorld = ClientJbulletWorld.get(level);
+        physicsWorld.beginTick();
 
         // Phase 1 — drain cross-thread input queues, then spawn queue. Inputs (impulses,
         // block changes) come from the render thread; spawns come from death events.
@@ -275,8 +273,9 @@ public class ClientRagdollManager {
         // Enforce active-ragdoll cap. ConcurrentHashMap doesn't preserve insertion order,
         // so we sort active ragdolls by ticksExisted (largest first = oldest first) and
         // retire the oldest. They've been jiggling longest so they're the best candidates.
-        if (activeCount > MAX_ACTIVE_RAGDOLLS) {
-            int toRetire = activeCount - MAX_ACTIVE_RAGDOLLS;
+        int maxActiveRagdolls = RagdollifiedConfig.MAX_ACTIVE_RAGDOLLS.get();
+        if (activeCount > maxActiveRagdolls) {
+            int toRetire = activeCount - maxActiveRagdolls;
             lastForceSettledThisTick = toRetire;
             // Collect actives, sort by ticksExisted desc, settle the top N
             List<ClientRagdoll> actives = new ArrayList<>(activeCount);
@@ -304,7 +303,7 @@ public class ClientRagdollManager {
         // in the same window.
         t0 = System.nanoTime();
         int wakesThisTick = 0;
-        if (activeCount < MAX_ACTIVE_RAGDOLLS
+        if (activeCount < maxActiveRagdolls
                 && !wakeMovers.isEmpty() && !wakeSettled.isEmpty()) {
             outer:
             for (ClientRagdoll mover : wakeMovers) {
@@ -468,7 +467,7 @@ public class ClientRagdollManager {
     /**
      * Capture the entity's death state into a SpawnData snapshot and enqueue it.
      * The actual ClientRagdoll (and its physics bodies) is constructed later in
-     * {@link #tickAll()}, rate-limited to {@link #MAX_SPAWNS_PER_TICK} per tick so
+     * {@link #tickAll()}, rate-limited by config so
      * a mass kill (e.g. explosion taking out 20 mobs) doesn't spike a single tick.
      * Returns null because the ragdoll doesn't exist yet — callers don't use the
      * return value.
@@ -486,6 +485,10 @@ public class ClientRagdollManager {
 
         boolean isPlayer = entity instanceof Player;
         String mobType = EntityType.getKey(entity.getType()).toString();
+        if (!RagdollifiedConfig.isRagdollEnabledFor(mobType, isPlayer)) {
+            processedEntityIds.remove(entityId);
+            return null;
+        }
         MobModelHelper.ModelType modelType = isPlayer
                 ? MobModelHelper.ModelType.HUMANOID_STANDARD
                 : ClientMobModelHelper.getActualModelType(entity);
@@ -511,7 +514,9 @@ public class ClientRagdollManager {
         // vanilla projectile, …) so the constructor can apply a one-shot impulse to
         // the right body part. Returns null if there's no actionable hit data.
         RagdollHitTracker.ResolvedHit hit = RagdollHitTracker.resolveAndPlan(entity, damageSource);
-        int hitPartIndex = hit != null ? hit.part.index : -1;
+        int hitPartIndex = hit != null
+                ? (hit.centered ? RagdollHitMapper.CENTER_HIT_PART_INDEX : hit.part.index)
+                : -1;
         Vec3 hitImpulse = hit != null ? hit.impulse : null;
 
         // Sheep wool state — only meaningful for sheep, ignored otherwise.
@@ -548,16 +553,16 @@ public class ClientRagdollManager {
         // Drop oldest queued spawn if the queue is overflowing — better than blocking
         // on a death event handler. processedEntityIds also leaks for dropped spawns;
         // cleared on world unload.
-        if (spawnQueue.size() >= MAX_SPAWN_QUEUE_SIZE) {
+        if (spawnQueue.size() >= RagdollifiedConfig.MAX_SPAWN_QUEUE_SIZE.get()) {
             spawnQueue.poll();
         }
         spawnQueue.add(data);
         return null;
     }
 
-    /** Pop up to MAX_SPAWNS_PER_TICK queued spawns; returns count actually constructed. */
+    /** Pop up to the configured spawn budget; returns count actually constructed. */
     private static int processSpawnQueue(ClientJbulletWorld physicsWorld) {
-        int budget = MAX_SPAWNS_PER_TICK;
+        int budget = RagdollifiedConfig.MAX_SPAWNS_PER_TICK.get();
         int spawned = 0;
         ClientRagdoll.SpawnData data;
         while (budget-- > 0 && (data = spawnQueue.poll()) != null) {
@@ -592,7 +597,7 @@ public class ClientRagdollManager {
             processedEntityIds.remove(data.originalEntityId);
             return;
         }
-        if (spawnQueue.size() >= MAX_SPAWN_QUEUE_SIZE) {
+        if (spawnQueue.size() >= RagdollifiedConfig.MAX_SPAWN_QUEUE_SIZE.get()) {
             spawnQueue.poll();
         }
         spawnQueue.offer(data);
@@ -602,6 +607,7 @@ public class ClientRagdollManager {
     }
 
     private static boolean isSupportedSpawn(ClientRagdoll.SpawnData data) {
+        if (!RagdollifiedConfig.isRagdollEnabledFor(data.mobType, data.isPlayer)) return false;
         if (data.isPlayer) return true;
         if (MobModelHelper.isSupportedModelType(data.modelType)) return true;
         Ragdollified.LOGGER.info(

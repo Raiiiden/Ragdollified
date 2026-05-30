@@ -4,6 +4,7 @@ import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.blaze3d.vertex.VertexConsumer;
 import com.raiiiden.ragdollified.*;
 import com.raiiiden.ragdollified.client.compat.GeckoLibArmorHelper;
+import com.raiiiden.ragdollified.config.RagdollifiedConfig;
 import net.minecraft.client.Camera;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
@@ -228,7 +229,8 @@ public class ClientRagdollRenderer {
             // boundary itself doesn't jitter (caused pop-in artifacts at the edge).
             Vector3f torsoPos = ragdoll.getSmoothedTorsoPos();
             double distSq = camPos.distanceToSqr(torsoPos.x, torsoPos.y, torsoPos.z);
-            if (distSq > 2304.0) {
+            double renderDistance = RagdollifiedConfig.RENDER_DISTANCE.get();
+            if (distSq > renderDistance * renderDistance) {
                 culled++;
                 continue;
             }

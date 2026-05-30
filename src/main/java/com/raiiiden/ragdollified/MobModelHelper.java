@@ -1,5 +1,7 @@
 package com.raiiiden.ragdollified;
 
+import com.raiiiden.ragdollified.config.RagdollifiedConfig;
+import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.animal.Cow;
 import net.minecraft.world.entity.animal.Pig;
@@ -28,7 +30,10 @@ public class MobModelHelper {
     }
 
     public static boolean shouldHaveRagdoll(LivingEntity entity) {
-        if (entity instanceof net.minecraft.world.entity.player.Player) return false;
+        boolean isPlayer = entity instanceof net.minecraft.world.entity.player.Player;
+        String entityId = isPlayer ? "minecraft:player" : EntityType.getKey(entity.getType()).toString();
+        if (!RagdollifiedConfig.isRagdollEnabledFor(entityId, isPlayer)) return false;
+        if (isPlayer) return true;
         return getModelTypeFromEntity(entity) != ModelType.UNSUPPORTED;
     }
 

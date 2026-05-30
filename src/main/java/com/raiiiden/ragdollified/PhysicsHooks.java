@@ -2,6 +2,7 @@ package com.raiiiden.ragdollified;
 
 import com.raiiiden.ragdollified.network.ModNetwork;
 import com.raiiiden.ragdollified.network.RagdollSpawnPacket;
+import com.raiiiden.ragdollified.config.RagdollifiedConfig;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.AgeableMob;
@@ -23,12 +24,14 @@ public class PhysicsHooks {
         if (entity.level().isClientSide) return;
 
         boolean isPlayer = entity instanceof ServerPlayer;
+        String mobType = net.minecraft.world.entity.EntityType.getKey(entity.getType()).toString();
+        if (!RagdollifiedConfig.isRagdollEnabledFor(mobType, isPlayer)) return;
+
         MobModelHelper.ModelType modelType = isPlayer
                 ? MobModelHelper.ModelType.HUMANOID_STANDARD
                 : MobModelHelper.getModelTypeFromEntity(entity);
 
         if (!isPlayer && modelType == MobModelHelper.ModelType.UNSUPPORTED) {
-            String mobType = net.minecraft.world.entity.EntityType.getKey(entity.getType()).toString();
             Ragdollified.LOGGER.debug("Sending ragdoll candidate for client-side model detection: {}", mobType);
         }
 
@@ -42,7 +45,6 @@ public class PhysicsHooks {
 
         Vec3 vel = calculateDeathVelocity(entity, event.getSource());
 
-        String mobType = net.minecraft.world.entity.EntityType.getKey(entity.getType()).toString();
         float scale = isPlayer ? 1.0f : entity.getBbHeight() / 1.8f;
         boolean isBaby = entity instanceof AgeableMob ageable && ageable.isBaby();
 
@@ -92,10 +94,12 @@ public class PhysicsHooks {
         float hitImpulseX = 0f, hitImpulseY = 0f, hitImpulseZ = 0f;
         if (hitInfo != null) {
             Vec3 impulse = RagdollHitMapper.computeImpulse(
-                    hitInfo.direction, hitInfo.isHeadShot, hitInfo.isTaczBullet, hitInfo.damage);
+                    hitInfo.direction, hitInfo.isHeadShot, hitInfo.isTaczBullet, hitInfo.isMelee, hitInfo.damage);
             if (impulse != null) {
                 RagdollPart part = RagdollHitMapper.map(entity, hitInfo.hitPos, hitInfo.direction, hitInfo.isHeadShot);
-                hitPartIndex = (byte) part.index;
+                hitPartIndex = RagdollHitMapper.isCenteredHit(entity, hitInfo.hitPos, hitInfo.isHeadShot, part)
+                        ? (byte) RagdollHitMapper.CENTER_HIT_PART_INDEX
+                        : (byte) part.index;
                 hitImpulseX = (float) impulse.x;
                 hitImpulseY = (float) impulse.y;
                 hitImpulseZ = (float) impulse.z;

@@ -4,12 +4,22 @@ import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.phys.Vec3;
 
 public final class RagdollHitMapper {
+    public static final int CENTER_HIT_PART_INDEX = -2;
+
     private RagdollHitMapper() {}
     public static net.minecraft.world.phys.Vec3 computeImpulse(
             net.minecraft.world.phys.Vec3 direction, boolean isHeadShot, boolean isTaczBullet, float damage) {
+        return computeImpulse(direction, isHeadShot, isTaczBullet, false, damage);
+    }
+
+    public static net.minecraft.world.phys.Vec3 computeImpulse(
+            net.minecraft.world.phys.Vec3 direction, boolean isHeadShot, boolean isTaczBullet,
+            boolean isMelee, float damage) {
         if (direction == null || direction.lengthSqr() < 1.0e-6) return null;
         double base;
-        if (isTaczBullet) {
+        if (isMelee) {
+            base = com.raiiiden.ragdollified.config.RagdollifiedConfig.HIT_IMPULSE_MELEE.get();
+        } else if (isTaczBullet) {
             base = isHeadShot
                     ? com.raiiiden.ragdollified.config.RagdollifiedConfig.HIT_IMPULSE_HEADSHOT.get()
                     : com.raiiiden.ragdollified.config.RagdollifiedConfig.HIT_IMPULSE_BODY.get();
@@ -47,6 +57,25 @@ public final class RagdollHitMapper {
             if (hit != null) return hit;
         }
         return map(modelType, entity, hitPos);
+    }
+
+    public static boolean isCenteredHit(LivingEntity entity, Vec3 hitPos, boolean isHeadShot) {
+        RagdollPart part = map(entity, hitPos, isHeadShot);
+        return isCenteredHit(entity, hitPos, isHeadShot, part);
+    }
+
+    public static boolean isCenteredHit(LivingEntity entity, Vec3 hitPos, boolean isHeadShot, RagdollPart part) {
+        if (entity == null || hitPos == null || isHeadShot) return false;
+        if (part != RagdollPart.TORSO) return false;
+        double localX = hitPos.x - entity.getX();
+        double localZ = hitPos.z - entity.getZ();
+        float yawRad = (float) Math.toRadians(entity.getYRot());
+        double cos = Math.cos(yawRad);
+        double sin = Math.sin(yawRad);
+        double rotX = localX * cos + localZ * sin;
+        double centerBand = Math.max(0.05, entity.getBbWidth()
+                * com.raiiiden.ragdollified.config.RagdollifiedConfig.HIT_CENTER_LEEWAY.get());
+        return Math.abs(rotX) <= centerBand;
     }
 
     // ============================

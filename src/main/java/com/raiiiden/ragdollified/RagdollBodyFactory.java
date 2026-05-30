@@ -11,6 +11,7 @@ import com.bulletphysics.dynamics.constraintsolver.Generic6DofConstraint;
 import com.bulletphysics.dynamics.constraintsolver.TypedConstraint;
 import com.bulletphysics.linearmath.DefaultMotionState;
 import com.bulletphysics.linearmath.Transform;
+import com.raiiiden.ragdollified.config.RagdollifiedConfig;
 import org.joml.Quaternionf;
 
 import javax.vecmath.Quat4f;
@@ -335,20 +336,21 @@ public final class RagdollBodyFactory {
     public static RigidBody makePart(DiscreteDynamicsWorld world, CollisionShape shape,
                                      Vector3f position, Quat4f rotation,
                                      float mass, Vector3f initialVel) {
+        float effectiveMass = mass * RagdollifiedConfig.MASS_SCALE.get().floatValue();
         Transform t = new Transform();
         t.setIdentity();
         t.origin.set(position);
         t.setRotation(rotation);
 
         Vector3f inertia = new Vector3f();
-        shape.calculateLocalInertia(mass, inertia);
+        shape.calculateLocalInertia(effectiveMass, inertia);
 
         RigidBodyConstructionInfo info = new RigidBodyConstructionInfo(
-                mass, new DefaultMotionState(t), shape, inertia);
-        info.linearDamping  = 0.04f;
-        info.angularDamping = 0.9f;
-        info.restitution    = 0.0f;
-        info.friction       = 0.9f;
+                effectiveMass, new DefaultMotionState(t), shape, inertia);
+        info.linearDamping  = RagdollifiedConfig.LINEAR_DAMPING.get().floatValue();
+        info.angularDamping = RagdollifiedConfig.ANGULAR_DAMPING.get().floatValue();
+        info.restitution    = RagdollifiedConfig.RESTITUTION.get().floatValue();
+        info.friction       = RagdollifiedConfig.FRICTION.get().floatValue();
         info.additionalDamping = true;
 
         RigidBody body = new RigidBody(info);
@@ -359,7 +361,8 @@ public final class RagdollBodyFactory {
         // exceed any low cap the moment knockback or fall is added).
         body.setLinearVelocity(new Vector3f(initialVel));
 
-        body.setDamping(0.1f, 0.9f);
+        body.setDamping(RagdollifiedConfig.LINEAR_DAMPING.get().floatValue(),
+                RagdollifiedConfig.ANGULAR_DAMPING.get().floatValue());
         body.setSleepingThresholds(0.3f, 0.3f);
         // Disable Bullet's auto-deactivation. Bullet sleeps bodies that stay below
         // the velocity threshold for ~2s, AND once asleep gravity stops being applied

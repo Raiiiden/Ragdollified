@@ -2,6 +2,7 @@ package com.raiiiden.ragdollified.client;
 
 import com.raiiiden.ragdollified.MobModelHelper;
 import com.raiiiden.ragdollified.Ragdollified;
+import com.raiiiden.ragdollified.config.RagdollifiedConfig;
 import net.minecraft.client.Minecraft;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.player.Player;
@@ -30,11 +31,13 @@ public class ClientDeathHandler {
 
         // Check if this entity should have a ragdoll
         boolean isPlayer = entity instanceof Player;
+        String mobType = net.minecraft.world.entity.EntityType.getKey(entity.getType()).toString();
+        if (!RagdollifiedConfig.isRagdollEnabledFor(mobType, isPlayer)) return;
+
         MobModelHelper.ModelType modelType = isPlayer
                 ? MobModelHelper.ModelType.HUMANOID_STANDARD
                 : ClientMobModelHelper.getActualModelType(entity);
         if (!isPlayer && !MobModelHelper.isSupportedModelType(modelType)) {
-            String mobType = net.minecraft.world.entity.EntityType.getKey(entity.getType()).toString();
             Ragdollified.LOGGER.info("Skipping ragdoll for unsupported mob {} - no matching ragdoll body/render", mobType);
             return;
         }

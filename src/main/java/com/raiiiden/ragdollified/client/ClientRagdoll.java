@@ -34,6 +34,7 @@ import java.util.*;
 @OnlyIn(Dist.CLIENT)
 public class ClientRagdoll {
 
+    public static final int CENTER_HIT_PART_INDEX = RagdollHitMapper.CENTER_HIT_PART_INDEX;
     private final int id;
 
     // Physics — mirrors MobRagdollPhysics field layout
@@ -587,13 +588,16 @@ public class ClientRagdoll {
         // Applied after bodies exist + transforms cached, before publish, so the very
         // first rendered frame already shows the recoil. Runs on the physics worker
         // (we're inside processSpawnQueue), so direct jbullet calls are safe here.
-        if (data.hitPartIndex >= 0 && data.hitPartIndex < ragdollParts.size() && data.hitImpulse != null) {
-            RigidBody body = ragdollParts.get(data.hitPartIndex);
-            body.activate(true);
-            body.applyCentralImpulse(new Vector3f(
-                    (float) data.hitImpulse.x,
-                    (float) data.hitImpulse.y,
-                    (float) data.hitImpulse.z));
+        if (data.hitImpulse != null) {
+            if (data.hitPartIndex == CENTER_HIT_PART_INDEX) {
+                applyCenteredDeathImpulse(data.hitImpulse);
+            } else if (data.hitPartIndex >= 0 && data.hitPartIndex < ragdollParts.size()) {
+                RagdollPart part = RagdollPart.byIndex(data.hitPartIndex);
+                RigidBody body = ragdollParts.get(data.hitPartIndex);
+                body.activate(true);
+                body.applyCentralImpulse(scaledImpulse(data.hitImpulse,
+                        part != null ? RagdollifiedConfig.getDeathPartKnockbackMultiplier(part) : 1.0f));
+            }
         }
     }
 
@@ -663,7 +667,8 @@ public class ClientRagdoll {
 
         double distSq = cameraPos.distanceToSqr(cachedTorsoPos.x, cachedTorsoPos.y, cachedTorsoPos.z);
 
-        if (distSq > 2304.0) {
+        double physicsDistance = RagdollifiedConfig.PHYSICS_DISTANCE.get();
+        if (distSq > physicsDistance * physicsDistance) {
             if (!bodiesFrozen) {
                 freezeBodies();
                 PHASE_STATS.distanceFrozenThisTick++;
@@ -679,13 +684,16 @@ public class ClientRagdoll {
         t = System.nanoTime();
         for (RigidBody r : ragdollParts) {
             r.getLinearVelocity(scratchVel);
-            if (scratchVel.y < -80f) scratchVel.y = -80f;
+            float maxFallSpeed = RagdollifiedConfig.MAX_FALL_SPEED.get().floatValue();
+            float maxLinearSpeed = RagdollifiedConfig.MAX_LINEAR_SPEED.get().floatValue();
+            float maxAngularSpeed = RagdollifiedConfig.MAX_ANGULAR_SPEED.get().floatValue();
+            if (scratchVel.y < -maxFallSpeed) scratchVel.y = -maxFallSpeed;
             float speed = scratchVel.length();
-            if (speed > 90f) { scratchVel.scale(90f / speed); r.setLinearVelocity(scratchVel); }
+            if (speed > maxLinearSpeed) { scratchVel.scale(maxLinearSpeed / speed); r.setLinearVelocity(scratchVel); }
 
             r.getAngularVelocity(scratchAng);
             float angSpeed = scratchAng.length();
-            if (angSpeed > 8f) { scratchAng.scale(8f / angSpeed); r.setAngularVelocity(scratchAng); }
+            if (angSpeed > maxAngularSpeed) { scratchAng.scale(maxAngularSpeed / angSpeed); r.setAngularVelocity(scratchAng); }
         }
         PHASE_STATS.velocityClampNanos += System.nanoTime() - t;
 
@@ -698,7 +706,8 @@ public class ClientRagdoll {
         PHASE_STATS.fluidForcesNanos += System.nanoTime() - t;
 
         // 3. player collisions
-        if (distSq <= 144.0) {
+        double playerCollisionDistance = RagdollifiedConfig.PLAYER_COLLISION_DISTANCE.get();
+        if (distSq <= playerCollisionDistance * playerCollisionDistance) {
             t = System.nanoTime();
             applyPlayerCollisions();
             PHASE_STATS.playerCollisionsNanos += System.nanoTime() - t;
@@ -729,7 +738,10 @@ public class ClientRagdoll {
         // Every 10 ticks to limit cost; only triggers when the ragdoll is genuinely
         // stuck (small vy + no real support). Skip when floating in fluid — buoyancy is
         // the legitimate reason there's no ground contact, no phantom cache to fix.
-        if (ticksExisted % 10 == 0 && !isRestingOnGround() && !isInLiquidAtTorso()) {
+        if (ticksExisted % 10 == 0
+                && !hasAnyPartGroundSupport()
+                && hasLowVerticalSpeed()
+                && !isInLiquidAtTorso()) {
             BlockPos torsoBlock = new BlockPos(
                     (int) Math.floor(cachedTorsoPos.x),
                     (int) Math.floor(cachedTorsoPos.y),
@@ -927,6 +939,40 @@ public class ClientRagdoll {
         return !state.isAir() && !state.getCollisionShape(level, pos).isEmpty();
     }
 
+    private boolean hasAnyPartGroundSupport() {
+        for (int i = 0; i < cachedTransforms.length && i < ragdollParts.size(); i++) {
+            RagdollTransform transform = cachedTransforms[i];
+            if (transform == null) continue;
+
+            Vector3f halfExtents = new Vector3f(0.15f, 0.25f, 0.15f);
+            if (ragdollParts.get(i).getCollisionShape() instanceof BoxShape box) {
+                box.getHalfExtentsWithoutMargin(halfExtents);
+            }
+
+            Vector3f pos = transform.position;
+            int y = (int) Math.floor(pos.y - halfExtents.y - 0.08f);
+            int x = (int) Math.floor(pos.x);
+            int z = (int) Math.floor(pos.z);
+            if (isSolidBlock(x, y, z)) return true;
+
+            if (halfExtents.x > 0.12f || halfExtents.z > 0.12f) {
+                if (isSolidBlock((int) Math.floor(pos.x + halfExtents.x), y, z)) return true;
+                if (isSolidBlock((int) Math.floor(pos.x - halfExtents.x), y, z)) return true;
+                if (isSolidBlock(x, y, (int) Math.floor(pos.z + halfExtents.z))) return true;
+                if (isSolidBlock(x, y, (int) Math.floor(pos.z - halfExtents.z))) return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean hasLowVerticalSpeed() {
+        for (RigidBody body : ragdollParts) {
+            body.getLinearVelocity(scratchVel);
+            if (Math.abs(scratchVel.y) > 0.12f) return false;
+        }
+        return true;
+    }
+
     /**
      * Handle a nearby block change (break / place / state change). Two effects:
      *
@@ -1031,8 +1077,9 @@ public class ClientRagdoll {
 
                 scratchNormal.set(point.normalWorldOnB);
                 float depth = Math.abs(point.getDistance());
-                float actualCorrection = Math.min(depth * 1.5f, 0.2f);
-                if (bothDynamic) actualCorrection *= 0.15f;
+                float actualCorrection = bothDynamic
+                        ? Math.min(depth * 1.5f, 0.2f) * 0.15f
+                        : Math.min(depth * 0.35f, 0.05f);
 
                 scratchNormal.scale(actualCorrection);
                 if (aDyn) a.translate(scratchNormal);
@@ -1105,6 +1152,8 @@ public class ClientRagdoll {
                             RigidBody rb = new RigidBody(new RigidBodyConstructionInfo(
                                     0f, new DefaultMotionState(t), cs, new Vector3f()));
                             rb.setCollisionFlags(rb.getCollisionFlags() | CollisionFlags.STATIC_OBJECT);
+                            rb.setFriction(RagdollifiedConfig.FRICTION.get().floatValue());
+                            rb.setRestitution(0f);
                             world.addRigidBody(rb);
                             bodies.add(rb);
                         }
@@ -1150,11 +1199,11 @@ public class ClientRagdoll {
     // ============================
 
     private void createRagdollBodies(SpawnData data) {
-        float xRotDeg = data.xRot;
+        float xRotDeg = MobModelHelper.isHumanoidModelType(modelType) ? 0f : data.xRot;
         if (data.isSwimming) xRotDeg = 90;
 
-        float spawnYOffset = isPlayer ? 1.3f : (modelType == MobModelHelper.ModelType.QUADRUPED ||
-                modelType == MobModelHelper.ModelType.CHICKEN ? 0f : 1.3f);
+        float spawnYOffset = isPlayer ? 1.2f : (modelType == MobModelHelper.ModelType.QUADRUPED ||
+                modelType == MobModelHelper.ModelType.CHICKEN ? 0f : 1.2f);
 
         // Quadruped/chicken pos adjusted again below — keep consistent with factory call
         if (modelType == MobModelHelper.ModelType.QUADRUPED)
@@ -1190,6 +1239,7 @@ public class ClientRagdoll {
                 (float) data.velocity.y,
                 (float) data.velocity.z
         );
+        initialVel.scale(RagdollifiedConfig.INITIAL_VELOCITY_SCALE.get().floatValue());
 
         RagdollBodyFactory.build(world, ragdollParts, ragdollJoints,
                 modelType, pos, baseQuat, scale, initialVel, data.capturedPose, bodyProfile, isBaby());
@@ -1339,7 +1389,28 @@ public class ClientRagdoll {
         }
         RigidBody body = ragdollParts.get(part.index);
         body.activate(true);
-        body.applyCentralImpulse(impulse);
+        Vector3f scaled = new Vector3f(impulse);
+        scaled.scale(RagdollifiedConfig.getPartKnockbackMultiplier(part));
+        body.applyCentralImpulse(scaled);
+    }
+
+    private void applyCenteredDeathImpulse(Vec3 impulse) {
+        float centerScale = Math.max(0.75f, RagdollifiedConfig.HIT_CENTER_DISTRIBUTION_SCALE.get().floatValue());
+        for (int i = 0; i < ragdollParts.size() && i < 6; i++) {
+            RagdollPart part = RagdollPart.byIndex(i);
+            if (part == null) continue;
+            RigidBody body = ragdollParts.get(i);
+            body.activate(true);
+            body.applyCentralImpulse(scaledImpulse(impulse,
+                    centerScale * RagdollifiedConfig.getDeathPartKnockbackMultiplier(part)));
+        }
+    }
+
+    private static Vector3f scaledImpulse(Vec3 impulse, float scale) {
+        return new Vector3f(
+                (float) impulse.x * scale,
+                (float) impulse.y * scale,
+                (float) impulse.z * scale);
     }
 
     /**

@@ -9,6 +9,7 @@ import com.bulletphysics.dynamics.DiscreteDynamicsWorld;
 import com.bulletphysics.dynamics.RigidBody;
 import com.bulletphysics.dynamics.constraintsolver.ConstraintSolver;
 import com.bulletphysics.dynamics.constraintsolver.SequentialImpulseConstraintSolver;
+import com.raiiiden.ragdollified.config.RagdollifiedConfig;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.core.BlockPos;
 import net.minecraftforge.api.distmarker.Dist;
@@ -52,7 +53,7 @@ public class ClientJbulletWorld {
     private static final int MAX_NEW_CACHE_ENTRIES_PER_TICK = 3;
     private int newCacheEntriesThisTick = 0;
 
-    /** Per-tick stats. Reset each step()/maintainCache(), read by the manager. */
+    /** Per-tick stats. Reset once at the start of ClientRagdollManager.tickAll(). */
     public static final class CacheStats {
         public int hits;            // cache hit, no work done
         public int misses;          // cache miss, supplier called → new bodies created
@@ -108,8 +109,13 @@ public class ClientJbulletWorld {
         broadphase = new DbvtBroadphase();
         solver = new SequentialImpulseConstraintSolver();
         dynamicsWorld = new DiscreteDynamicsWorld(dispatcher, broadphase, solver, collisionConfig);
-        dynamicsWorld.setGravity(new Vector3f(0f, -9.81f, 0f));
+        dynamicsWorld.setGravity(new Vector3f(0f, -RagdollifiedConfig.GRAVITY.get().floatValue(), 0f));
         dynamicsWorld.getSolverInfo().numIterations = 20;
+    }
+
+    public void beginTick() {
+        newCacheEntriesThisTick = 0;
+        cacheStats.resetCounters();
     }
 
     /**
@@ -126,8 +132,6 @@ public class ClientJbulletWorld {
      * Visible quality loss is minor because piled ragdolls are typically near-rest.
      */
     public void step(float dt, int activeRagdollCount) {
-        newCacheEntriesThisTick = 0;
-        cacheStats.resetCounters();
         int iterations;
         float substepSize;
         if (activeRagdollCount > 15) {
@@ -156,8 +160,6 @@ public class ClientJbulletWorld {
      * which wastes 5–10 ms even with zero dynamic bodies — this skips that entirely.
      */
     public void maintainCache() {
-        newCacheEntriesThisTick = 0;
-        cacheStats.resetCounters();
         tickCacheCleanup();
     }
 

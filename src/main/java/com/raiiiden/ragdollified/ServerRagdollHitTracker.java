@@ -14,6 +14,7 @@ import net.minecraftforge.fml.common.Mod;
 import net.minecraftforge.fml.LogicalSide;
 
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -50,6 +51,7 @@ public final class ServerRagdollHitTracker {
         public final Vec3 direction;
         public final boolean isHeadShot;
         public final boolean isTaczBullet;
+        public final boolean isMelee;
         // Final damage amount at hit time (post-armor for vanilla LivingHurtEvent, raw
         // gun amount for TACZ Pre). Used to scale the impulse magnitude so pellet weapons
         // barely twitch the corpse and high-damage rounds whip it. 0 = damage unknown.
@@ -57,10 +59,16 @@ public final class ServerRagdollHitTracker {
         public final long captureTimeMs;
 
         public HitInfo(Vec3 hitPos, Vec3 direction, boolean isHeadShot, boolean isTaczBullet, float damage) {
+            this(hitPos, direction, isHeadShot, isTaczBullet, false, damage);
+        }
+
+        public HitInfo(Vec3 hitPos, Vec3 direction, boolean isHeadShot, boolean isTaczBullet,
+                       boolean isMelee, float damage) {
             this.hitPos = hitPos;
             this.direction = direction;
             this.isHeadShot = isHeadShot;
             this.isTaczBullet = isTaczBullet;
+            this.isMelee = isMelee;
             this.damage = damage;
             this.captureTimeMs = System.currentTimeMillis();
         }
@@ -98,15 +106,14 @@ public final class ServerRagdollHitTracker {
         Entity hurt = getEntity(event, "getHurtEntity");
         if (bullet == null || hurt == null) return;
         if (!(hurt instanceof LivingEntity living)) return;
-        if (!(living instanceof net.minecraft.world.entity.player.Player)
-                && !MobModelHelper.shouldHaveRagdoll(living)) return;
+        if (!MobModelHelper.shouldHaveRagdoll(living)) return;
 
         // xOld/yOld/zOld is the bullet's position one tick before the hit — usually the
         // closest sample we have to the actual contact point (current position has
         // already integrated past the entity).
-        Vec3 hitPos = new Vec3(bullet.xOld, bullet.yOld, bullet.zOld);
         Vec3 vel = bullet.getDeltaMovement();
         Vec3 dir = vel.lengthSqr() > 1.0e-6 ? vel.normalize() : Vec3.ZERO;
+        Vec3 hitPos = projectileRayStart(bullet, dir);
 
         HIT_INFO.put(hurt.getId(), new HitInfo(
                 hitPos, dir, getBoolean(event, "isHeadShot"), true, getFloat(event, "getAmount")));
@@ -123,21 +130,56 @@ public final class ServerRagdollHitTracker {
     public static void onLivingHurt(LivingHurtEvent event) {
         if (event.getEntity().level().isClientSide) return;
         LivingEntity living = event.getEntity();
-        if (!(living instanceof net.minecraft.world.entity.player.Player)
-                && !MobModelHelper.shouldHaveRagdoll(living)) return;
+        if (!MobModelHelper.shouldHaveRagdoll(living)) return;
         if (event.getSource() == null) return;
 
         Entity direct = event.getSource().getDirectEntity();
-        if (!(direct instanceof Projectile)) return;
+        if (direct instanceof Projectile) {
+            Vec3 vel = direct.getDeltaMovement();
+            Vec3 dir = vel.lengthSqr() > 1.0e-6 ? vel.normalize() : Vec3.ZERO;
+            Vec3 hitPos = projectileRayStart(direct, dir);
 
-        Vec3 hitPos = new Vec3(direct.xOld, direct.yOld, direct.zOld);
-        Vec3 vel = direct.getDeltaMovement();
-        Vec3 dir = vel.lengthSqr() > 1.0e-6 ? vel.normalize() : Vec3.ZERO;
-
-        // Don't clobber a TACZ entry that may have arrived first this tick.
-        HIT_INFO.putIfAbsent(living.getId(),
-                new HitInfo(hitPos, dir, false, false, event.getAmount()));
+            // Don't clobber a TACZ entry that may have arrived first this tick.
+            HIT_INFO.putIfAbsent(living.getId(),
+                    new HitInfo(hitPos, dir, false, false, event.getAmount()));
+        } else {
+            Entity attacker = event.getSource().getEntity();
+            if (!(attacker instanceof LivingEntity attackerLiving)) return;
+            Vec3 dir = attackerLiving.getLookAngle();
+            if (dir.lengthSqr() < 1.0e-6) {
+                dir = living.position().subtract(attackerLiving.position());
+            }
+            if (dir.lengthSqr() < 1.0e-6) return;
+            dir = dir.normalize();
+            Vec3 hitPos = traceAttackerLookToEntity(attackerLiving, living, dir);
+            HIT_INFO.put(living.getId(), new HitInfo(hitPos, dir, false, false, true, event.getAmount()));
+        }
         maybeCleanup();
+    }
+
+    private static Vec3 traceAttackerLookToEntity(LivingEntity attacker, LivingEntity target, Vec3 dir) {
+        Vec3 eye = attacker.getEyePosition();
+        double distanceToTarget = eye.distanceTo(target.position().add(0.0, target.getBbHeight() * 0.5, 0.0));
+        double reach = Math.max(4.5, distanceToTarget + target.getBbWidth() + 1.0);
+        Vec3 end = eye.add(dir.scale(reach));
+        Optional<Vec3> clipped = target.getBoundingBox().inflate(0.05).clip(eye, end);
+        return clipped.orElseGet(() -> closestPointOnSegmentToTarget(eye, end, target));
+    }
+
+    private static Vec3 projectileRayStart(Entity projectile, Vec3 dir) {
+        Vec3 previous = new Vec3(projectile.xOld, projectile.yOld, projectile.zOld);
+        if (dir.lengthSqr() < 1.0e-6) return previous;
+        return previous.subtract(dir.scale(0.75));
+    }
+
+    private static Vec3 closestPointOnSegmentToTarget(Vec3 start, Vec3 end, LivingEntity target) {
+        Vec3 center = target.position().add(0.0, target.getBbHeight() * 0.5, 0.0);
+        Vec3 segment = end.subtract(start);
+        double lenSqr = segment.lengthSqr();
+        if (lenSqr < 1.0e-6) return center;
+        double t = center.subtract(start).dot(segment) / lenSqr;
+        t = Math.max(0.0, Math.min(1.0, t));
+        return start.add(segment.scale(t));
     }
 
     /**

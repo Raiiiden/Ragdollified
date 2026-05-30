@@ -2,6 +2,7 @@ package com.raiiiden.ragdollified.network;
 
 import com.raiiiden.ragdollified.MobPoseCapture;
 import com.raiiiden.ragdollified.MobModelHelper;
+import com.raiiiden.ragdollified.RagdollHitMapper;
 import com.raiiiden.ragdollified.RagdollPart;
 import com.raiiiden.ragdollified.Ragdollified;
 import com.raiiiden.ragdollified.client.ClientRagdoll;
@@ -328,7 +329,7 @@ public class RagdollSpawnPacket {
         // receiving this packet anyway, or PhysicsHooks ran before the hit landed).
         int hitPartIndex;
         Vec3 hitImpulse;
-        if (msg.hitPartIndex >= 0) {
+        if (msg.hitPartIndex >= 0 || msg.hitPartIndex == RagdollHitMapper.CENTER_HIT_PART_INDEX) {
             hitPartIndex = msg.hitPartIndex;
             hitImpulse = new Vec3(msg.hitImpulseX, msg.hitImpulseY, msg.hitImpulseZ);
         } else {
@@ -336,7 +337,9 @@ public class RagdollSpawnPacket {
             if (worldEntity instanceof net.minecraft.world.entity.LivingEntity living) {
                 hit = com.raiiiden.ragdollified.client.RagdollHitTracker.resolveAndPlan(living, null);
             }
-            hitPartIndex = hit != null ? hit.part.index : -1;
+            hitPartIndex = hit != null
+                    ? (hit.centered ? RagdollHitMapper.CENTER_HIT_PART_INDEX : hit.part.index)
+                    : -1;
             hitImpulse = hit != null ? hit.impulse : null;
         }
 
