@@ -4,9 +4,12 @@
   "compatibilityLevel": "JAVA_17",
   "refmap": "ragdollified.refmap.json",
   "mixins": [
+    "CameraMixin"
   ],
   "client": [
-    "HideDeadEntityMixin"
+    "HideDeadEntityMixin",
+    "CameraAccessor",
+    "GameRendererMixin"
   ],
   "minVersion": "0.8.5"
 }

@@ -98,6 +98,10 @@ public class ClientRagdoll {
     private final Vector3f prevTorsoPos = new Vector3f();
     private boolean hasPrevTransforms = false;
 
+    // Cached skins
+    private final ResourceLocation cachedPlayerSkin;
+    private final boolean cachedIsSlim;
+
     /**
      * Immutable snapshot of all transform state needed for rendering. Published
      * atomically by the physics thread at the end of each updateCachedTransforms;
@@ -598,6 +602,26 @@ public class ClientRagdoll {
                 body.applyCentralImpulse(scaledImpulse(data.hitImpulse,
                         part != null ? RagdollifiedConfig.getDeathPartKnockbackMultiplier(part) : 1.0f));
             }
+        }
+        // Resolve player skin + slim variant NOW, while the entity is still loaded.
+        if (isPlayer && playerUUID != null) {
+            net.minecraft.client.Minecraft mc2 = net.minecraft.client.Minecraft.getInstance();
+            net.minecraft.client.player.AbstractClientPlayer pe = null;
+            if (mc2.level != null) {
+                for (net.minecraft.client.player.AbstractClientPlayer p : mc2.level.players()) {
+                    if (p.getUUID().equals(playerUUID)) { pe = p; break; }
+                }
+            }
+            if (pe != null) {
+                cachedPlayerSkin = pe.getSkinTextureLocation();
+                cachedIsSlim = "slim".equals(pe.getModelName());
+            } else {
+                cachedPlayerSkin = net.minecraft.client.resources.DefaultPlayerSkin.getDefaultSkin(playerUUID);
+                cachedIsSlim = net.minecraft.client.resources.DefaultPlayerSkin.getSkinModelName(playerUUID).equals("slim");
+            }
+        } else {
+            cachedPlayerSkin = null;
+            cachedIsSlim = false;
         }
     }
 
@@ -1604,6 +1628,9 @@ public class ClientRagdoll {
             for (TypedConstraint c : ragdollJoints) world.removeConstraint(c);
             for (RigidBody r : ragdollParts) world.removeRigidBody(r);
         }
+        if (!isPlayer) {
+            ClientMobTextureCache.evict(originalEntityId);
+        }
 
         ragdollParts.clear();
         ragdollJoints.clear();
@@ -1671,6 +1698,8 @@ public class ClientRagdoll {
     public int getVillagerLevel() { return villagerLevel; }
     public int getOriginalEntityId() { return originalEntityId; }
     public ClientLevel getLevel() { return level; }
+    public ResourceLocation getCachedPlayerSkin() { return cachedPlayerSkin; }
+    public boolean isCachedSlim() { return cachedIsSlim; }
 
     // ============================
     // Math helpers (kept locally for interpolation — body/joint creation delegated to RagdollBodyFactory)
