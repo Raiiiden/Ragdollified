@@ -305,50 +305,47 @@ public class ClientRagdollRenderer {
     private static void renderPlayerRagdoll(ClientRagdoll ragdoll, ClientRagdoll.TransformSnapshot snap,
                                             PoseStack poseStack,
                                             MultiBufferSource buffer, int light, float partialTick, double distSq) {
-        // Resolve the player entity once per render-pass instead of three separate linear
-        // scans of mc.level.players() (isSlimModel + getPlayerTexture + findPlayerEntity).
         UUID uuid = ragdoll.getPlayerUUID();
-        AbstractClientPlayer playerEntity = findPlayerEntity(uuid);
-        boolean isSlim = playerEntity != null
-                ? "slim".equals(playerEntity.getModelName())
-                : (uuid != null && DefaultPlayerSkin.getSkinModelName(uuid).equals("slim"));
+        ResourceLocation skin = ragdoll.getCachedPlayerSkin();
+        boolean isSlim = ragdoll.isCachedSlim();
+        if (skin == null) {
+            skin = uuid != null
+                    ? DefaultPlayerSkin.getDefaultSkin(uuid)
+                    : DefaultPlayerSkin.getDefaultSkin();
+        }
         PlayerModel<AbstractClientPlayer> model = isSlim ? slimModel : normalModel;
+        AbstractClientPlayer playerEntity = findPlayerEntity(uuid);
 
         RagdollTransform torso = ragdoll.getSmoothedTransform(RagdollPart.TORSO);
-        RagdollTransform head = ragdoll.getSmoothedTransform(RagdollPart.HEAD);
-        RagdollTransform larm = ragdoll.getSmoothedTransform(RagdollPart.LEFT_ARM);
-        RagdollTransform rarm = ragdoll.getSmoothedTransform(RagdollPart.RIGHT_ARM);
-        RagdollTransform lleg = ragdoll.getSmoothedTransform(RagdollPart.LEFT_LEG);
-        RagdollTransform rleg = ragdoll.getSmoothedTransform(RagdollPart.RIGHT_LEG);
+        RagdollTransform head  = ragdoll.getSmoothedTransform(RagdollPart.HEAD);
+        RagdollTransform larm  = ragdoll.getSmoothedTransform(RagdollPart.LEFT_ARM);
+        RagdollTransform rarm  = ragdoll.getSmoothedTransform(RagdollPart.RIGHT_ARM);
+        RagdollTransform lleg  = ragdoll.getSmoothedTransform(RagdollPart.LEFT_LEG);
+        RagdollTransform rleg  = ragdoll.getSmoothedTransform(RagdollPart.RIGHT_LEG);
 
         if (torso == null) return;
 
         poseStack.pushPose();
         try {
-            // Per-part relative offsets are computed against torso.position (unmodified),
-            // so adding the bob only at the outer translate lifts every part uniformly.
             float bob = liquidBobOffset(ragdoll);
             poseStack.translate(torso.position.x, torso.position.y + bob, torso.position.z);
 
-            ResourceLocation skin = playerEntity != null
-                    ? playerEntity.getSkinTextureLocation()
-                    : (uuid != null ? DefaultPlayerSkin.getDefaultSkin(uuid) : DefaultPlayerSkin.getDefaultSkin());
             VertexConsumer vc = buffer.getBuffer(RenderType.entityTranslucent(skin));
 
-            renderHumanoidPartPhysics(poseStack, vc, model.body, torso, torso, light, RagdollPart.TORSO);
-            renderHumanoidPartPhysics(poseStack, vc, model.head, head, torso, light, RagdollPart.HEAD);
-            renderHumanoidPartPhysics(poseStack, vc, model.leftLeg, lleg, torso, light, RagdollPart.LEFT_LEG);
-            renderHumanoidPartPhysics(poseStack, vc, model.rightLeg, rleg, torso, light, RagdollPart.RIGHT_LEG);
-            renderHumanoidPartPhysics(poseStack, vc, model.leftArm, larm, torso, light, RagdollPart.LEFT_ARM);
-            renderHumanoidPartPhysics(poseStack, vc, model.rightArm, rarm, torso, light, RagdollPart.RIGHT_ARM);
+            renderHumanoidPartPhysics(poseStack, vc, model.body,     torso, torso, light, RagdollPart.TORSO);
+            renderHumanoidPartPhysics(poseStack, vc, model.head,     head,  torso, light, RagdollPart.HEAD);
+            renderHumanoidPartPhysics(poseStack, vc, model.leftLeg,  lleg,  torso, light, RagdollPart.LEFT_LEG);
+            renderHumanoidPartPhysics(poseStack, vc, model.rightLeg, rleg,  torso, light, RagdollPart.RIGHT_LEG);
+            renderHumanoidPartPhysics(poseStack, vc, model.leftArm,  larm,  torso, light, RagdollPart.LEFT_ARM);
+            renderHumanoidPartPhysics(poseStack, vc, model.rightArm, rarm,  torso, light, RagdollPart.RIGHT_ARM);
 
-            // Skip armor at distance — invisible beyond 24 blocks
-            if (distSq <= 576.0) {
+            double armorDistSq = RagdollifiedConfig.getArmorRenderDistanceSq();
+            double geckoDistSq = RagdollifiedConfig.getGeckoLibArmorRenderDistanceSq();
+
+            if (distSq <= armorDistSq) {
                 renderPlayerVanillaArmor(ragdoll, poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg, isSlim);
 
-                // GeckoLib armor only within 16 blocks. Requires a real player entity —
-                // skip if the player has disconnected or isn't loaded.
-                if (distSq <= 256.0 && playerEntity != null) {
+                if (distSq <= geckoDistSq && playerEntity != null) {
                     renderPlayerGeckoLibArmor(ragdoll, poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg, isSlim, playerEntity);
                 }
             }
@@ -550,16 +547,16 @@ public class ClientRagdollRenderer {
     // ============================
 
     private static void renderMobRagdoll(ClientRagdoll ragdoll, ClientRagdoll.TransformSnapshot snap,
-                                          PoseStack poseStack,
-                                          MultiBufferSource buffer, int light, float partialTick, double distSq) {
+                                         PoseStack poseStack,
+                                         MultiBufferSource buffer, int light, float partialTick, double distSq) {
         MobModelHelper.ModelType modelType = ragdoll.getModelType();
 
         RagdollTransform torso = ragdoll.getSmoothedTransform(RagdollPart.TORSO);
-        RagdollTransform head = ragdoll.getSmoothedTransform(RagdollPart.HEAD);
-        RagdollTransform larm = ragdoll.getSmoothedTransform(RagdollPart.LEFT_ARM);
-        RagdollTransform rarm = ragdoll.getSmoothedTransform(RagdollPart.RIGHT_ARM);
-        RagdollTransform lleg = ragdoll.getSmoothedTransform(RagdollPart.LEFT_LEG);
-        RagdollTransform rleg = ragdoll.getSmoothedTransform(RagdollPart.RIGHT_LEG);
+        RagdollTransform head  = ragdoll.getSmoothedTransform(RagdollPart.HEAD);
+        RagdollTransform larm  = ragdoll.getSmoothedTransform(RagdollPart.LEFT_ARM);
+        RagdollTransform rarm  = ragdoll.getSmoothedTransform(RagdollPart.RIGHT_ARM);
+        RagdollTransform lleg  = ragdoll.getSmoothedTransform(RagdollPart.LEFT_LEG);
+        RagdollTransform rleg  = ragdoll.getSmoothedTransform(RagdollPart.RIGHT_LEG);
 
         if (torso == null) return;
 
@@ -591,29 +588,26 @@ public class ClientRagdollRenderer {
                     renderHumanoidMob(poseStack, vc, light, torso, head, larm, rarm, lleg, rleg, drownedModel);
                     break;
                 default:
-                    // Piglins (regular, brute, zombified) render through PiglinModel so the
-                    // ear/nose/tusk cubes are present. Everything else humanoid-default
-                    // uses the standard model.
                     HumanoidModel<?> humanoidModel = ragdoll.getMobType().contains("piglin")
                             ? piglinModel : standardHumanoidModel;
                     renderHumanoidMob(poseStack, vc, light, torso, head, larm, rarm, lleg, rleg, humanoidModel);
                     break;
             }
 
-            // Extra overlay layers (drowned outer, stray clothes, charged-creeper swirl,
-            // pig saddle, sheep wool, …). Resolved as data via the OverlayRegistry —
-            // adding a new layer is one entry in overlaysFor.
             for (MobOverlay overlay : overlaysFor(ragdoll)) {
                 renderOverlay(overlay, poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg);
             }
 
-            // Mob armor — humanoid mobs only, skip beyond 24 blocks
-            if (isHumanoidType(modelType) && distSq <= 576.0) {
-                renderMobVanillaArmor(ragdoll, poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg);
+            if (isHumanoidType(modelType)) {
+                double armorDistSq = RagdollifiedConfig.getArmorRenderDistanceSq();
+                double geckoDistSq = RagdollifiedConfig.getGeckoLibArmorRenderDistanceSq();
 
-                // GeckoLib armor within 16 blocks
-                if (distSq <= 256.0) {
-                    renderMobGeckoLibArmor(ragdoll, poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg);
+                if (distSq <= armorDistSq) {
+                    renderMobVanillaArmor(ragdoll, poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg);
+
+                    if (distSq <= geckoDistSq) {
+                        renderMobGeckoLibArmor(ragdoll, poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg);
+                    }
                 }
             }
         } catch (Exception e) {
