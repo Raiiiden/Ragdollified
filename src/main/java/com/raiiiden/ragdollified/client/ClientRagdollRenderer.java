@@ -314,6 +314,10 @@ public class ClientRagdollRenderer {
                     : DefaultPlayerSkin.getDefaultSkin();
         }
         PlayerModel<AbstractClientPlayer> model = isSlim ? slimModel : normalModel;
+        // May be null if the player has despawned or moved out of render distance.
+        // Vanilla armor is cached on the ragdoll so it renders regardless.
+        // GeckoLib armor falls back to its internal proxy ArmorStand when null,
+        // same as the mob path — so armor stays visible at any distance.
         AbstractClientPlayer playerEntity = findPlayerEntity(uuid);
 
         RagdollTransform torso = ragdoll.getSmoothedTransform(RagdollPart.TORSO);
@@ -345,7 +349,9 @@ public class ClientRagdollRenderer {
             if (distSq <= armorDistSq) {
                 renderPlayerVanillaArmor(ragdoll, poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg, isSlim);
 
-                if (distSq <= geckoDistSq && playerEntity != null) {
+                if (distSq <= geckoDistSq) {
+                    // Pass playerEntity which may be null — GeckoLibArmorHelper uses its
+                    // internal proxy ArmorStand as fallback, identical to the mob armor path.
                     renderPlayerGeckoLibArmor(ragdoll, poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg, isSlim, playerEntity);
                 }
             }
@@ -405,18 +411,18 @@ public class ClientRagdollRenderer {
     }
 
     private static void renderPlayerGeckoLibArmor(ClientRagdoll ragdoll, PoseStack poseStack, MultiBufferSource buffer,
-                                                   int light, RagdollTransform torso, RagdollTransform head,
-                                                   RagdollTransform larm, RagdollTransform rarm,
-                                                   RagdollTransform lleg, RagdollTransform rleg, boolean isSlim,
-                                                   AbstractClientPlayer playerEntity) {
-        // playerEntity is resolved once in renderPlayerRagdoll and passed in; the caller
-        // already null-checked, so no second lookup required.
+                                                  int light, RagdollTransform torso, RagdollTransform head,
+                                                  RagdollTransform larm, RagdollTransform rarm,
+                                                  RagdollTransform lleg, RagdollTransform rleg, boolean isSlim,
+                                                  AbstractClientPlayer playerEntity) {
+        // playerEntity may be null if the player has despawned — GeckoLibArmorHelper
+        // falls back to its internal proxy ArmorStand in that case, same as mobs.
         HumanoidModel<AbstractClientPlayer> baseModel = isSlim ? slimArmorInner : normalArmorInner;
 
-        renderGeckoLibSlot(ragdoll.getHelmet(), EquipmentSlot.HEAD, poseStack, buffer, light, baseModel, torso, head, larm, rarm, lleg, rleg, playerEntity);
+        renderGeckoLibSlot(ragdoll.getHelmet(),     EquipmentSlot.HEAD,  poseStack, buffer, light, baseModel, torso, head, larm, rarm, lleg, rleg, playerEntity);
         renderGeckoLibSlot(ragdoll.getChestplate(), EquipmentSlot.CHEST, poseStack, buffer, light, baseModel, torso, head, larm, rarm, lleg, rleg, playerEntity);
-        renderGeckoLibSlot(ragdoll.getLeggings(), EquipmentSlot.LEGS, poseStack, buffer, light, baseModel, torso, head, larm, rarm, lleg, rleg, playerEntity);
-        renderGeckoLibSlot(ragdoll.getBoots(), EquipmentSlot.FEET, poseStack, buffer, light, baseModel, torso, head, larm, rarm, lleg, rleg, playerEntity);
+        renderGeckoLibSlot(ragdoll.getLeggings(),   EquipmentSlot.LEGS,  poseStack, buffer, light, baseModel, torso, head, larm, rarm, lleg, rleg, playerEntity);
+        renderGeckoLibSlot(ragdoll.getBoots(),      EquipmentSlot.FEET,  poseStack, buffer, light, baseModel, torso, head, larm, rarm, lleg, rleg, playerEntity);
     }
 
     private static AbstractClientPlayer findPlayerEntity(UUID uuid) {
