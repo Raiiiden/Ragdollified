@@ -347,7 +347,7 @@ public class ClientRagdollRenderer {
             double geckoDistSq = RagdollifiedConfig.getGeckoLibArmorRenderDistanceSq();
 
             if (distSq <= armorDistSq) {
-                renderPlayerVanillaArmor(ragdoll, poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg, isSlim);
+                renderPlayerVanillaArmor(ragdoll, poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg, isSlim, playerEntity);
 
                 if (distSq <= geckoDistSq) {
                     // Pass playerEntity which may be null — GeckoLibArmorHelper uses its
@@ -365,14 +365,15 @@ public class ClientRagdollRenderer {
     private static void renderPlayerVanillaArmor(ClientRagdoll ragdoll, PoseStack poseStack, MultiBufferSource buffer,
                                                   int light, RagdollTransform torso, RagdollTransform head,
                                                   RagdollTransform larm, RagdollTransform rarm,
-                                                  RagdollTransform lleg, RagdollTransform rleg, boolean isSlim) {
+                                                  RagdollTransform lleg, RagdollTransform rleg, boolean isSlim,
+                                                  net.minecraft.world.entity.LivingEntity entity) {
         HumanoidModel<AbstractClientPlayer> innerModel = isSlim ? slimArmorInner : normalArmorInner;
         HumanoidModel<AbstractClientPlayer> outerModel = isSlim ? slimArmorOuter : normalArmorOuter;
 
-        renderVanillaArmorSlot(ragdoll.getHelmet(), EquipmentSlot.HEAD, poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg, innerModel, outerModel);
-        renderVanillaArmorSlot(ragdoll.getChestplate(), EquipmentSlot.CHEST, poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg, innerModel, outerModel);
-        renderVanillaArmorSlot(ragdoll.getLeggings(), EquipmentSlot.LEGS, poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg, innerModel, outerModel);
-        renderVanillaArmorSlot(ragdoll.getBoots(), EquipmentSlot.FEET, poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg, innerModel, outerModel);
+        renderVanillaArmorSlot(ragdoll.getHelmet(), EquipmentSlot.HEAD, poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg, innerModel, outerModel, entity);
+        renderVanillaArmorSlot(ragdoll.getChestplate(), EquipmentSlot.CHEST, poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg, innerModel, outerModel, entity);
+        renderVanillaArmorSlot(ragdoll.getLeggings(), EquipmentSlot.LEGS, poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg, innerModel, outerModel, entity);
+        renderVanillaArmorSlot(ragdoll.getBoots(), EquipmentSlot.FEET, poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg, innerModel, outerModel, entity);
     }
 
     private static void renderVanillaArmorSlot(ItemStack stack, EquipmentSlot slot, PoseStack poseStack,
@@ -380,34 +381,99 @@ public class ClientRagdollRenderer {
                                                 RagdollTransform torso, RagdollTransform head,
                                                 RagdollTransform larm, RagdollTransform rarm,
                                                 RagdollTransform lleg, RagdollTransform rleg,
-                                                HumanoidModel<?> innerModel, HumanoidModel<?> outerModel) {
+                                                HumanoidModel<?> innerModel, HumanoidModel<?> outerModel,
+                                                net.minecraft.world.entity.LivingEntity entity) {
         if (stack.isEmpty()) return;
         Item item = stack.getItem();
         if (GeckoLibArmorHelper.isGeckoLibArmor(item)) return; // handled separately
         if (!(item instanceof ArmorItem armorItem)) return;
 
-        ResourceLocation armorTexture = getArmorTexture(armorItem, slot);
-        VertexConsumer vc = buffer.getBuffer(RenderType.armorCutoutNoCull(armorTexture));
+        // Mirror vanilla HumanoidArmorLayer: legs use the inner (less-inflated) model so
+        // leggings sit under the chestplate; everything else uses the outer model.
+        HumanoidModel<?> base = (slot == EquipmentSlot.LEGS) ? innerModel : outerModel;
+        // Resolve the actual model to render. Modded (non-GeckoLib) armor ships textures
+        // UV-mapped for its own custom armor model, exposed via the Forge
+        // IClientItemExtensions.getHumanoidArmorModel hook. Rendering its texture on the
+        // vanilla model is what made modded armor map to the wrong faces — so we ask the
+        // item for its model here, exactly like vanilla's HumanoidArmorLayer does.
+        HumanoidModel<?> model = resolveArmorModel(stack, slot, entity, base);
 
+        // Leather (and any DyeableLeatherItem) renders in two passes, like vanilla:
+        // a base layer tinted by the dye color, then an untinted overlay (straps/buckles).
+        // Skipping the dye tint is what made undyed leather render as flat grey — i.e.
+        // look like iron/chainmail. Non-dyeable armor uses a single untinted pass.
+        boolean dyeable = item instanceof net.minecraft.world.item.DyeableLeatherItem;
+        float r = 1f, g = 1f, b = 1f;
+        if (dyeable) {
+            int color = ((net.minecraft.world.item.DyeableLeatherItem) item).getColor(stack);
+            r = (color >> 16 & 255) / 255f;
+            g = (color >> 8 & 255) / 255f;
+            b = (color & 255) / 255f;
+        }
+
+        ResourceLocation baseTex = getArmorTexture(armorItem, slot, stack, entity, null);
+        renderArmorSlotParts(model, baseTex, slot, poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg, r, g, b);
+
+        if (dyeable) {
+            ResourceLocation overlayTex = getArmorTexture(armorItem, slot, stack, entity, "overlay");
+            renderArmorSlotParts(model, overlayTex, slot, poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg, 1f, 1f, 1f);
+        }
+    }
+
+    /** Render the body parts relevant to one armor slot from {@code model}, tinted (r,g,b). */
+    private static void renderArmorSlotParts(HumanoidModel<?> model, ResourceLocation texture, EquipmentSlot slot,
+                                             PoseStack poseStack, MultiBufferSource buffer, int light,
+                                             RagdollTransform torso, RagdollTransform head,
+                                             RagdollTransform larm, RagdollTransform rarm,
+                                             RagdollTransform lleg, RagdollTransform rleg,
+                                             float r, float g, float b) {
+        VertexConsumer vc = buffer.getBuffer(RenderType.armorCutoutNoCull(texture));
         switch (slot) {
             case HEAD:
-                renderHumanoidPartPhysics(poseStack, vc, outerModel.head, head, torso, light, RagdollPart.HEAD);
+                renderHumanoidPartPhysicsTinted(poseStack, vc, model.head, head, torso, light, RagdollPart.HEAD, r, g, b, 1f);
                 break;
             case CHEST:
-                renderHumanoidPartPhysics(poseStack, vc, innerModel.body, torso, torso, light, RagdollPart.TORSO);
-                renderHumanoidPartPhysics(poseStack, vc, innerModel.leftArm, larm, torso, light, RagdollPart.LEFT_ARM);
-                renderHumanoidPartPhysics(poseStack, vc, innerModel.rightArm, rarm, torso, light, RagdollPart.RIGHT_ARM);
+                renderHumanoidPartPhysicsTinted(poseStack, vc, model.body, torso, torso, light, RagdollPart.TORSO, r, g, b, 1f);
+                renderHumanoidPartPhysicsTinted(poseStack, vc, model.leftArm, larm, torso, light, RagdollPart.LEFT_ARM, r, g, b, 1f);
+                renderHumanoidPartPhysicsTinted(poseStack, vc, model.rightArm, rarm, torso, light, RagdollPart.RIGHT_ARM, r, g, b, 1f);
                 break;
             case LEGS:
-                renderHumanoidPartPhysics(poseStack, vc, innerModel.body, torso, torso, light, RagdollPart.TORSO);
-                renderHumanoidPartPhysics(poseStack, vc, innerModel.leftLeg, lleg, torso, light, RagdollPart.LEFT_LEG);
-                renderHumanoidPartPhysics(poseStack, vc, innerModel.rightLeg, rleg, torso, light, RagdollPart.RIGHT_LEG);
+                renderHumanoidPartPhysicsTinted(poseStack, vc, model.body, torso, torso, light, RagdollPart.TORSO, r, g, b, 1f);
+                renderHumanoidPartPhysicsTinted(poseStack, vc, model.leftLeg, lleg, torso, light, RagdollPart.LEFT_LEG, r, g, b, 1f);
+                renderHumanoidPartPhysicsTinted(poseStack, vc, model.rightLeg, rleg, torso, light, RagdollPart.RIGHT_LEG, r, g, b, 1f);
                 break;
             case FEET:
-                renderHumanoidPartPhysics(poseStack, vc, outerModel.leftLeg, lleg, torso, light, RagdollPart.LEFT_LEG);
-                renderHumanoidPartPhysics(poseStack, vc, outerModel.rightLeg, rleg, torso, light, RagdollPart.RIGHT_LEG);
+                renderHumanoidPartPhysicsTinted(poseStack, vc, model.leftLeg, lleg, torso, light, RagdollPart.LEFT_LEG, r, g, b, 1f);
+                renderHumanoidPartPhysicsTinted(poseStack, vc, model.rightLeg, rleg, torso, light, RagdollPart.RIGHT_LEG, r, g, b, 1f);
                 break;
         }
+    }
+
+    /**
+     * Ask the armor item for the model it wants rendered (Forge
+     * {@link net.minecraftforge.client.extensions.common.IClientItemExtensions#getHumanoidArmorModel}).
+     * Returns {@code base} unchanged for vanilla armor; modded armor with a custom model
+     * returns its own, so its texture UVs line up. Falls back to {@code base} on any error.
+     */
+    private static HumanoidModel<?> resolveArmorModel(ItemStack stack, EquipmentSlot slot,
+                                                      net.minecraft.world.entity.LivingEntity entity,
+                                                      HumanoidModel<?> base) {
+        try {
+            // Most mods key off a non-null LivingEntity; reuse GeckoLib's proxy ArmorStand
+            // when we don't have the real one (despawned player / mob path).
+            net.minecraft.world.entity.LivingEntity e = entity != null ? entity : GeckoLibArmorHelper.getProxyEntity();
+            HumanoidModel<?> custom = net.minecraftforge.client.extensions.common.IClientItemExtensions.of(stack)
+                    .getHumanoidArmorModel(e, stack, slot, base);
+            if (custom != null && custom != base) {
+                // We drive part pose/visibility ourselves, so make sure the custom model's
+                // parts are all visible before we pick the ones this slot needs.
+                setAllPartsVisible(custom);
+                return custom;
+            }
+        } catch (Exception ex) {
+            Ragdollified.LOGGER.debug("Custom armor model lookup failed, using vanilla model: {}", ex.getMessage());
+        }
+        return base;
     }
 
     private static void renderPlayerGeckoLibArmor(ClientRagdoll ragdoll, PoseStack poseStack, MultiBufferSource buffer,
@@ -776,10 +842,11 @@ public class ClientRagdollRenderer {
                                                int light, RagdollTransform torso, RagdollTransform head,
                                                RagdollTransform larm, RagdollTransform rarm,
                                                RagdollTransform lleg, RagdollTransform rleg) {
-        renderVanillaArmorSlot(ragdoll.getHelmet(), EquipmentSlot.HEAD, poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg, mobArmorInner, mobArmorOuter);
-        renderVanillaArmorSlot(ragdoll.getChestplate(), EquipmentSlot.CHEST, poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg, mobArmorInner, mobArmorOuter);
-        renderVanillaArmorSlot(ragdoll.getLeggings(), EquipmentSlot.LEGS, poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg, mobArmorInner, mobArmorOuter);
-        renderVanillaArmorSlot(ragdoll.getBoots(), EquipmentSlot.FEET, poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg, mobArmorInner, mobArmorOuter);
+        // No real entity for mobs here; resolveArmorModel falls back to the proxy ArmorStand.
+        renderVanillaArmorSlot(ragdoll.getHelmet(), EquipmentSlot.HEAD, poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg, mobArmorInner, mobArmorOuter, null);
+        renderVanillaArmorSlot(ragdoll.getChestplate(), EquipmentSlot.CHEST, poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg, mobArmorInner, mobArmorOuter, null);
+        renderVanillaArmorSlot(ragdoll.getLeggings(), EquipmentSlot.LEGS, poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg, mobArmorInner, mobArmorOuter, null);
+        renderVanillaArmorSlot(ragdoll.getBoots(), EquipmentSlot.FEET, poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg, mobArmorInner, mobArmorOuter, null);
     }
 
     private static void renderMobGeckoLibArmor(ClientRagdoll ragdoll, PoseStack poseStack, MultiBufferSource buffer,
@@ -1022,9 +1089,16 @@ public class ClientRagdollRenderer {
         return new ResourceLocation("minecraft", "textures/entity/zombie/zombie.png");
     }
 
-    private static ResourceLocation getArmorTexture(ArmorItem item, EquipmentSlot slot) {
+    /**
+     * Resolve the armor texture for a slot, optionally for a specific layer {@code type}
+     * ("overlay" for the dyeable leather overlay pass, null for the base layer). Honors the
+     * Forge per-item override (so modded armor with a custom texture path works), then falls
+     * back to the vanilla {@code textures/models/armor/<material>_layer_<n>[_<type>].png}.
+     */
+    private static ResourceLocation getArmorTexture(ArmorItem item, EquipmentSlot slot, ItemStack stack,
+                                                    net.minecraft.world.entity.Entity entity, String type) {
         try {
-            String texturePath = item.getArmorTexture(new ItemStack(item), null, slot, null);
+            String texturePath = item.getArmorTexture(stack, entity, slot, type);
             if (texturePath != null && !texturePath.isEmpty()) {
                 try { return new ResourceLocation(texturePath); } catch (Exception ignored) {}
             }
@@ -1042,7 +1116,8 @@ public class ClientRagdollRenderer {
                 default -> materialName;
             };
             String layer = (slot == EquipmentSlot.LEGS) ? "layer_2" : "layer_1";
-            return new ResourceLocation("minecraft", "textures/models/armor/" + materialName + "_" + layer + ".png");
+            String suffix = (type == null || type.isEmpty()) ? "" : "_" + type;
+            return new ResourceLocation("minecraft", "textures/models/armor/" + materialName + "_" + layer + suffix + ".png");
         } catch (Exception e) {
             return new ResourceLocation("minecraft", "textures/models/armor/leather_layer_1.png");
         }
