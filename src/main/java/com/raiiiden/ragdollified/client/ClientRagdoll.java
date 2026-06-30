@@ -665,18 +665,18 @@ public class ClientRagdoll {
 
     public void tick(Vec3 cameraPos) {
         if (destroyed) return;
-        ticksExisted++;
-
-        if (ticksExisted >= lifetime) {
-            destroy();
-            return;
-        }
 
         long t = System.nanoTime();
         updateCachedTransforms();
         PHASE_STATS.updateCachedTransformsNanos += System.nanoTime() - t;
 
         if (settled) {
+            // Settled bodies keep aging toward despawn even while the player is away.
+            ticksExisted++;
+            if (ticksExisted >= lifetime) {
+                destroy();
+                return;
+            }
             // Periodic support check — ragdolls don't always get a NeighborNotifyEvent
             // when their support block is broken (especially for server-initiated
             // changes that don't fire client-side events). Every 10 ticks (0.5s),
@@ -693,6 +693,11 @@ public class ClientRagdoll {
 
         double physicsDistance = RagdollifiedConfig.PHYSICS_DISTANCE.get();
         if (distSq > physicsDistance * physicsDistance) {
+            // Too far to simulate: pause the ragdoll. Crucially we do NOT advance ticksExisted
+            // here, so a distance-frozen body is suspended rather than aging — it resumes exactly
+            // where it left off when the player returns, and (for player corpses) the settle
+            // report waits for the real resting place instead of giving up mid-fall at the death
+            // position.
             if (!bodiesFrozen) {
                 freezeBodies();
                 PHASE_STATS.distanceFrozenThisTick++;
@@ -701,6 +706,13 @@ public class ClientRagdoll {
         } else if (bodiesFrozen) {
             unfreezeBodies();
             PHASE_STATS.unfrozenThisTick++;
+        }
+
+        // Actively simulating now — advance the lifetime clock (skipped while paused above).
+        ticksExisted++;
+        if (ticksExisted >= lifetime) {
+            destroy();
+            return;
         }
 
         // Mirrors MobRagdollPhysics.update() order exactly:
@@ -1700,6 +1712,12 @@ public class ClientRagdoll {
     public ClientLevel getLevel() { return level; }
     public ResourceLocation getCachedPlayerSkin() { return cachedPlayerSkin; }
     public boolean isCachedSlim() { return cachedIsSlim; }
+
+    // Corpse feature — one-shot guard so the local player's client reports its settle
+    // to the server exactly once. Read/set on the physics thread from ClientRagdollManager.
+    private boolean corpseSettleReported = false;
+    public boolean isCorpseSettleReported() { return corpseSettleReported; }
+    public void markCorpseSettleReported() { corpseSettleReported = true; }
 
     // ============================
     // Math helpers (kept locally for interpolation — body/joint creation delegated to RagdollBodyFactory)

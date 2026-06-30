@@ -31,5 +31,10 @@ public class ModNetwork {
                 RagdollImpulsePacket::encode,
                 RagdollImpulsePacket::decode,
                 RagdollImpulsePacket::handle);
+
+        CHANNEL.registerMessage(nextId(), CorpseSettlePacket.class,
+                CorpseSettlePacket::encode,
+                CorpseSettlePacket::decode,
+                CorpseSettlePacket::handle);
     }
 }

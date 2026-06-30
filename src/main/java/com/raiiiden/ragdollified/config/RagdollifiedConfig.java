@@ -25,6 +25,7 @@ public class RagdollifiedConfig {
     public static final ForgeConfigSpec.DoubleValue HIT_IMPULSE_BODY;
     public static final ForgeConfigSpec.DoubleValue HIT_IMPULSE_MELEE;
     public static final ForgeConfigSpec.DoubleValue HIT_IMPULSE_VANILLA_PROJECTILE;
+    public static final ForgeConfigSpec.DoubleValue HIT_IMPULSE_EXPLOSION;
     public static final ForgeConfigSpec.DoubleValue HIT_IMPULSE_VERTICAL_BIAS;
     public static final ForgeConfigSpec.BooleanValue HIT_IMPULSE_DAMAGE_SCALING;
     public static final ForgeConfigSpec.DoubleValue HIT_IMPULSE_DAMAGE_REFERENCE;
@@ -59,6 +60,12 @@ public class RagdollifiedConfig {
     public static final ForgeConfigSpec.DoubleValue PHYSICS_DISTANCE;
     public static final ForgeConfigSpec.DoubleValue PLAYER_COLLISION_DISTANCE;
 
+    // Corpse feature — requires the mod on both server and client (or singleplayer).
+    public static final ForgeConfigSpec.BooleanValue ENABLE_CORPSES;
+    public static final ForgeConfigSpec.IntValue CORPSE_EXPIRY_TICKS;
+    public static final ForgeConfigSpec.IntValue CORPSE_SETTLE_TIMEOUT_TICKS;
+    public static final ForgeConfigSpec.BooleanValue CORPSE_STORE_XP;
+
     // ============================
     // CLIENT config (local only, never synced)
     // ============================
@@ -70,6 +77,7 @@ public class RagdollifiedConfig {
     public static final ForgeConfigSpec.DoubleValue GECKOLIB_ARMOR_RENDER_DISTANCE;
     public static final ForgeConfigSpec.DoubleValue ARMOR_RENDER_DISTANCE;
     private static ForgeConfigSpec.BooleanValue debugRenderPhysics;
+    private static ForgeConfigSpec.BooleanValue logPhysicsPerf;
 
     public static double getArmorRenderDistanceSq() {
         double d = ARMOR_RENDER_DISTANCE.get();
@@ -126,6 +134,12 @@ public class RagdollifiedConfig {
                 .comment("Base impulse magnitude for vanilla projectiles.")
                 .defineInRange("vanillaProjectile", 8.0, 0.0, 200.0);
 
+        HIT_IMPULSE_EXPLOSION = SERVER_BUILDER
+                .comment("Base impulse magnitude for explosion kills (TNT, creepers, TACZ explosives, etc.).",
+                        "The applied force still scales with the victim's max health and distance from the blast;",
+                        "this is the overall multiplier. Higher = bodies are thrown further.")
+                .defineInRange("explosion", 60.0, 0.0, 200.0);
+
         HIT_IMPULSE_VERTICAL_BIAS = SERVER_BUILDER
                 .comment("Constant upward kick added to every hit.")
                 .defineInRange("verticalBias", 0.3, 0.0, 5.0);
@@ -181,20 +195,65 @@ public class RagdollifiedConfig {
                 .defineInRange("massScale", 1.0, 0.05, 20.0);
         INITIAL_VELOCITY_SCALE = SERVER_BUILDER.comment("Scale applied to inherited entity velocity.")
                 .defineInRange("initialVelocityScale", 0.35, 0.0, 5.0);
-        LINEAR_DAMPING = SERVER_BUILDER.defineInRange("linearDamping", 0.10, 0.0, 1.0);
-        ANGULAR_DAMPING = SERVER_BUILDER.defineInRange("angularDamping", 0.90, 0.0, 1.0);
-        FRICTION = SERVER_BUILDER.defineInRange("friction", 0.90, 0.0, 5.0);
-        RESTITUTION = SERVER_BUILDER.defineInRange("restitution", 0.0, 0.0, 2.0);
-        MAX_LINEAR_SPEED = SERVER_BUILDER.defineInRange("maxLinearSpeed", 90.0, 1.0, 500.0);
-        MAX_FALL_SPEED = SERVER_BUILDER.defineInRange("maxFallSpeed", 80.0, 1.0, 500.0);
-        MAX_ANGULAR_SPEED = SERVER_BUILDER.defineInRange("maxAngularSpeed", 8.0, 0.1, 100.0);
-        MAX_ACTIVE_RAGDOLLS = SERVER_BUILDER.defineInRange("maxActiveRagdolls", 25, 1, 100);
-        MAX_SPAWNS_PER_TICK = SERVER_BUILDER.defineInRange("maxSpawnsPerTick", 3, 1, 20);
-        MAX_SPAWN_QUEUE_SIZE = SERVER_BUILDER.defineInRange("maxSpawnQueueSize", 60, 1, 300);
+        LINEAR_DAMPING = SERVER_BUILDER
+                .comment("Per-tick linear (movement) velocity damping. 0 = none, 1 = bodies stop almost instantly.",
+                        "Higher makes ragdolls bleed off momentum faster so they don't slide as far.")
+                .defineInRange("linearDamping", 0.10, 0.0, 1.0);
+        ANGULAR_DAMPING = SERVER_BUILDER
+                .comment("Per-tick angular (spin) velocity damping. 0 = none, 1 = spin stops almost instantly.",
+                        "Higher makes ragdolls stop tumbling/rotating faster.")
+                .defineInRange("angularDamping", 0.90, 0.0, 1.0);
+        FRICTION = SERVER_BUILDER
+                .comment("Surface friction between ragdoll bodies and the world. Higher = less sliding on the ground.")
+                .defineInRange("friction", 0.90, 0.0, 5.0);
+        RESTITUTION = SERVER_BUILDER
+                .comment("Bounciness on impact. 0 = no bounce, 1 = fully elastic. Keep low to avoid jittery bodies.")
+                .defineInRange("restitution", 0.0, 0.0, 2.0);
+        MAX_LINEAR_SPEED = SERVER_BUILDER
+                .comment("Hard cap on a body's overall speed in blocks/second. Limits the solver to keep it stable.")
+                .defineInRange("maxLinearSpeed", 90.0, 1.0, 500.0);
+        MAX_FALL_SPEED = SERVER_BUILDER
+                .comment("Hard cap on downward fall speed in blocks/second (terminal velocity for ragdolls).")
+                .defineInRange("maxFallSpeed", 80.0, 1.0, 500.0);
+        MAX_ANGULAR_SPEED = SERVER_BUILDER
+                .comment("Hard cap on spin rate in radians/second. Prevents bodies from spinning wildly on hard hits.")
+                .defineInRange("maxAngularSpeed", 8.0, 0.1, 100.0);
+        MAX_ACTIVE_RAGDOLLS = SERVER_BUILDER
+                .comment("Max ragdolls actively simulated at once. Past this the oldest active bodies are force-settled",
+                        "(they keep rendering and can be woken again) to protect tick time during pile-ups.")
+                .defineInRange("maxActiveRagdolls", 25, 1, 100);
+        MAX_SPAWNS_PER_TICK = SERVER_BUILDER
+                .comment("Max ragdoll bodies constructed per tick, so a mass kill (e.g. an explosion) doesn't spike one frame.")
+                .defineInRange("maxSpawnsPerTick", 3, 1, 20);
+        MAX_SPAWN_QUEUE_SIZE = SERVER_BUILDER
+                .comment("Max ragdoll spawns waiting to be constructed. Deaths beyond this while the queue is full are skipped.")
+                .defineInRange("maxSpawnQueueSize", 60, 1, 300);
         PHYSICS_DISTANCE = SERVER_BUILDER.comment("Distance in blocks beyond which ragdoll physics freezes.")
-                .defineInRange("physicsDistance", 64.0, 4.0, 512.0);
+                .defineInRange("physicsDistance", 128.0, 4.0, 512.0);
         PLAYER_COLLISION_DISTANCE = SERVER_BUILDER.comment("Distance in blocks within which player movement pushes ragdolls.")
                 .defineInRange("playerCollisionDistance", 12.0, 0.0, 128.0);
+
+        SERVER_BUILDER.pop();
+        SERVER_BUILDER.comment("Corpse Settings").push("corpse");
+
+        ENABLE_CORPSES = SERVER_BUILDER
+                .comment("When a player dies, freeze their ragdoll into a lootable corpse holding their inventory.",
+                        "Requires the mod on both the server and client (or singleplayer). Ignored on vanilla servers.")
+                .define("enableCorpses", false);
+
+        CORPSE_EXPIRY_TICKS = SERVER_BUILDER
+                .comment("How long a corpse lasts before expiring, in ticks. On expiry it drops its remaining items.",
+                        "Default 24000 = 1 Minecraft day.")
+                .defineInRange("corpseExpiryTicks", 24000, 1200, 2_400_000);
+
+        CORPSE_SETTLE_TIMEOUT_TICKS = SERVER_BUILDER
+                .comment("Max ticks to wait for the client to report its ragdoll settling before the corpse is",
+                        "frozen flat at the death position anyway. Safety net so inventory is never stuck. Default 600 = 30s.")
+                .defineInRange("corpseSettleTimeoutTicks", 600, 20, 6000);
+
+        CORPSE_STORE_XP = SERVER_BUILDER
+                .comment("Store the experience that would have dropped inside the corpse and return it when looted.")
+                .define("corpseStoreXp", true);
 
         SERVER_BUILDER.pop();
         SERVER_SPEC = SERVER_BUILDER.build();
@@ -205,7 +264,7 @@ public class RagdollifiedConfig {
         CLIENT_BUILDER.comment("Render Settings").push("render");
 
         RENDER_DISTANCE = CLIENT_BUILDER.comment("Distance in blocks beyond which ragdolls do not render.")
-                .defineInRange("renderDistance", 64.0, 4.0, 512.0);
+                .defineInRange("renderDistance", 128.0, 4.0, 512.0);
 
         ENABLE_DEATH_CAMERA = CLIENT_BUILDER
                 .comment("Switch for death camera.")
@@ -214,10 +273,10 @@ public class RagdollifiedConfig {
         GECKOLIB_ARMOR_RENDER_DISTANCE = CLIENT_BUILDER
                 .comment("Distance in blocks within which GeckoLib animated armor renders on ragdolls. " +
                         "Lower values improve performance. Must be less than or equal to renderDistance.")
-                .defineInRange("geckolibArmorRenderDistance", 40.0, 4.0, 128.0);
+                .defineInRange("geckolibArmorRenderDistance", 80.0, 4.0, 128.0);
         ARMOR_RENDER_DISTANCE = CLIENT_BUILDER
                 .comment("Distance in blocks within which vanilla armor renders on ragdolls.")
-                .defineInRange("armorRenderDistance", 50.0, 4.0, 512.0);
+                .defineInRange("armorRenderDistance", 100.0, 4.0, 512.0);
 
         CLIENT_BUILDER.pop();
         CLIENT_BUILDER.comment("Debug Options").push("debug");
@@ -225,6 +284,11 @@ public class RagdollifiedConfig {
         debugRenderPhysics = CLIENT_BUILDER
                 .comment("Render debug boxes around ragdoll physics bodies.")
                 .define("debugRenderPhysics", true);
+
+        logPhysicsPerf = CLIENT_BUILDER
+                .comment("Periodically log ragdoll physics performance stats ([Ragdoll Perf]) to the client log.",
+                        "Useful for profiling tick cost; leave off for normal play to keep the log clean.")
+                .define("logPhysicsPerf", false);
 
         CLIENT_BUILDER.pop();
         CLIENT_SPEC = CLIENT_BUILDER.build();
@@ -271,4 +335,13 @@ public class RagdollifiedConfig {
     }
 
     public static boolean shouldDebugRenderPhysics() { return debugRenderPhysics.get(); }
+    public static boolean shouldLogPhysicsPerf() { return logPhysicsPerf.get(); }
+
+    // Read defensively: this SERVER value is queried from the client tick loop, which also
+    // runs at the main menu (no config loaded) and on vanilla servers (config never synced).
+    // ForgeConfigSpec#get() throws if the data isn't loaded yet, so gate on isLoaded().
+    public static boolean isCorpseEnabled() { return SERVER_SPEC.isLoaded() && ENABLE_CORPSES.get(); }
+    public static int getCorpseExpiryTicks() { return CORPSE_EXPIRY_TICKS.get(); }
+    public static int getCorpseSettleTimeoutTicks() { return CORPSE_SETTLE_TIMEOUT_TICKS.get(); }
+    public static boolean shouldStoreCorpseXp() { return CORPSE_STORE_XP.get(); }
 }

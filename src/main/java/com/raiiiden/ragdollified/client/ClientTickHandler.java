@@ -25,6 +25,10 @@ public class ClientTickHandler {
             // skip a tick than backlog and double up later).
             ClientRagdollManager.submitTick();
 
+            // Corpse bridge — report the local player's ragdoll settle to the server and
+            // hand off rendering from the physics ragdoll to the posed corpse entity.
+            ClientRagdollManager.tickCorpseClient();
+
             // Cleanup every 5 seconds (still on render thread — cheap)
             if (tickCounter >= 100) {
                 ClientMobTextureCache.cleanup();

@@ -1,0 +1,335 @@
+package com.raiiiden.ragdollified.entity;
+
+import com.raiiiden.ragdollified.RagdollPart;
+import com.raiiiden.ragdollified.RagdollTransform;
+import com.raiiiden.ragdollified.config.RagdollifiedConfig;
+import com.raiiiden.ragdollified.menu.CorpseMenu;
+import net.minecraft.nbt.CompoundTag;
+import net.minecraft.nbt.ListTag;
+import net.minecraft.network.chat.Component;
+import net.minecraft.network.syncher.EntityDataAccessor;
+import net.minecraft.network.syncher.EntityDataSerializers;
+import net.minecraft.network.syncher.SynchedEntityData;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.Containers;
+import net.minecraft.world.SimpleContainer;
+import net.minecraft.world.SimpleMenuProvider;
+import net.minecraft.world.InteractionHand;
+import net.minecraft.world.InteractionResult;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.EntityType;
+import net.minecraft.world.entity.ExperienceOrb;
+import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.level.Level;
+import net.minecraftforge.network.NetworkHooks;
+
+import javax.annotation.Nullable;
+import javax.vecmath.Quat4f;
+import javax.vecmath.Vector3f;
+import java.util.UUID;
+
+/**
+ * Server-authoritative lootable corpse. Spawned when a player dies (if corpses are
+ * enabled). Holds the dead player's inventory in {@link #inventory} (server-side only),
+ * and a cosmetic render snapshot (owner skin identity, worn armor, frozen ragdoll pose)
+ * synced to all clients via {@link #RENDER_DATA} so every client — including late
+ * joiners — draws the same frozen body.
+ */
+public class CorpseEntity extends Entity {
+
+    /** Vanilla portion: 36 main/hotbar + 4 armor + 1 offhand. Curio slots (if any) follow. */
+    public static final int VANILLA_SLOTS = 41;
+
+    // Cosmetic render state, synced to clients. Items themselves are NOT synced.
+    private static final EntityDataAccessor<CompoundTag> RENDER_DATA =
+            SynchedEntityData.defineId(CorpseEntity.class, EntityDataSerializers.COMPOUND_TAG);
+
+    // Container is VANILLA_SLOTS + curioSlotIds.size(); reassigned in initCorpse / on load.
+    private SimpleContainer inventory = new SimpleContainer(VANILLA_SLOTS);
+    private final java.util.List<String> curioSlotIds = new java.util.ArrayList<>();
+    private int storedXp = 0;
+    private UUID ownerUUID;
+    private String ownerName = "";
+
+    // Cached, parsed pose for the renderer (client). Rebuilt lazily when RENDER_DATA changes.
+    private RagdollTransform[] cachedPose = null;
+    private CompoundTag cachedPoseSource = null;
+
+    public CorpseEntity(EntityType<? extends CorpseEntity> type, Level level) {
+        super(type, level);
+        this.noPhysics = false;
+        this.setNoGravity(true);
+    }
+
+    // ============================
+    // Server-side construction
+    // ============================
+
+    /**
+     * Populate the corpse's loot + identity at death time (server). {@code vanillaItems} are
+     * the 41 player slots (index-aligned); {@code curioStacks}/{@code curioIds} are the
+     * captured curios (parallel lists, may be empty when Curios isn't installed).
+     */
+    public void initCorpse(UUID owner, String name,
+                           java.util.List<ItemStack> vanillaItems,
+                           java.util.List<ItemStack> curioStacks, java.util.List<String> curioIds,
+                           int xp, ItemStack helmet, ItemStack chest, ItemStack legs, ItemStack boots) {
+        this.ownerUUID = owner;
+        this.ownerName = name != null ? name : "";
+        this.storedXp = xp;
+        this.curioSlotIds.clear();
+        this.curioSlotIds.addAll(curioIds);
+
+        this.inventory = new SimpleContainer(VANILLA_SLOTS + curioStacks.size());
+        for (int i = 0; i < VANILLA_SLOTS && i < vanillaItems.size(); i++) {
+            ItemStack s = vanillaItems.get(i);
+            inventory.setItem(i, s == null ? ItemStack.EMPTY : s);
+        }
+        for (int i = 0; i < curioStacks.size(); i++) {
+            ItemStack s = curioStacks.get(i);
+            inventory.setItem(VANILLA_SLOTS + i, s == null ? ItemStack.EMPTY : s);
+        }
+        rebuildRenderData(false, null, helmet, chest, legs, boots);
+    }
+
+    /**
+     * Apply the settled ragdoll pose (server). Transforms are relative to this entity's
+     * position. Marks the corpse posed so clients begin rendering the frozen body.
+     */
+    public void applyPose(RagdollTransform[] relativeTransforms) {
+        CompoundTag data = getEntityData().get(RENDER_DATA).copy();
+        ListTag pose = new ListTag();
+        for (int i = 0; i < 6; i++) {
+            RagdollTransform t = (relativeTransforms != null && i < relativeTransforms.length)
+                    ? relativeTransforms[i] : null;
+            CompoundTag c = new CompoundTag();
+            if (t != null) {
+                c.putFloat("px", t.position.x); c.putFloat("py", t.position.y); c.putFloat("pz", t.position.z);
+                c.putFloat("qx", t.rotation.x); c.putFloat("qy", t.rotation.y);
+                c.putFloat("qz", t.rotation.z); c.putFloat("qw", t.rotation.w);
+            }
+            pose.add(c);
+        }
+        data.put("Pose", pose);
+        data.putBoolean("Posed", true);
+        getEntityData().set(RENDER_DATA, data);
+    }
+
+    public void addStoredXp(int amount) {
+        if (amount > 0) this.storedXp += amount;
+    }
+
+    /** Settle-timeout fallback: mark posed with no captured pose so the renderer draws a flat body. */
+    public void markPosedFlat() {
+        CompoundTag data = getRenderData().copy();
+        data.putBoolean("Posed", true);
+        data.remove("Pose");
+        getEntityData().set(RENDER_DATA, data);
+    }
+
+    private void rebuildRenderData(boolean posed, @Nullable ListTag pose,
+                                   ItemStack helmet, ItemStack chest, ItemStack legs, ItemStack boots) {
+        CompoundTag data = new CompoundTag();
+        if (ownerUUID != null) data.putUUID("Owner", ownerUUID);
+        data.putString("Name", ownerName);
+        data.putBoolean("Posed", posed);
+        if (pose != null) data.put("Pose", pose);
+        data.put("Helmet", saveStack(helmet));
+        data.put("Chest", saveStack(chest));
+        data.put("Legs", saveStack(legs));
+        data.put("Boots", saveStack(boots));
+        getEntityData().set(RENDER_DATA, data);
+    }
+
+    private static CompoundTag saveStack(ItemStack stack) {
+        return (stack == null ? ItemStack.EMPTY : stack).save(new CompoundTag());
+    }
+
+    // ============================
+    // Client-side render accessors
+    // ============================
+
+    public CompoundTag getRenderData() { return getEntityData().get(RENDER_DATA); }
+
+    public boolean isPosed() { return getRenderData().getBoolean("Posed"); }
+
+    @Nullable
+    public UUID getOwnerUUID() {
+        CompoundTag d = getRenderData();
+        return d.hasUUID("Owner") ? d.getUUID("Owner") : null;
+    }
+
+    public ItemStack getArmor(String key) {
+        CompoundTag d = getRenderData();
+        return d.contains(key) ? ItemStack.of(d.getCompound(key)) : ItemStack.EMPTY;
+    }
+
+    /** Parsed pose transforms (entity-relative) for the renderer, or null if not posed. */
+    @Nullable
+    public RagdollTransform[] getCorpsePose() {
+        CompoundTag d = getRenderData();
+        if (!d.getBoolean("Posed") || !d.contains("Pose")) return null;
+        if (cachedPose != null && d.equals(cachedPoseSource)) return cachedPose;
+        ListTag pose = d.getList("Pose", 10); // 10 = CompoundTag
+        RagdollTransform[] out = new RagdollTransform[6];
+        for (int i = 0; i < 6 && i < pose.size(); i++) {
+            CompoundTag c = pose.getCompound(i);
+            if (c.isEmpty()) continue;
+            out[i] = new RagdollTransform(i,
+                    new Vector3f(c.getFloat("px"), c.getFloat("py"), c.getFloat("pz")),
+                    new Quat4f(c.getFloat("qx"), c.getFloat("qy"), c.getFloat("qz"), c.getFloat("qw")));
+        }
+        cachedPose = out;
+        cachedPoseSource = d.copy();
+        return out;
+    }
+
+    public SimpleContainer getInventory() { return inventory; }
+
+    public java.util.List<String> getCurioSlotIds() { return curioSlotIds; }
+
+    public int getCurioCount() { return curioSlotIds.size(); }
+
+    // ============================
+    // Entity overrides
+    // ============================
+
+    @Override
+    protected void defineSynchedData() {
+        getEntityData().define(RENDER_DATA, new CompoundTag());
+    }
+
+    @Override
+    public InteractionResult interact(Player player, InteractionHand hand) {
+        if (level().isClientSide) return InteractionResult.SUCCESS;
+        if (player instanceof ServerPlayer sp) {
+            NetworkHooks.openScreen(sp,
+                    new SimpleMenuProvider(
+                            (id, playerInv, p) -> new CorpseMenu(id, playerInv, inventory, curioSlotIds),
+                            getDisplayName()),
+                    buf -> {
+                        buf.writeVarInt(curioSlotIds.size());
+                        for (String slotId : curioSlotIds) buf.writeUtf(slotId);
+                    });
+        }
+        return InteractionResult.CONSUME;
+    }
+
+    @Override
+    public Component getDisplayName() {
+        String name = getRenderData().getString("Name");
+        return Component.literal((name == null || name.isEmpty()) ? "Corpse" : name + "'s Corpse");
+    }
+
+    @Override
+    public void tick() {
+        super.tick();
+        if (level().isClientSide) return;
+
+        // Expiry — drop remaining loot + release stored XP, then discard.
+        if (tickCount >= RagdollifiedConfig.getCorpseExpiryTicks()) {
+            dropLoot();
+            releaseXpAndDiscard();
+            return;
+        }
+
+        // Fully looted — release any stored XP and remove the body.
+        if (inventory.isEmpty()) {
+            releaseXpAndDiscard();
+        }
+    }
+
+    private void dropLoot() {
+        if (level().isClientSide) return;
+        Containers.dropContents(level(), this, inventory);
+    }
+
+    private void releaseXpAndDiscard() {
+        if (storedXp > 0 && level() instanceof ServerLevel server) {
+            ExperienceOrb.award(server, position(), storedXp);
+            storedXp = 0;
+        }
+        discard();
+    }
+
+    // ============================
+    // Interaction / physics behavior
+    // ============================
+
+    @Override
+    public boolean isPickable() { return !isRemoved(); }
+
+    /**
+     * A corpse is now spawned directly at its final resting position, so it should never
+     * interpolate. Defensively snap (position AND the previous-tick position used for render
+     * interpolation) on any server position update so a static body can never visibly slide.
+     */
+    @Override
+    public void lerpTo(double x, double y, double z, float yaw, float pitch, int steps, boolean teleport) {
+        this.setPos(x, y, z);
+        this.setOldPosAndRot();
+    }
+
+    @Override
+    public net.minecraft.world.phys.AABB getBoundingBoxForCulling() {
+        // The rendered body can extend past the small interaction box (outstretched limbs);
+        // inflate the cull box so it isn't dropped when the torso center leaves the frustum.
+        return getBoundingBox().inflate(1.5);
+    }
+
+    @Override
+    public boolean isPushable() { return false; }
+
+    @Override
+    protected boolean canRide(Entity vehicle) { return false; }
+
+    @Override
+    public boolean hurt(net.minecraft.world.damagesource.DamageSource source, float amount) {
+        // Corpses are looted or expire; they can't be destroyed by damage. Still allow
+        // out-of-world (void) removal so a corpse in the void doesn't strand loot forever.
+        if (source.is(net.minecraft.tags.DamageTypeTags.BYPASSES_INVULNERABILITY)) {
+            dropLoot();
+            releaseXpAndDiscard();
+            return true;
+        }
+        return false;
+    }
+
+    // ============================
+    // Persistence
+    // ============================
+
+    @Override
+    protected void readAdditionalSaveData(CompoundTag tag) {
+        if (tag.hasUUID("Owner")) ownerUUID = tag.getUUID("Owner");
+        ownerName = tag.getString("Name");
+        storedXp = tag.getInt("StoredXp");
+        // Curio slot ids first — they determine the container size before items load.
+        curioSlotIds.clear();
+        ListTag ids = tag.getList("CurioIds", 8); // 8 = StringTag
+        for (int i = 0; i < ids.size(); i++) curioSlotIds.add(ids.getString(i));
+        inventory = new SimpleContainer(VANILLA_SLOTS + curioSlotIds.size());
+        inventory.fromTag(tag.getList("Items", 10));
+        if (tag.contains("RenderData")) {
+            getEntityData().set(RENDER_DATA, tag.getCompound("RenderData"));
+        }
+        // A corpse persisted while still unposed (e.g. the game crashed during the brief
+        // pre-settle window) would otherwise never pose again — its settle bookkeeping is
+        // gone — and stay invisible forever. Pose it flat on load so it always renders.
+        if (!isPosed()) markPosedFlat();
+    }
+
+    @Override
+    protected void addAdditionalSaveData(CompoundTag tag) {
+        if (ownerUUID != null) tag.putUUID("Owner", ownerUUID);
+        tag.putString("Name", ownerName);
+        tag.putInt("StoredXp", storedXp);
+        tag.put("Items", inventory.createTag());
+        ListTag ids = new ListTag();
+        for (String slotId : curioSlotIds) ids.add(net.minecraft.nbt.StringTag.valueOf(slotId));
+        tag.put("CurioIds", ids);
+        tag.put("RenderData", getRenderData().copy());
+    }
+}

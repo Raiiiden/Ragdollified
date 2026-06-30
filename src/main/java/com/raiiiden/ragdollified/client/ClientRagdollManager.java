@@ -3,11 +3,16 @@ package com.raiiiden.ragdollified.client;
 import com.bulletphysics.collision.narrowphase.PersistentManifold;
 import com.bulletphysics.dynamics.DiscreteDynamicsWorld;
 import com.raiiiden.ragdollified.*;
+import javax.vecmath.Quat4f;
 import javax.vecmath.Vector3f;
 import java.lang.management.GarbageCollectorMXBean;
 import java.lang.management.ManagementFactory;
 import com.raiiiden.ragdollified.config.RagdollifiedConfig;
+import com.raiiiden.ragdollified.entity.CorpseEntity;
+import com.raiiiden.ragdollified.network.CorpseSettlePacket;
+import com.raiiiden.ragdollified.network.ModNetwork;
 import net.minecraft.client.Minecraft;
+import net.minecraft.world.entity.Entity;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.core.BlockPos;
 import net.minecraft.resources.ResourceLocation;
@@ -126,6 +131,9 @@ public class ClientRagdollManager {
     }
     private static final ConcurrentLinkedQueue<ImpulseRequest> impulseQueue = new ConcurrentLinkedQueue<>();
     private static final ConcurrentLinkedQueue<BlockPos> blockChangeQueue = new ConcurrentLinkedQueue<>();
+    // Corpse handoff: when a posed corpse entity arrives, the redundant physics ragdoll for
+    // that player UUID is queued here for the physics thread to destroy (no main-thread race).
+    private static final ConcurrentLinkedQueue<UUID> removeByUuidQueue = new ConcurrentLinkedQueue<>();
 
     // Single-thread executor that runs all physics work. Daemon so it dies with the JVM.
     // submitTick() is called from ClientTickEvent (render thread); the executor takes the
@@ -176,6 +184,78 @@ public class ClientRagdollManager {
         impulseQueue.offer(new ImpulseRequest(ragdollId, partIndex, x, y, z));
     }
 
+    /** Destroy the physics ragdoll(s) for a player UUID on the physics thread (corpse handoff). */
+    public static void requestRemoveByPlayerUUID(UUID uuid) {
+        if (uuid != null) removeByUuidQueue.offer(uuid);
+    }
+
+    /**
+     * Main-thread (client tick) corpse bridge. Two jobs, both cheap and only active when
+     * corpses are enabled and the local player has a settled/settling ragdoll:
+     *  1. Report the local player's ragdoll settle to the server (once) so it can pose the
+     *     corpse at the true resting position + pose.
+     *  2. Once the posed corpse entity has arrived, drop the now-redundant physics ragdoll.
+     */
+    public static void tickCorpseClient() {
+        if (!RagdollifiedConfig.isCorpseEnabled()) return;
+        Minecraft mc = Minecraft.getInstance();
+        if (mc.player == null || mc.level == null) return;
+        if (ragdolls.isEmpty()) return; // nothing to report or hand off
+        UUID self = mc.player.getUUID();
+
+        // Job 1 — settle report for the LOCAL player's own corpse (owner-authoritative).
+        ClientRagdoll mine = null;
+        for (ClientRagdoll r : ragdolls.values()) {
+            if (r.isPlayer() && self.equals(r.getPlayerUUID())) { mine = r; break; }
+        }
+        // Report when the ragdoll has settled, OR shortly before it would despawn / the
+        // server would time out — whichever comes first — so even a stuck (never-settling)
+        // ragdoll still reports its ACTUAL current pose + position. Otherwise the server
+        // timeout fires and the corpse appears as a synthetic pose at the death position
+        // (the "mush above the ragdoll" case).
+        if (mine != null && !mine.isCorpseSettleReported()) {
+            int limit = Math.min(RagdollifiedConfig.getRagdollLifetime(),
+                                 RagdollifiedConfig.getCorpseSettleTimeoutTicks());
+            // Don't "give up" while the ragdoll is distance-frozen (paused because the player
+            // walked away): it isn't stuck, just suspended, and its ticks no longer advance.
+            // Reporting now would freeze the corpse at a mid-fall position; instead wait until
+            // the player returns and the body actually settles.
+            boolean nearGiveUp = !mine.isFrozen() && mine.getTicksExisted() >= Math.max(20, limit - 40);
+            if (mine.isSettled() || nearGiveUp) {
+                ClientRagdoll.TransformSnapshot snap = mine.getSnapshot();
+                if (snap != null) {
+                    Vector3f origin = snap.cachedTorsoPos;
+                    RagdollTransform[] rel = new RagdollTransform[6];
+                    for (int i = 0; i < 6 && i < snap.positions.length; i++) {
+                        Vector3f p = snap.positions[i];
+                        if (p == null) continue;
+                        rel[i] = new RagdollTransform(i,
+                                new Vector3f(p.x - origin.x, p.y - origin.y, p.z - origin.z),
+                                new Quat4f(snap.rotations[i]));
+                    }
+                    ModNetwork.CHANNEL.sendToServer(new CorpseSettlePacket(origin.x, origin.y, origin.z, rel));
+                    mine.markCorpseSettleReported();
+                }
+            }
+        }
+
+        // Job 2 — on EVERY client (owner included): once a posed corpse exists for an owner
+        // we still have a physics ragdoll for, drop that ragdoll so the corpse is the only
+        // visible body (no double-up). Idempotent — once the ragdoll is gone the inner loop
+        // matches nothing, so this naturally stops requesting (and works for repeat deaths).
+        for (Entity e : mc.level.entitiesForRendering()) {
+            if (!(e instanceof CorpseEntity c) || !c.isPosed()) continue;
+            UUID owner = c.getOwnerUUID();
+            if (owner == null) continue;
+            for (ClientRagdoll r : ragdolls.values()) {
+                if (r.isPlayer() && owner.equals(r.getPlayerUUID()) && !r.isDestroyed()) {
+                    requestRemoveByPlayerUUID(owner);
+                    break;
+                }
+            }
+        }
+    }
+
     /** Enqueue a block-change wake event. Block updates fire frequently — keep cheap. */
     public static void enqueueBlockChange(BlockPos pos) {
         if (ragdolls.isEmpty()) return; // common case: no ragdolls, skip the alloc
@@ -190,6 +270,16 @@ public class ClientRagdollManager {
             RagdollPart part = RagdollPart.byIndex(req.partIndex);
             if (part == null) continue;
             r.applyImpulse(part, new Vector3f(req.x, req.y, req.z));
+        }
+        // Corpse handoff removals — destroy the physics ragdoll(s) for these owners on the
+        // physics thread. The post-tick loop drops destroyed ragdolls from the map.
+        UUID owner;
+        while ((owner = removeByUuidQueue.poll()) != null) {
+            for (ClientRagdoll r : ragdolls.values()) {
+                if (r.isPlayer() && owner.equals(r.getPlayerUUID()) && !r.isDestroyed()) {
+                    r.destroy();
+                }
+            }
         }
         BlockPos pos;
         if (blockChangeQueue.isEmpty()) return;
@@ -382,6 +472,7 @@ public class ClientRagdollManager {
 
     private static void maybeLogPerf(int activeCount, int settledCount, int frozenCount,
                                      ClientJbulletWorld physicsWorld) {
+        if (!RagdollifiedConfig.shouldLogPhysicsPerf()) return;
         perfTickCounter++;
         if (perfTickCounter < 100) return;
         perfTickCounter = 0;
@@ -744,6 +835,7 @@ public class ClientRagdollManager {
         physicsBroken = false; // fresh world gets a fresh start
         impulseQueue.clear();
         blockChangeQueue.clear();
+        removeByUuidQueue.clear();
         clear();
         RagdollHitTracker.clear();
         ClientJbulletWorld.onWorldUnload();

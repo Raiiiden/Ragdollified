@@ -61,3 +61,11 @@ description='''${mod_description}'''
     versionRange="${minecraft_version_range}"
     ordering="NONE"
     side="BOTH"
+# Optional: Curios. When present, the corpse captures and shows the player's curio items in
+# dedicated slots. Load AFTER Curios so its slot types/icons are registered first.
+[[dependencies.${mod_id}]]
+    modId="curios"
+    mandatory=false
+    versionRange="*"
+    ordering="AFTER"
+    side="BOTH"
