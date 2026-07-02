@@ -131,9 +131,11 @@ public class ClientRagdollManager {
     }
     private static final ConcurrentLinkedQueue<ImpulseRequest> impulseQueue = new ConcurrentLinkedQueue<>();
     private static final ConcurrentLinkedQueue<BlockPos> blockChangeQueue = new ConcurrentLinkedQueue<>();
-    // Corpse handoff: when a posed corpse entity arrives, the redundant physics ragdoll for
-    // that player UUID is queued here for the physics thread to destroy (no main-thread race).
-    private static final ConcurrentLinkedQueue<UUID> removeByUuidQueue = new ConcurrentLinkedQueue<>();
+    // Corpse handoff: when a posed corpse entity arrives, the ONE redundant physics ragdoll it
+    // replaced (matched by ragdoll entity id, not player UUID) is queued here for the physics
+    // thread to destroy (no main-thread race). Matching by id means a lingering older corpse
+    // can't cull a newer death's ragdoll for the same player.
+    private static final ConcurrentLinkedQueue<Integer> removeByRagdollIdQueue = new ConcurrentLinkedQueue<>();
 
     // Single-thread executor that runs all physics work. Daemon so it dies with the JVM.
     // submitTick() is called from ClientTickEvent (render thread); the executor takes the
@@ -184,9 +186,9 @@ public class ClientRagdollManager {
         impulseQueue.offer(new ImpulseRequest(ragdollId, partIndex, x, y, z));
     }
 
-    /** Destroy the physics ragdoll(s) for a player UUID on the physics thread (corpse handoff). */
-    public static void requestRemoveByPlayerUUID(UUID uuid) {
-        if (uuid != null) removeByUuidQueue.offer(uuid);
+    /** Destroy a specific physics ragdoll (by entity id) on the physics thread (corpse handoff). */
+    public static void requestRemoveRagdoll(int entityId) {
+        removeByRagdollIdQueue.offer(entityId);
     }
 
     /**
@@ -239,19 +241,18 @@ public class ClientRagdollManager {
             }
         }
 
-        // Job 2 — on EVERY client (owner included): once a posed corpse exists for an owner
-        // we still have a physics ragdoll for, drop that ragdoll so the corpse is the only
-        // visible body (no double-up). Idempotent — once the ragdoll is gone the inner loop
-        // matches nothing, so this naturally stops requesting (and works for repeat deaths).
+        // Job 2 — on EVERY client (owner included): once a posed corpse exists for the exact
+        // ragdoll it replaced, drop that ragdoll so the corpse is the only visible body (no
+        // double-up). Matched by ragdoll entity id (not player UUID), so an older corpse never
+        // culls a newer death's ragdoll for the same player. Idempotent — once the ragdoll is
+        // gone the lookup misses, so this naturally stops requesting (and handles repeat deaths).
         for (Entity e : mc.level.entitiesForRendering()) {
             if (!(e instanceof CorpseEntity c) || !c.isPosed()) continue;
-            UUID owner = c.getOwnerUUID();
-            if (owner == null) continue;
-            for (ClientRagdoll r : ragdolls.values()) {
-                if (r.isPlayer() && owner.equals(r.getPlayerUUID()) && !r.isDestroyed()) {
-                    requestRemoveByPlayerUUID(owner);
-                    break;
-                }
+            int ragId = c.getRagdollEntityId();
+            if (ragId < 0) continue;
+            ClientRagdoll r = ragdolls.get(ragId);
+            if (r != null && !r.isDestroyed()) {
+                requestRemoveRagdoll(ragId);
             }
         }
     }
@@ -271,15 +272,12 @@ public class ClientRagdollManager {
             if (part == null) continue;
             r.applyImpulse(part, new Vector3f(req.x, req.y, req.z));
         }
-        // Corpse handoff removals — destroy the physics ragdoll(s) for these owners on the
+        // Corpse handoff removals — destroy the specific physics ragdoll (by id) on the
         // physics thread. The post-tick loop drops destroyed ragdolls from the map.
-        UUID owner;
-        while ((owner = removeByUuidQueue.poll()) != null) {
-            for (ClientRagdoll r : ragdolls.values()) {
-                if (r.isPlayer() && owner.equals(r.getPlayerUUID()) && !r.isDestroyed()) {
-                    r.destroy();
-                }
-            }
+        Integer ragId;
+        while ((ragId = removeByRagdollIdQueue.poll()) != null) {
+            ClientRagdoll r = ragdolls.get(ragId);
+            if (r != null && !r.isDestroyed()) r.destroy();
         }
         BlockPos pos;
         if (blockChangeQueue.isEmpty()) return;
@@ -672,6 +670,12 @@ public class ClientRagdollManager {
             enforceMaxRagdolls();
             ragdolls.put(data.originalEntityId, ragdoll);
             processedEntityIds.add(data.originalEntityId);
+            // Cap how many of a single player's death ragdolls exist at once (corpses are
+            // separate entities and never counted here). Keeps a rapid re-death from stacking
+            // an unbounded number of bodies for one player.
+            if (ragdoll.isPlayer() && ragdoll.getPlayerUUID() != null) {
+                enforceMaxRagdollsPerPlayer(ragdoll.getPlayerUUID());
+            }
             spawned++;
         }
         return spawned;
@@ -749,6 +753,33 @@ public class ClientRagdollManager {
         }
 
         return vel;
+    }
+
+    /**
+     * Retire the oldest of a single player's death ragdolls until they're at or under the
+     * per-player cap. Runs on the physics thread (called from processSpawnQueue), so destroy()
+     * is safe here. Corpses aren't in the ragdolls map, so they're inherently excluded.
+     */
+    private static void enforceMaxRagdollsPerPlayer(UUID playerUUID) {
+        int max = RagdollifiedConfig.getMaxRagdollsPerPlayer();
+        while (true) {
+            int count = 0;
+            ClientRagdoll oldest = null;
+            int oldestTicks = -1;
+            for (ClientRagdoll r : ragdolls.values()) {
+                if (r.isPlayer() && playerUUID.equals(r.getPlayerUUID()) && !r.isDestroyed()) {
+                    count++;
+                    if (r.getTicksExisted() > oldestTicks) {
+                        oldestTicks = r.getTicksExisted();
+                        oldest = r;
+                    }
+                }
+            }
+            if (count <= max || oldest == null) break;
+            oldest.destroy();
+            processedEntityIds.remove(oldest.getOriginalEntityId());
+            ragdolls.remove(oldest.getOriginalEntityId());
+        }
     }
 
     private static void enforceMaxRagdolls() {
@@ -835,9 +866,10 @@ public class ClientRagdollManager {
         physicsBroken = false; // fresh world gets a fresh start
         impulseQueue.clear();
         blockChangeQueue.clear();
-        removeByUuidQueue.clear();
+        removeByRagdollIdQueue.clear();
         clear();
         RagdollHitTracker.clear();
+        ClientPlayerSkinCache.clear();
         ClientJbulletWorld.onWorldUnload();
     }
 

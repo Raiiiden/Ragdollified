@@ -1,3 +1,11 @@
 {
-
+    "item.ragdollified.corpse_compass": "Corpse Compass",
+    "item.ragdollified.corpse_compass.owner": "Owner: %s",
+    "item.ragdollified.corpse_compass.pos": "Corpse: %s, %s, %s",
+    "gui.ragdollified.corpse_compass.title": "%s's Corpse",
+    "gui.ragdollified.corpse_compass.location": "Location",
+    "gui.ragdollified.corpse_compass.id": "Corpse ID: %s",
+    "gui.ragdollified.corpse_compass.copy": "Copy retrieve command",
+    "gui.ragdollified.corpse_compass.copy.tooltip": "Corpse ID/Recovery",
+    "gui.ragdollified.corpse_compass.copied": "Copied to clipboard!"
 }

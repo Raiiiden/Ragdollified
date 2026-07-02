@@ -21,6 +21,14 @@ public class PendingCorpseStore extends SavedData {
 
     public final Map<UUID, PendingCorpse> pending = new HashMap<>();
 
+    /**
+     * Per-owner "give a Corpse Compass on next respawn" queue. Recorded at death and consumed
+     * on respawn. Kept separate from {@link #pending} because a ragdoll can settle (removing the
+     * pending) before the player actually clicks respawn, and we must still hand out the compass.
+     * Each value carries the compass target: corpse id, position, dimension and owner name.
+     */
+    public final Map<UUID, CompoundTag> deathTargets = new HashMap<>();
+
     public PendingCorpseStore() {}
 
     public static PendingCorpseStore get(ServerLevel overworld) {
@@ -34,6 +42,11 @@ public class PendingCorpseStore extends SavedData {
             PendingCorpse p = PendingCorpse.load(list.getCompound(i));
             if (p.owner != null) store.pending.put(p.owner, p);
         }
+        ListTag targets = tag.getList("DeathTargets", 10);
+        for (int i = 0; i < targets.size(); i++) {
+            CompoundTag t = targets.getCompound(i);
+            if (t.hasUUID("Owner")) store.deathTargets.put(t.getUUID("Owner"), t);
+        }
         return store;
     }
 
@@ -42,6 +55,13 @@ public class PendingCorpseStore extends SavedData {
         ListTag list = new ListTag();
         for (PendingCorpse p : pending.values()) list.add(p.save());
         tag.put("Pending", list);
+        ListTag targets = new ListTag();
+        for (Map.Entry<UUID, CompoundTag> e : deathTargets.entrySet()) {
+            CompoundTag t = e.getValue().copy();
+            t.putUUID("Owner", e.getKey());
+            targets.add(t);
+        }
+        tag.put("DeathTargets", targets);
         return tag;
     }
 }

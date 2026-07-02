@@ -6,7 +6,12 @@ import com.raiiiden.ragdollified.compat.CuriosCompat;
 import com.raiiiden.ragdollified.config.RagdollifiedConfig;
 import com.raiiiden.ragdollified.entity.CorpseEntity;
 import com.raiiiden.ragdollified.entity.ModEntities;
+import com.raiiiden.ragdollified.item.CorpseCompassItem;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.registries.Registries;
+import net.minecraft.nbt.CompoundTag;
+import net.minecraft.resources.ResourceKey;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
@@ -21,6 +26,7 @@ import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.event.entity.living.LivingDeathEvent;
 import net.minecraftforge.event.entity.living.LivingExperienceDropEvent;
 import net.minecraftforge.event.server.ServerStartedEvent;
+import net.minecraftforge.eventbus.api.EventPriority;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
 
@@ -44,7 +50,9 @@ import java.util.UUID;
 @Mod.EventBusSubscriber(modid = Ragdollified.MODID)
 public class CorpseManager {
 
-    @SubscribeEvent
+    // LOWEST so the inventory is cleared only AFTER PhysicsHooks (HIGHEST) has read the worn
+    // armor into the ragdoll spawn packet — otherwise the ragdoll would render without armor.
+    @SubscribeEvent(priority = EventPriority.LOWEST)
     public static void onDeath(LivingDeathEvent event) {
         if (!(event.getEntity() instanceof ServerPlayer player)) return;
         Level level = player.level();
@@ -56,9 +64,11 @@ public class CorpseManager {
 
         PendingCorpse p = new PendingCorpse();
         p.owner = player.getUUID();
+        p.corpseId = UUID.randomUUID();
         p.name = player.getGameProfile().getName();
         p.dimension = level.dimension();
         p.deathPos = player.position();
+        p.deathEntityId = player.getId(); // == the client ragdoll's originalEntityId (see PendingCorpse)
 
         // Worn armor copies for rendering (the real items also live in items[36..39]).
         p.boots  = inv.getItem(36).copy();
@@ -82,7 +92,7 @@ public class CorpseManager {
             if (!p.curioStacks.isEmpty()) hasLoot = true;
         }
 
-        if (!hasLoot) return; // nothing to store; let vanilla handle drops/XP normally
+        if (!hasLoot) return; // nothing to store; let vanilla handle drops/XP normally (no corpse)
 
         // Suppress vanilla drops: copies are already held in the pending. Persisting the
         // pending IS the safety net — the store autosaves with the world, so the cleared
@@ -98,9 +108,68 @@ public class CorpseManager {
         PendingCorpse old = store.pending.remove(p.owner);
         if (old != null) spawnFlat(player.server, old);
         store.pending.put(p.owner, p);
+
+        // Queue a Corpse Compass for this player's next respawn, targeting the death position.
+        // If the corpse finishes settling before they respawn, finishSpawn refreshes this to the
+        // real resting position (see below).
+        if (RagdollifiedConfig.isCorpseCompassEnabled()) {
+            store.deathTargets.put(p.owner, buildTarget(p, p.deathPos));
+        }
         store.setDirty();
 
         Ragdollified.LOGGER.debug("Captured pending corpse for {} at {}", p.name, p.deathPos);
+    }
+
+    /**
+     * On respawn, hand the player the Corpse Compass queued for them at death (if the feature is
+     * enabled and a corpse was actually created). Gated on a queued target rather than the respawn
+     * reason, so returning from the End (which has no queued target) never triggers it.
+     */
+    @SubscribeEvent
+    public static void onRespawn(net.minecraftforge.event.entity.player.PlayerEvent.PlayerRespawnEvent event) {
+        if (!(event.getEntity() instanceof ServerPlayer player)) return;
+        PendingCorpseStore store = PendingCorpseStore.get(player.server.overworld());
+        CompoundTag target = store.deathTargets.remove(player.getUUID());
+        if (target == null) return;
+        store.setDirty();
+        if (!RagdollifiedConfig.isCorpseCompassEnabled()) return; // toggled off after death: just drop the queue
+
+        UUID corpseId = target.hasUUID("CorpseId") ? target.getUUID("CorpseId") : null;
+        Vec3 pos = new Vec3(target.getDouble("X"), target.getDouble("Y"), target.getDouble("Z"));
+        ResourceKey<Level> dim = null;
+        if (target.contains("Dim")) {
+            ResourceLocation loc = ResourceLocation.tryParse(target.getString("Dim"));
+            if (loc != null) dim = ResourceKey.create(Registries.DIMENSION, loc);
+        }
+        ItemStack compass = CorpseCompassItem.create(corpseId, pos, dim, target.getString("Name"),
+                readArmor(target, "Helmet"), readArmor(target, "Chest"),
+                readArmor(target, "Legs"), readArmor(target, "Boots"));
+        if (!player.getInventory().add(compass)) {
+            player.drop(compass, false);
+        }
+    }
+
+    private static CompoundTag buildTarget(PendingCorpse p, Vec3 pos) {
+        CompoundTag t = new CompoundTag();
+        if (p.corpseId != null) t.putUUID("CorpseId", p.corpseId);
+        t.putDouble("X", pos.x);
+        t.putDouble("Y", pos.y);
+        t.putDouble("Z", pos.z);
+        if (p.dimension != null) t.putString("Dim", p.dimension.location().toString());
+        if (p.name != null) t.putString("Name", p.name);
+        writeArmor(t, "Helmet", p.helmet);
+        writeArmor(t, "Chest", p.chest);
+        writeArmor(t, "Legs", p.legs);
+        writeArmor(t, "Boots", p.boots);
+        return t;
+    }
+
+    private static void writeArmor(CompoundTag t, String key, ItemStack stack) {
+        if (stack != null && !stack.isEmpty()) t.put(key, stack.save(new CompoundTag()));
+    }
+
+    private static ItemStack readArmor(CompoundTag t, String key) {
+        return t.contains(key) ? ItemStack.of(t.getCompound(key)) : ItemStack.EMPTY;
     }
 
     @SubscribeEvent
@@ -200,6 +269,50 @@ public class CorpseManager {
         store.setDirty();
     }
 
+    /**
+     * OP retrieve command backing: find the corpse with {@code corpseId}, give its contents (+ XP)
+     * to {@code target}, and erase it. Checks loaded corpse entities across every dimension first,
+     * then the pending store (a corpse whose ragdoll hasn't settled into an entity yet). Returns
+     * {@code false} if no match is found (e.g. the corpse is in an unloaded chunk).
+     */
+    public static boolean retrieveByCorpseId(MinecraftServer server, UUID corpseId, ServerPlayer target) {
+        for (ServerLevel level : server.getAllLevels()) {
+            for (net.minecraft.world.entity.Entity e : level.getAllEntities()) {
+                if (e instanceof CorpseEntity corpse && corpseId.equals(corpse.getCorpseId())) {
+                    corpse.retrieveInto(target);
+                    return true;
+                }
+            }
+        }
+        // Not yet materialized — the loot still lives in the pending store.
+        PendingCorpseStore store = PendingCorpseStore.get(server.overworld());
+        UUID owner = null;
+        for (Map.Entry<UUID, PendingCorpse> en : store.pending.entrySet()) {
+            if (corpseId.equals(en.getValue().corpseId)) { owner = en.getKey(); break; }
+        }
+        if (owner != null) {
+            givePendingTo(store.pending.remove(owner), target);
+            store.deathTargets.remove(owner);
+            store.setDirty();
+            return true;
+        }
+        return false;
+    }
+
+    private static void givePendingTo(PendingCorpse p, ServerPlayer target) {
+        giveOrDrop(p.items, target);
+        giveOrDrop(p.curioStacks, target);
+        if (p.storedXp > 0) target.giveExperiencePoints(p.storedXp);
+    }
+
+    private static void giveOrDrop(List<ItemStack> stacks, ServerPlayer target) {
+        for (ItemStack s : stacks) {
+            if (s == null || s.isEmpty()) continue;
+            ItemStack give = s.copy();
+            if (!target.getInventory().add(give)) target.drop(give, false);
+        }
+    }
+
     // ============================
     // Spawning
     // ============================
@@ -215,7 +328,7 @@ public class CorpseManager {
     private static CorpseEntity build(ServerLevel level, PendingCorpse p, Vec3 pos) {
         CorpseEntity corpse = new CorpseEntity(ModEntities.CORPSE.get(), level);
         corpse.moveTo(pos.x, pos.y, pos.z, 0f, 0f);
-        corpse.initCorpse(p.owner, p.name, p.items, p.curioStacks, p.curioIds, p.storedXp,
+        corpse.initCorpse(p.owner, p.corpseId, p.name, p.deathEntityId, p.items, p.curioStacks, p.curioIds, p.storedXp,
                 p.helmet, p.chest, p.legs, p.boots);
         return corpse;
     }
@@ -224,6 +337,25 @@ public class CorpseManager {
         // Make sure the target chunk is loaded so the entity is accepted and persisted —
         // matters for the restart-recovery path where the death chunk is cold.
         level.getChunkAt(BlockPos.containing(pos.x, pos.y, pos.z));
+
+        // Settle the corpse onto the ground BEFORE it's networked. The ragdoll's reported rest Y is
+        // a little above the actual floor, so with real gravity the body would visibly drop into
+        // place just after the handoff. Resolving that short fall here (server-side, one move) means
+        // clients receive the corpse already at rest — no post-spawn jump.
+        corpse.move(net.minecraft.world.entity.MoverType.SELF, new Vec3(0.0, -4.0, 0.0));
+        corpse.setDeltaMovement(Vec3.ZERO);
+        corpse.setOldPosAndRot();
+
+        // If this player hasn't respawned yet, refresh their queued compass target to the corpse's
+        // actual resting position (more accurate than the raw death position it was seeded with).
+        PendingCorpseStore store = PendingCorpseStore.get(level.getServer().overworld());
+        CompoundTag queued = store.deathTargets.get(p.owner);
+        if (queued != null && p.corpseId != null && queued.hasUUID("CorpseId")
+                && p.corpseId.equals(queued.getUUID("CorpseId"))) {
+            store.deathTargets.put(p.owner, buildTarget(p, pos));
+            store.setDirty();
+        }
+
         if (!level.addFreshEntity(corpse)) {
             Ragdollified.LOGGER.warn("Corpse for {} failed to spawn; dropping its loot at {}", p.name, pos);
             dropPendingLoot(level, p, pos);

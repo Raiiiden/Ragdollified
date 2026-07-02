@@ -138,11 +138,11 @@ dependencies {
     annotationProcessor "org.spongepowered:mixin:${mixin_version}:processor"
     //implementation fg.deobf("curse.maven:configured-457570:5180900")
     //implementation fg.deobf("curse.maven:timeless-and-classics-zero-1028108:6654541")
-    // implementation fg.deobf("curse.maven:entity-texture-features-fabric-568563:7249541")
-    // implementation fg.deobf("curse.maven:entity-model-features-844662:7260324")
-    // implementation fg.deobf("curse.maven:geckolib-388172:7553267")
-    // implementation fg.deobf("curse.maven:curios-309927:6418456")
-    // implementation fg.deobf("curse.maven:fracture-point-1207137:7215903")
+    //implementation fg.deobf("curse.maven:entity-texture-features-fabric-568563:7249541")
+    //implementation fg.deobf("curse.maven:entity-model-features-844662:7260324")
+    //implementation fg.deobf("curse.maven:geckolib-388172:7553267")
+    //implementation fg.deobf("curse.maven:curios-309927:6418456")
+    //implementation fg.deobf("curse.maven:fracture-point-1207137:7215903")
     //implementation fg.deobf("curse.maven:spark-361579:4738952")
     //implementation fg.deobf("curse.maven:lesraisins-armor-1021131:7343690")
     //implementation fg.deobf("curse.maven:customnpcs-unofficial-1052708:7694841")
@@ -179,6 +179,20 @@ tasks.named('jar', Jar).configure {
     from {
         configurations.includedLibs.collect { it.isDirectory() ? it : zipTree(it) }
     }
+
+    // MixinGradle 0.7.x + NeoGradle 6 don't fully integrate: the annotation processor
+    // generates the refmap into build/tmp/compileJava but the plugin never injects it
+    // into this (customized) jar task. Without ragdollified.refmap.json in the jar, the
+    // mixin injector strings (renderLevel, Camera.setup, the @Invoker accessors) never
+    // remap to SRG in production, every injector fails to bind, and because the config
+    // was applied against an obfuscated runtime the whole thing dies with a critical
+    // MixinTransformerError (see the RenderType/Kiwi crash). The generated refmap already
+    // carries searge/SRG names, so bundling it directly is what production needs.
+    dependsOn tasks.named('compileJava')
+    from(project.file('build/tmp/compileJava/compileJava-refmap.json')) {
+        rename { "${mod_id}.refmap.json" }
+    }
+
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE
 
     finalizedBy 'reobfJar'

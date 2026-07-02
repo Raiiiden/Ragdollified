@@ -1,9 +1,7 @@
 package com.raiiiden.ragdollified.mixin;
 
-import com.raiiiden.ragdollified.MobModelHelper;
-import com.raiiiden.ragdollified.client.ClientMobModelHelper;
+import com.raiiiden.ragdollified.client.ClientRagdollManager;
 import net.minecraft.world.entity.LivingEntity;
-import net.minecraft.world.entity.player.Player;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
@@ -22,13 +20,14 @@ public class HideDeadEntityMixin {
                                         com.mojang.blaze3d.vertex.PoseStack poseStack,
                                         net.minecraft.client.renderer.MultiBufferSource buffer,
                                         int packedLight, CallbackInfo ci) {
-        // Check if entity is dead and invisible (our marker for ragdoll active)
-        if (entity.isDeadOrDying() && entity.isInvisible()) {
-            // Only cancel for entities that have ragdolls
-            if (entity instanceof Player ||
-                    MobModelHelper.isSupportedModelType(ClientMobModelHelper.getActualModelType(entity))) {
-                ci.cancel(); // Don't render this entity at all (including armor)
-            }
+        // Gate on the mod's own authoritative "this entity has a ragdoll" record rather than
+        // entity.isInvisible(). The invisible flag is network-synced entity data: the server
+        // (especially one without this mod) re-syncs it back to false shortly after death,
+        // which would un-hide the dying mob and let the vanilla fall-over animation render.
+        // processedEntityIds is set on both spawn paths (local death + RagdollSpawnPacket) and
+        // isn't touchable by vanilla data sync, so it can't flicker.
+        if (entity.isDeadOrDying() && ClientRagdollManager.hasRagdollFor(entity.getId())) {
+            ci.cancel(); // Don't render this entity at all (including armor)
         }
     }
 }

@@ -26,6 +26,7 @@ public class Ragdollified {
 
         MinecraftForge.EVENT_BUS.register(this);
         com.raiiiden.ragdollified.entity.ModEntities.register(modEventBus);
+        com.raiiiden.ragdollified.item.ModItems.register(modEventBus);
         com.raiiiden.ragdollified.menu.ModMenus.register(modEventBus);
         ServerRagdollHitTracker.registerOptionalTaczHandler(MinecraftForge.EVENT_BUS);
         DistExecutor.unsafeRunWhenOn(Dist.CLIENT, () -> () ->
@@ -45,8 +46,13 @@ public class Ragdollified {
         });
     }
 
+    // NOTE: instance (non-static) on purpose. This mod subscribes to the Forge bus via
+    // MinecraftForge.EVENT_BUS.register(this) in the constructor, and EventBus#register(Object)
+    // only binds NON-static @SubscribeEvent methods (static ones require register(Class)). As a
+    // static method this never fired, so no command here was ever registered.
     @SubscribeEvent
-    public static void onRegisterCommands(RegisterCommandsEvent event) {
+    public void onRegisterCommands(RegisterCommandsEvent event) {
         SpawnRagdollCommand.register(event.getDispatcher());
+        com.raiiiden.ragdollified.command.RetrieveCorpseCommand.register(event.getDispatcher());
     }
 }

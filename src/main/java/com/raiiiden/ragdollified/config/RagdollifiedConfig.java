@@ -17,6 +17,7 @@ public class RagdollifiedConfig {
 
     public static final ForgeConfigSpec.IntValue RAGDOLL_LIFETIME;
     public static final ForgeConfigSpec.IntValue MAX_RAGDOLLS;
+    public static final ForgeConfigSpec.IntValue MAX_RAGDOLLS_PER_PLAYER;
     public static final ForgeConfigSpec.BooleanValue ENABLE_RAGDOLLS;
     public static final ForgeConfigSpec.BooleanValue ENABLE_PLAYER_RAGDOLLS;
     public static final ForgeConfigSpec.ConfigValue<List<? extends String>> ENTITY_DENYLIST;
@@ -65,6 +66,7 @@ public class RagdollifiedConfig {
     public static final ForgeConfigSpec.IntValue CORPSE_EXPIRY_TICKS;
     public static final ForgeConfigSpec.IntValue CORPSE_SETTLE_TIMEOUT_TICKS;
     public static final ForgeConfigSpec.BooleanValue CORPSE_STORE_XP;
+    public static final ForgeConfigSpec.BooleanValue ENABLE_CORPSE_COMPASS;
 
     // ============================
     // CLIENT config (local only, never synced)
@@ -102,6 +104,12 @@ public class RagdollifiedConfig {
         MAX_RAGDOLLS = SERVER_BUILDER
                 .comment("Maximum number of ragdolls that can exist at once.")
                 .defineInRange("maxRagdolls", 20, 1, 100);
+
+        MAX_RAGDOLLS_PER_PLAYER = SERVER_BUILDER
+                .comment("Maximum number of a single player's death ragdolls that can exist at once. When a player",
+                        "dies past this many times in quick succession, their oldest ragdoll is removed to make room.",
+                        "Corpses are separate entities and do NOT count toward this limit.")
+                .defineInRange("maxRagdollsPerPlayer", 3, 1, 20);
 
         ENABLE_RAGDOLLS = SERVER_BUILDER
                 .comment("Master switch for ragdoll spawning.")
@@ -239,7 +247,7 @@ public class RagdollifiedConfig {
         ENABLE_CORPSES = SERVER_BUILDER
                 .comment("When a player dies, freeze their ragdoll into a lootable corpse holding their inventory.",
                         "Requires the mod on both the server and client (or singleplayer). Ignored on vanilla servers.")
-                .define("enableCorpses", false);
+                .define("enableCorpses", true);
 
         CORPSE_EXPIRY_TICKS = SERVER_BUILDER
                 .comment("How long a corpse lasts before expiring, in ticks. On expiry it drops its remaining items.",
@@ -254,6 +262,11 @@ public class RagdollifiedConfig {
         CORPSE_STORE_XP = SERVER_BUILDER
                 .comment("Store the experience that would have dropped inside the corpse and return it when looted.")
                 .define("corpseStoreXp", true);
+
+        ENABLE_CORPSE_COMPASS = SERVER_BUILDER
+                .comment("Give the player a Corpse Compass when they respawn that points to their most recent corpse.",
+                        "Right-clicking it opens a locator screen. Only applies while corpses are enabled.")
+                .define("enableCorpseCompass", true);
 
         SERVER_BUILDER.pop();
         SERVER_SPEC = SERVER_BUILDER.build();
@@ -302,6 +315,13 @@ public class RagdollifiedConfig {
     public static int getRagdollLifetime() { return RAGDOLL_LIFETIME.get(); }
     public static int getMaxRagdolls() { return MAX_RAGDOLLS.get(); }
 
+    // Read from the client physics/tick loop (also active at the main menu / on vanilla
+    // servers where the SERVER spec never loads), so gate on isLoaded() and fall back to
+    // the default to avoid ForgeConfigSpec#get() throwing.
+    public static int getMaxRagdollsPerPlayer() {
+        return SERVER_SPEC.isLoaded() ? MAX_RAGDOLLS_PER_PLAYER.get() : 3;
+    }
+
     public static boolean isRagdollEnabledFor(String entityId, boolean isPlayer) {
         if (!ENABLE_RAGDOLLS.get()) return false;
         String id = isPlayer ? "minecraft:player" : entityId;
@@ -344,4 +364,5 @@ public class RagdollifiedConfig {
     public static int getCorpseExpiryTicks() { return CORPSE_EXPIRY_TICKS.get(); }
     public static int getCorpseSettleTimeoutTicks() { return CORPSE_SETTLE_TIMEOUT_TICKS.get(); }
     public static boolean shouldStoreCorpseXp() { return CORPSE_STORE_XP.get(); }
+    public static boolean isCorpseCompassEnabled() { return isCorpseEnabled() && ENABLE_CORPSE_COMPASS.get(); }
 }

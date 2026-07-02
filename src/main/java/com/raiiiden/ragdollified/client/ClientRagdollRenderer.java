@@ -347,7 +347,13 @@ public class ClientRagdollRenderer {
                                  ItemStack helmet, ItemStack chestplate, ItemStack leggings, ItemStack boots,
                                  AbstractClientPlayer playerEntity, float bob) {
         if (torso == null) return;
+        // The corpse renderer calls this directly and can run before any live ragdoll has — e.g. a
+        // corpse loaded from disk on world (re)load with no ragdoll around, in which case
+        // onRenderLevel's lazy init never fired. Bake the models here too, and bail if they still
+        // aren't ready, so we never dereference a null model (was: NPE spam + invisible corpse).
+        initModels();
         PlayerModel<AbstractClientPlayer> model = isSlim ? slimModel : normalModel;
+        if (model == null) return;
 
         poseStack.pushPose();
         try {

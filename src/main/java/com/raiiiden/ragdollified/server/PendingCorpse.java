@@ -26,8 +26,21 @@ public class PendingCorpse {
 
     public UUID owner;
     public String name = "";
+    /**
+     * Stable handle for this death, generated at capture time and threaded through to the
+     * {@link CorpseEntity} and the Corpse Compass. Lets the compass and the retrieve command
+     * refer to exactly this corpse independently of the entity's own (later-assigned) UUID.
+     */
+    public UUID corpseId;
     public ResourceKey<Level> dimension;
     public Vec3 deathPos = Vec3.ZERO;
+    /**
+     * The dying player's entity id at the moment of death. This equals the client-side
+     * ragdoll's {@code originalEntityId} (the ragdoll spawn packet keys off {@code entity.getId()}),
+     * so the corpse carries it to clients and each corpse hands off from exactly the ragdoll it
+     * replaced — a lingering older corpse can never cull a newer death's ragdoll.
+     */
+    public int deathEntityId = -1;
     public final List<ItemStack> items = new ArrayList<>();       // 41 vanilla slots (index-aligned)
     public final List<ItemStack> curioStacks = new ArrayList<>(); // parallel with curioIds
     public final List<String> curioIds = new ArrayList<>();
@@ -43,12 +56,14 @@ public class PendingCorpse {
     public CompoundTag save() {
         CompoundTag t = new CompoundTag();
         if (owner != null) t.putUUID("Owner", owner);
+        if (corpseId != null) t.putUUID("CorpseId", corpseId);
         t.putString("Name", name);
         if (dimension != null) t.putString("Dim", dimension.location().toString());
         t.putDouble("Dx", deathPos.x);
         t.putDouble("Dy", deathPos.y);
         t.putDouble("Dz", deathPos.z);
         t.putInt("StoredXp", storedXp);
+        t.putInt("DeathEntityId", deathEntityId);
         t.put("Items", saveStacks(items));
         t.put("CurioStacks", saveStacks(curioStacks));
         ListTag ids = new ListTag();
@@ -64,12 +79,14 @@ public class PendingCorpse {
     public static PendingCorpse load(CompoundTag t) {
         PendingCorpse p = new PendingCorpse();
         if (t.hasUUID("Owner")) p.owner = t.getUUID("Owner");
+        if (t.hasUUID("CorpseId")) p.corpseId = t.getUUID("CorpseId");
         p.name = t.getString("Name");
         if (t.contains("Dim")) {
             p.dimension = ResourceKey.create(Registries.DIMENSION, new ResourceLocation(t.getString("Dim")));
         }
         p.deathPos = new Vec3(t.getDouble("Dx"), t.getDouble("Dy"), t.getDouble("Dz"));
         p.storedXp = t.getInt("StoredXp");
+        p.deathEntityId = t.contains("DeathEntityId") ? t.getInt("DeathEntityId") : -1;
         ListTag ids = t.getList("CurioIds", 8); // 8 = StringTag
         for (int i = 0; i < ids.size(); i++) p.curioIds.add(ids.getString(i));
         loadStacks(t.getList("Items", 10), p.items, CorpseEntity.VANILLA_SLOTS);

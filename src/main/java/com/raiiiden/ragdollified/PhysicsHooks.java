@@ -11,6 +11,7 @@ import net.minecraft.world.entity.Pose;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.phys.Vec3;
 import net.minecraftforge.event.entity.living.LivingDeathEvent;
+import net.minecraftforge.eventbus.api.EventPriority;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
 import net.minecraftforge.network.PacketDistributor;
@@ -18,7 +19,9 @@ import net.minecraftforge.network.PacketDistributor;
 @Mod.EventBusSubscriber(modid = Ragdollified.MODID)
 public class PhysicsHooks {
 
-    @SubscribeEvent
+    // HIGHEST so the ragdoll's worn armor is read into the spawn packet BEFORE CorpseManager
+    // (LOWEST) clears the player's inventory into the corpse — otherwise the ragdoll spawns bare.
+    @SubscribeEvent(priority = EventPriority.HIGHEST)
     public static void onLivingDeath(LivingDeathEvent event) {
         LivingEntity entity = event.getEntity();
         if (entity.level().isClientSide) return;

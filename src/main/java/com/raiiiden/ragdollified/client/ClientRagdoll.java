@@ -603,22 +603,14 @@ public class ClientRagdoll {
                         part != null ? RagdollifiedConfig.getDeathPartKnockbackMultiplier(part) : 1.0f));
             }
         }
-        // Resolve player skin + slim variant NOW, while the entity is still loaded.
+        // Resolve player skin + slim variant NOW, while the entity is still loaded. Resolving
+        // through ClientPlayerSkinCache (connection PlayerInfo, not just loaded entities) both
+        // makes this robust when the owner is briefly out of range and seeds the per-UUID cache,
+        // so the corpse that replaces this ragdoll later still finds the real skin.
         if (isPlayer && playerUUID != null) {
-            net.minecraft.client.Minecraft mc2 = net.minecraft.client.Minecraft.getInstance();
-            net.minecraft.client.player.AbstractClientPlayer pe = null;
-            if (mc2.level != null) {
-                for (net.minecraft.client.player.AbstractClientPlayer p : mc2.level.players()) {
-                    if (p.getUUID().equals(playerUUID)) { pe = p; break; }
-                }
-            }
-            if (pe != null) {
-                cachedPlayerSkin = pe.getSkinTextureLocation();
-                cachedIsSlim = "slim".equals(pe.getModelName());
-            } else {
-                cachedPlayerSkin = net.minecraft.client.resources.DefaultPlayerSkin.getDefaultSkin(playerUUID);
-                cachedIsSlim = net.minecraft.client.resources.DefaultPlayerSkin.getSkinModelName(playerUUID).equals("slim");
-            }
+            ClientPlayerSkinCache.Skin resolved = ClientPlayerSkinCache.resolve(playerUUID);
+            cachedPlayerSkin = resolved.texture;
+            cachedIsSlim = resolved.slim;
         } else {
             cachedPlayerSkin = null;
             cachedIsSlim = false;
@@ -1257,10 +1249,17 @@ public class ClientRagdoll {
             spawnYOffset = isBabyChicken() ? 0.27f : 0.54f;
         }
 
+        // Deterministic spawn jitter. Seed from the server entity id — identical on every
+        // client (and across both spawn paths: the local death-event spawn and the
+        // authoritative RagdollSpawnPacket). Math.random() here gave each client a different
+        // starting offset, so their independently-simulated fall paths and settle poses
+        // diverged from frame one — which is exactly the cross-client desync that makes the
+        // owner-authoritative corpse visibly snap into place on other players' screens.
+        java.util.Random jitter = new java.util.Random(data.originalEntityId * 0x9E3779B97F4A7C15L);
         Vector3f pos = new Vector3f(
-                (float) data.position.x + (float)(Math.random() - 0.5) * 0.3f,
+                (float) data.position.x + (jitter.nextFloat() - 0.5f) * 0.3f,
                 (float) data.position.y + spawnYOffset,
-                (float) data.position.z + (float)(Math.random() - 0.5) * 0.3f
+                (float) data.position.z + (jitter.nextFloat() - 0.5f) * 0.3f
         );
 
         Quaternionf q = new Quaternionf().rotateXYZ(

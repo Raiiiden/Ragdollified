@@ -23,6 +23,7 @@ import net.minecraft.world.entity.ExperienceOrb;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.Level;
+import net.minecraft.world.phys.Vec3;
 import net.minecraftforge.network.NetworkHooks;
 
 import javax.annotation.Nullable;
@@ -51,7 +52,14 @@ public class CorpseEntity extends Entity {
     private final java.util.List<String> curioSlotIds = new java.util.ArrayList<>();
     private int storedXp = 0;
     private UUID ownerUUID;
+    // Stable handle assigned at death (see PendingCorpse#corpseId). Used by the Corpse Compass
+    // and the retrieve command to refer to this exact corpse. Synced to clients via RENDER_DATA.
+    private UUID corpseId;
     private String ownerName = "";
+    // The client-side ragdoll entity id this corpse replaces (see PendingCorpse#deathEntityId).
+    // Synced to clients via RENDER_DATA so the physics-ragdoll handoff removes exactly the body
+    // that settled into THIS corpse, never another death's ragdoll for the same player.
+    private int ragdollEntityId = -1;
 
     // Cached, parsed pose for the renderer (client). Rebuilt lazily when RENDER_DATA changes.
     private RagdollTransform[] cachedPose = null;
@@ -60,7 +68,9 @@ public class CorpseEntity extends Entity {
     public CorpseEntity(EntityType<? extends CorpseEntity> type, Level level) {
         super(type, level);
         this.noPhysics = false;
-        this.setNoGravity(true);
+        // Real (vanilla) entity gravity/collision — NOT the JBullet ragdoll physics. The body
+        // falls when its support is removed and floats up in water; see tickPhysics().
+        this.setNoGravity(false);
     }
 
     // ============================
@@ -72,12 +82,14 @@ public class CorpseEntity extends Entity {
      * the 41 player slots (index-aligned); {@code curioStacks}/{@code curioIds} are the
      * captured curios (parallel lists, may be empty when Curios isn't installed).
      */
-    public void initCorpse(UUID owner, String name,
+    public void initCorpse(UUID owner, UUID corpseId, String name, int ragdollEntityId,
                            java.util.List<ItemStack> vanillaItems,
                            java.util.List<ItemStack> curioStacks, java.util.List<String> curioIds,
                            int xp, ItemStack helmet, ItemStack chest, ItemStack legs, ItemStack boots) {
         this.ownerUUID = owner;
+        this.corpseId = corpseId;
         this.ownerName = name != null ? name : "";
+        this.ragdollEntityId = ragdollEntityId;
         this.storedXp = xp;
         this.curioSlotIds.clear();
         this.curioSlotIds.addAll(curioIds);
@@ -133,7 +145,9 @@ public class CorpseEntity extends Entity {
                                    ItemStack helmet, ItemStack chest, ItemStack legs, ItemStack boots) {
         CompoundTag data = new CompoundTag();
         if (ownerUUID != null) data.putUUID("Owner", ownerUUID);
+        if (corpseId != null) data.putUUID("CorpseId", corpseId);
         data.putString("Name", ownerName);
+        data.putInt("RagdollId", ragdollEntityId);
         data.putBoolean("Posed", posed);
         if (pose != null) data.put("Pose", pose);
         data.put("Helmet", saveStack(helmet));
@@ -159,6 +173,16 @@ public class CorpseEntity extends Entity {
     public UUID getOwnerUUID() {
         CompoundTag d = getRenderData();
         return d.hasUUID("Owner") ? d.getUUID("Owner") : null;
+    }
+
+    /** Stable death handle shared with the Corpse Compass and the retrieve command. */
+    @Nullable
+    public UUID getCorpseId() { return corpseId; }
+
+    /** The physics-ragdoll entity id this corpse replaces, or -1 if unknown. */
+    public int getRagdollEntityId() {
+        CompoundTag d = getRenderData();
+        return d.contains("RagdollId") ? d.getInt("RagdollId") : -1;
     }
 
     public ItemStack getArmor(String key) {
@@ -228,6 +252,8 @@ public class CorpseEntity extends Entity {
         super.tick();
         if (level().isClientSide) return;
 
+        tickPhysics();
+
         // Expiry — drop remaining loot + release stored XP, then discard.
         if (tickCount >= RagdollifiedConfig.getCorpseExpiryTicks()) {
             dropLoot();
@@ -241,9 +267,64 @@ public class CorpseEntity extends Entity {
         }
     }
 
+    /**
+     * General entity physics (server) — deliberately NOT the JBullet ragdoll simulation. Applies
+     * plain gravity + block collision via {@link #move} so a corpse rests on the ground, drops
+     * when the block under it is broken, and floats up to the surface of water instead of hanging
+     * in midair. Tiny residual drift is zeroed so a settled body stops moving (and stops sending
+     * position updates to clients).
+     */
+    private void tickPhysics() {
+        Vec3 m = getDeltaMovement();
+
+        if (isInWater()) {
+            // Buoyancy: rise while submerged, settle once the surface is reached. Heavy water drag.
+            double lift = isUnderWater() ? 0.03 : -0.004;
+            m = new Vec3(m.x, Math.min(m.y + lift, 0.06), m.z).multiply(0.9, 0.9, 0.9);
+        } else if (!isNoGravity()) {
+            m = m.add(0.0, -0.04, 0.0);
+        }
+
+        setDeltaMovement(m);
+        move(net.minecraft.world.entity.MoverType.SELF, getDeltaMovement());
+
+        m = getDeltaMovement();
+        if (onGround()) {
+            m = new Vec3(m.x * 0.6, Math.max(m.y, 0.0), m.z * 0.6); // ground friction; don't burrow
+        }
+        m = m.multiply(0.98, 0.98, 0.98);
+        // Snap negligible velocity to zero so a resting corpse is truly static.
+        double eps = 1.0e-3;
+        m = new Vec3(Math.abs(m.x) < eps ? 0.0 : m.x,
+                     Math.abs(m.y) < eps ? 0.0 : m.y,
+                     Math.abs(m.z) < eps ? 0.0 : m.z);
+        setDeltaMovement(m);
+    }
+
     private void dropLoot() {
         if (level().isClientSide) return;
         Containers.dropContents(level(), this, inventory);
+    }
+
+    /**
+     * Transfer every stored item (+ any stored XP) directly into {@code target}'s inventory
+     * (overflow drops at their feet), then remove this corpse. Used by the OP retrieve command
+     * — "erase the corpse and give me its items".
+     */
+    public void retrieveInto(ServerPlayer target) {
+        if (level().isClientSide) return;
+        for (int i = 0; i < inventory.getContainerSize(); i++) {
+            ItemStack s = inventory.getItem(i);
+            if (s.isEmpty()) continue;
+            ItemStack give = s.copy();
+            if (!target.getInventory().add(give)) target.drop(give, false);
+            inventory.setItem(i, ItemStack.EMPTY);
+        }
+        if (storedXp > 0) {
+            target.giveExperiencePoints(storedXp);
+            storedXp = 0;
+        }
+        discard();
     }
 
     private void releaseXpAndDiscard() {
@@ -260,17 +341,6 @@ public class CorpseEntity extends Entity {
 
     @Override
     public boolean isPickable() { return !isRemoved(); }
-
-    /**
-     * A corpse is now spawned directly at its final resting position, so it should never
-     * interpolate. Defensively snap (position AND the previous-tick position used for render
-     * interpolation) on any server position update so a static body can never visibly slide.
-     */
-    @Override
-    public void lerpTo(double x, double y, double z, float yaw, float pitch, int steps, boolean teleport) {
-        this.setPos(x, y, z);
-        this.setOldPosAndRot();
-    }
 
     @Override
     public net.minecraft.world.phys.AABB getBoundingBoxForCulling() {
@@ -304,6 +374,7 @@ public class CorpseEntity extends Entity {
     @Override
     protected void readAdditionalSaveData(CompoundTag tag) {
         if (tag.hasUUID("Owner")) ownerUUID = tag.getUUID("Owner");
+        if (tag.hasUUID("CorpseId")) corpseId = tag.getUUID("CorpseId");
         ownerName = tag.getString("Name");
         storedXp = tag.getInt("StoredXp");
         // Curio slot ids first — they determine the container size before items load.
@@ -324,6 +395,7 @@ public class CorpseEntity extends Entity {
     @Override
     protected void addAdditionalSaveData(CompoundTag tag) {
         if (ownerUUID != null) tag.putUUID("Owner", ownerUUID);
+        if (corpseId != null) tag.putUUID("CorpseId", corpseId);
         tag.putString("Name", ownerName);
         tag.putInt("StoredXp", storedXp);
         tag.put("Items", inventory.createTag());
