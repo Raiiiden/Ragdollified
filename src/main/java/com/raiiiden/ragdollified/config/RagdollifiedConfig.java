@@ -146,7 +146,7 @@ public class RagdollifiedConfig {
                 .comment("Base impulse magnitude for explosion kills (TNT, creepers, TACZ explosives, etc.).",
                         "The applied force still scales with the victim's max health and distance from the blast;",
                         "this is the overall multiplier. Higher = bodies are thrown further.")
-                .defineInRange("explosion", 60.0, 0.0, 200.0);
+                .defineInRange("explosion", 40.0, 0.0, 200.0);
 
         HIT_IMPULSE_VERTICAL_BIAS = SERVER_BUILDER
                 .comment("Constant upward kick added to every hit.")

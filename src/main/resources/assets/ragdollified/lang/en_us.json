@@ -1,4 +1,5 @@
 {
+    "entity.ragdollified.corpse": "Corpse",
     "item.ragdollified.corpse_compass": "Corpse Compass",
     "item.ragdollified.corpse_compass.owner": "Owner: %s",
     "item.ragdollified.corpse_compass.pos": "Corpse: %s, %s, %s",
