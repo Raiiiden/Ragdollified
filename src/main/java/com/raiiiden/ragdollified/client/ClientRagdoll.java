@@ -1232,6 +1232,9 @@ public class ClientRagdoll {
 
         float spawnYOffset = isPlayer ? 1.2f : (modelType == MobModelHelper.ModelType.QUADRUPED ||
                 modelType == MobModelHelper.ModelType.CHICKEN ? 0f : 1.2f);
+        // Baby humanoids are built at half size, so their torso centre sits ~half as high —
+        // spawn them lower or they'd drop in from an adult's chest height.
+        if (isBabyHumanoid()) spawnYOffset = 0.6f;
 
         // Quadruped/chicken pos adjusted again below — keep consistent with factory call
         if (modelType == MobModelHelper.ModelType.QUADRUPED)
@@ -1277,7 +1280,8 @@ public class ClientRagdoll {
         initialVel.scale(RagdollifiedConfig.INITIAL_VELOCITY_SCALE.get().floatValue());
 
         RagdollBodyFactory.build(world, ragdollParts, ragdollJoints,
-                modelType, pos, baseQuat, scale, initialVel, data.capturedPose, bodyProfile, isBaby());
+                modelType, pos, baseQuat, scale, initialVel, data.capturedPose, bodyProfile,
+                isBaby(), isBaby() && babyScalesHead());
         for (RigidBody r : ragdollParts) {
             r.forceActivationState(CollisionObject.DISABLE_DEACTIVATION);
             r.activate(true);
@@ -1694,6 +1698,24 @@ public class ClientRagdoll {
     public boolean isBabyPig() { return isBaby && mobType.contains("pig"); }
     public boolean isBabySheep() { return isBaby && mobType.contains("sheep"); }
     public boolean isBabyChicken() { return isBaby && mobType.contains("chicken"); }
+    // Baby humanoid (baby zombie/husk/piglin/zombie-villager, …) — scaled-down body + model.
+    public boolean isBabyHumanoid() {
+        return isBaby && MobModelHelper.isHumanoidModelType(modelType);
+    }
+    // Whether this mob's vanilla model enlarges the baby head (vs. a uniform shrink). Mirrors
+    // vanilla per-mob behaviour: zombies/husks/piglins/drowned and zombie villagers use
+    // HumanoidModel with scaleHead=true (big head); plain villagers and wandering traders use
+    // VillagerModel and are scaled uniformly by VillagerRenderer#scale. Only meaningful for a
+    // baby humanoid.
+    public boolean babyScalesHead() {
+        if (!MobModelHelper.isHumanoidModelType(modelType)) return false;
+        if (modelType == MobModelHelper.ModelType.ILLAGER) {
+            // ILLAGER covers villagers + zombie villagers here; only the zombie variant gets
+            // the big head in vanilla (regular illagers never spawn young).
+            return mobType.contains("zombie");
+        }
+        return true;
+    }
     public boolean usesBabyBodyScale() {
         return isBabyCow() || isBabyPig() || isBabySheep() || isBabyChicken();
     }

@@ -67,7 +67,7 @@ public final class RagdollBodyFactory {
                              Vector3f initialVel, MobPoseCapture.MobPose capturedPose,
                              boolean isBabyCow) {
         build(world, parts, joints, modelType, pos, baseQuat, scale, initialVel, capturedPose,
-                isBabyCow ? BodyProfile.COW : BodyProfile.DEFAULT, isBabyCow);
+                isBabyCow ? BodyProfile.COW : BodyProfile.DEFAULT, isBabyCow, false);
     }
 
     public static void build(DiscreteDynamicsWorld world,
@@ -75,7 +75,7 @@ public final class RagdollBodyFactory {
                              MobModelHelper.ModelType modelType,
                              Vector3f pos, Quat4f baseQuat, float scale,
                              Vector3f initialVel, MobPoseCapture.MobPose capturedPose,
-                             BodyProfile bodyProfile, boolean isBaby) {
+                             BodyProfile bodyProfile, boolean isBaby, boolean babyBigHead) {
         float bodyScale = bodyProfile == BodyProfile.DEFAULT ? scale : 1.0f;
 
         Quaternionf q = new Quaternionf(baseQuat.x, baseQuat.y, baseQuat.z, baseQuat.w);
@@ -97,11 +97,11 @@ public final class RagdollBodyFactory {
                         modelType == MobModelHelper.ModelType.CHICKEN, bodyProfile, isBaby);
                 break;
             default:
-                buildHumanoid(world, parts, pos, baseQuat, bodyScale, initialVel, capturedPose, worldOffset);
+                buildHumanoid(world, parts, pos, baseQuat, bodyScale, initialVel, capturedPose, worldOffset, isBaby, babyBigHead);
                 break;
         }
 
-        buildJoints(world, parts, joints, modelType, bodyScale, bodyProfile, isBaby);
+        buildJoints(world, parts, joints, modelType, bodyScale, bodyProfile, isBaby, babyBigHead);
     }
 
     // ===========================
@@ -111,21 +111,31 @@ public final class RagdollBodyFactory {
     private static void buildHumanoid(DiscreteDynamicsWorld world, List<RigidBody> parts,
                                       Vector3f pos, Quat4f baseQuat, float scale,
                                       Vector3f vel, MobPoseCapture.MobPose pose,
-                                      Function<Vector3f, Vector3f> worldOffset) {
+                                      Function<Vector3f, Vector3f> worldOffset, boolean isBaby, boolean babyBigHead) {
+        // Humanoid bodies are authored at a fixed reference size (scale param is unused for
+        // adults). Baby scaling matches what vanilla does per-mob: mobs whose vanilla model
+        // enlarges the baby head (zombie/husk/piglin/drowned/zombie-villager — HumanoidModel
+        // scaleHead=true → head 0.75, body 0.5) pass babyBigHead=true; mobs that scale
+        // uniformly (plain villagers via VillagerRenderer#scale) pass false → head 0.5 too.
+        float bs = isBaby ? 0.5f : 1.0f;                       // torso, arms, legs
+        float hd = isBaby ? (babyBigHead ? 0.75f : 0.5f) : 1.0f; // head
+        // Head sits on top of the torso: torso half-height (0.4) + head half-height (0.2)
+        // minus the same 0.05 neck overlap the adult layout used (0.4+0.2-0.05 = 0.55).
+        float headOffY = 0.4f*bs + 0.2f*hd - 0.05f*bs;
         Quat4f lArmRot = pose != null ? mul(baseQuat, pose.getRotationQuaternion(RagdollPart.LEFT_ARM))  : baseQuat;
         Quat4f rArmRot = pose != null ? mul(baseQuat, pose.getRotationQuaternion(RagdollPart.RIGHT_ARM)) : baseQuat;
         Vector3f lArmPos = pose != null
-                ? calcPos(pos, baseQuat, new Vector3f(-0.35f, 0.22f, 0f), lArmRot, new Vector3f(0f, -0.35f, 0f))
-                : worldOffset.apply(new Vector3f(-0.35f, -0.13f, 0f));
+                ? calcPos(pos, baseQuat, new Vector3f(-0.35f*bs, 0.22f*bs, 0f), lArmRot, new Vector3f(0f, -0.35f*bs, 0f))
+                : worldOffset.apply(new Vector3f(-0.35f*bs, -0.13f*bs, 0f));
         Vector3f rArmPos = pose != null
-                ? calcPos(pos, baseQuat, new Vector3f( 0.35f, 0.22f, 0f), rArmRot, new Vector3f(0f, -0.35f, 0f))
-                : worldOffset.apply(new Vector3f( 0.35f, -0.13f, 0f));
-        parts.add(makePart(world, new BoxShape(new Vector3f(0.25f, 0.4f,  0.15f)), pos,                                         baseQuat, 8, vel));
-        parts.add(makePart(world, new BoxShape(new Vector3f(0.2f,  0.2f,  0.2f)),  worldOffset.apply(new Vector3f(0f, 0.55f, 0f)), baseQuat, 4, vel));
-        parts.add(makePart(world, new BoxShape(new Vector3f(0.15f, 0.45f, 0.15f)), worldOffset.apply(new Vector3f(-0.1f,-0.75f,0f)), baseQuat, 6, vel));
-        parts.add(makePart(world, new BoxShape(new Vector3f(0.15f, 0.45f, 0.15f)), worldOffset.apply(new Vector3f( 0.1f,-0.75f,0f)), baseQuat, 6, vel));
-        parts.add(makePart(world, new BoxShape(new Vector3f(0.1f,  0.35f, 0.1f)),  lArmPos, lArmRot, 4, vel));
-        parts.add(makePart(world, new BoxShape(new Vector3f(0.1f,  0.35f, 0.1f)),  rArmPos, rArmRot, 4, vel));
+                ? calcPos(pos, baseQuat, new Vector3f( 0.35f*bs, 0.22f*bs, 0f), rArmRot, new Vector3f(0f, -0.35f*bs, 0f))
+                : worldOffset.apply(new Vector3f( 0.35f*bs, -0.13f*bs, 0f));
+        parts.add(makePart(world, new BoxShape(new Vector3f(0.25f*bs, 0.4f*bs,  0.15f*bs)), pos,                                              baseQuat, 8*bs, vel));
+        parts.add(makePart(world, new BoxShape(new Vector3f(0.2f*hd,  0.2f*hd,  0.2f*hd)),  worldOffset.apply(new Vector3f(0f, headOffY, 0f)),   baseQuat, 4*hd, vel));
+        parts.add(makePart(world, new BoxShape(new Vector3f(0.15f*bs, 0.45f*bs, 0.15f*bs)), worldOffset.apply(new Vector3f(-0.1f*bs,-0.75f*bs,0f)), baseQuat, 6*bs, vel));
+        parts.add(makePart(world, new BoxShape(new Vector3f(0.15f*bs, 0.45f*bs, 0.15f*bs)), worldOffset.apply(new Vector3f( 0.1f*bs,-0.75f*bs,0f)), baseQuat, 6*bs, vel));
+        parts.add(makePart(world, new BoxShape(new Vector3f(0.1f*bs,  0.35f*bs, 0.1f*bs)),  lArmPos, lArmRot, 4*bs, vel));
+        parts.add(makePart(world, new BoxShape(new Vector3f(0.1f*bs,  0.35f*bs, 0.1f*bs)),  rArmPos, rArmRot, 4*bs, vel));
     }
 
     private static void buildCreeper(DiscreteDynamicsWorld world, List<RigidBody> parts,
@@ -240,7 +250,8 @@ public final class RagdollBodyFactory {
 
     private static void buildJoints(DiscreteDynamicsWorld world, List<RigidBody> parts,
                                     List<TypedConstraint> joints,
-                                    MobModelHelper.ModelType modelType, float s, BodyProfile bodyProfile, boolean isBaby) {
+                                    MobModelHelper.ModelType modelType, float s, BodyProfile bodyProfile,
+                                    boolean isBaby, boolean babyBigHead) {
         if (parts.size() < 6) return;
         RigidBody torso = parts.get(RagdollPart.TORSO.index);
         RigidBody head  = parts.get(RagdollPart.HEAD.index);
@@ -258,29 +269,35 @@ public final class RagdollBodyFactory {
             case CREEPER:   buildCreeperJoints  (world, joints, torso, head, lArm, rArm, lLeg, rLeg, tHead, tw, s); break;
             case QUADRUPED: buildQuadJoints     (world, joints, torso, head, lArm, rArm, lLeg, rLeg, tHead, tLArm, tRArm, tLLeg, tRLeg, tw, s, bodyProfile, isBaby); break;
             case CHICKEN:   buildChickenJoints  (world, joints, torso, head, lArm, rArm, lLeg, rLeg, tHead, tLArm, tRArm, tLLeg, tRLeg, tw, s); break;
-            default:        buildHumanoidJoints (world, joints, torso, head, lLeg, rLeg, lArm, rArm, tHead, tLLeg, tRLeg, tLArm, tRArm, tw, s); break;
+            default:        buildHumanoidJoints (world, joints, torso, head, lLeg, rLeg, lArm, rArm, tHead, tLLeg, tRLeg, tLArm, tRArm, tw, s, isBaby, babyBigHead); break;
         }
     }
 
     private static void buildHumanoidJoints(DiscreteDynamicsWorld world, List<TypedConstraint> joints,
             RigidBody torso, RigidBody head, RigidBody lLeg, RigidBody rLeg, RigidBody lArm, RigidBody rArm,
             Transform tHead, Transform tLLeg, Transform tRLeg, Transform tLArm, Transform tRArm,
-            Function<Vector3f, Vector3f> tw, float s) {
-        Vector3f torsoTop = tw.apply(new Vector3f(0f, 0.4f, 0f));
-        Vector3f headBot  = rotQ(tHead.getRotation(new Quat4f()), new Vector3f(0f,-0.2f,0f)); headBot.add(tHead.origin);
+            Function<Vector3f, Vector3f> tw, float s, boolean isBaby, boolean babyBigHead) {
+        // Anchor offsets must track the scaled extents used in buildHumanoid so baby joints
+        // sit at the shrunken part boundaries. Head uses the head scale (hd — 0.75 for big-
+        // head mobs, else the body scale); torso/arms/legs use the body scale (bs). Angular
+        // limits (degrees) are unchanged.
+        float bs = isBaby ? 0.5f : 1.0f;
+        float hd = isBaby ? (babyBigHead ? 0.75f : 0.5f) : 1.0f;
+        Vector3f torsoTop = tw.apply(new Vector3f(0f, 0.4f*bs, 0f));
+        Vector3f headBot  = rotQ(tHead.getRotation(new Quat4f()), new Vector3f(0f,-0.2f*hd,0f)); headBot.add(tHead.origin);
         joints.add(joint(world, torso, head, mid(torsoTop,headBot), v(0,0,0), v(0,0,0), v(-30,-20,-30), v(30,50,30)));
-        Vector3f lHip = tw.apply(new Vector3f(-0.1f,-0.40f,0f));
-        Vector3f lLegTop = rotQ(tLLeg.getRotation(new Quat4f()), new Vector3f(0f,0.45f,0f)); lLegTop.add(tLLeg.origin);
-        joints.add(joint(world, torso, lLeg, mid(lHip,lLegTop), v(-0.05f,0f,-0.05f), v(0.05f,0f,0.05f), v(-10,0,-10), v(40,0,10)));
-        Vector3f rHip = tw.apply(new Vector3f(0.1f,-0.40f,0f));
-        Vector3f rLegTop = rotQ(tRLeg.getRotation(new Quat4f()), new Vector3f(0f,0.45f,0f)); rLegTop.add(tRLeg.origin);
-        joints.add(joint(world, torso, rLeg, mid(rHip,rLegTop), v(-0.05f,0f,-0.05f), v(0.05f,0f,0.05f), v(-10,0,-10), v(40,0,10)));
-        Vector3f lSh = tw.apply(new Vector3f(-0.35f,0.22f,0f));
-        Vector3f lAT = rotQ(tLArm.getRotation(new Quat4f()), new Vector3f(0f,0.35f,0f)); lAT.add(tLArm.origin);
-        joints.add(joint(world, torso, lArm, mid(lSh,lAT), v(-0.02f,-0.02f,-0.02f), v(0.02f,0.02f,0.02f), v(-80,-30,-40), v(80,30,40)));
-        Vector3f rSh = tw.apply(new Vector3f(0.35f,0.22f,0f));
-        Vector3f rAT = rotQ(tRArm.getRotation(new Quat4f()), new Vector3f(0f,0.35f,0f)); rAT.add(tRArm.origin);
-        joints.add(joint(world, torso, rArm, mid(rSh,rAT), v(-0.02f,-0.02f,-0.02f), v(0.02f,0.02f,0.02f), v(-80,-30,-40), v(80,30,40)));
+        Vector3f lHip = tw.apply(new Vector3f(-0.1f*bs,-0.40f*bs,0f));
+        Vector3f lLegTop = rotQ(tLLeg.getRotation(new Quat4f()), new Vector3f(0f,0.45f*bs,0f)); lLegTop.add(tLLeg.origin);
+        joints.add(joint(world, torso, lLeg, mid(lHip,lLegTop), v(-0.05f*bs,0f,-0.05f*bs), v(0.05f*bs,0f,0.05f*bs), v(-10,0,-10), v(40,0,10)));
+        Vector3f rHip = tw.apply(new Vector3f(0.1f*bs,-0.40f*bs,0f));
+        Vector3f rLegTop = rotQ(tRLeg.getRotation(new Quat4f()), new Vector3f(0f,0.45f*bs,0f)); rLegTop.add(tRLeg.origin);
+        joints.add(joint(world, torso, rLeg, mid(rHip,rLegTop), v(-0.05f*bs,0f,-0.05f*bs), v(0.05f*bs,0f,0.05f*bs), v(-10,0,-10), v(40,0,10)));
+        Vector3f lSh = tw.apply(new Vector3f(-0.35f*bs,0.22f*bs,0f));
+        Vector3f lAT = rotQ(tLArm.getRotation(new Quat4f()), new Vector3f(0f,0.35f*bs,0f)); lAT.add(tLArm.origin);
+        joints.add(joint(world, torso, lArm, mid(lSh,lAT), v(-0.02f*bs,-0.02f*bs,-0.02f*bs), v(0.02f*bs,0.02f*bs,0.02f*bs), v(-80,-30,-40), v(80,30,40)));
+        Vector3f rSh = tw.apply(new Vector3f(0.35f*bs,0.22f*bs,0f));
+        Vector3f rAT = rotQ(tRArm.getRotation(new Quat4f()), new Vector3f(0f,0.35f*bs,0f)); rAT.add(tRArm.origin);
+        joints.add(joint(world, torso, rArm, mid(rSh,rAT), v(-0.02f*bs,-0.02f*bs,-0.02f*bs), v(0.02f*bs,0.02f*bs,0.02f*bs), v(-80,-30,-40), v(80,30,40)));
     }
 
     private static void buildCreeperJoints(DiscreteDynamicsWorld world, List<TypedConstraint> joints,

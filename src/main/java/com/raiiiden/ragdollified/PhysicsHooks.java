@@ -5,7 +5,6 @@ import com.raiiiden.ragdollified.network.RagdollSpawnPacket;
 import com.raiiiden.ragdollified.config.RagdollifiedConfig;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.EquipmentSlot;
-import net.minecraft.world.entity.AgeableMob;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.Pose;
 import net.minecraft.world.entity.player.Player;
@@ -49,7 +48,10 @@ public class PhysicsHooks {
         Vec3 vel = calculateDeathVelocity(entity, event.getSource());
 
         float scale = isPlayer ? 1.0f : entity.getBbHeight() / 1.8f;
-        boolean isBaby = entity instanceof AgeableMob ageable && ageable.isBaby();
+        // Use LivingEntity.isBaby() rather than an AgeableMob check: zombies, husks and
+        // piglins are Monsters (not AgeableMob) but still override isBaby(), so the
+        // instanceof check missed every baby zombie — they spawned adult-sized ragdolls.
+        boolean isBaby = entity.isBaby();
 
         // Sheep need wool-state captured at the moment of death so client renderers can
         // draw the fur layer with the correct dye color (or skip it if the sheep had been

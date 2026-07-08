@@ -20,7 +20,7 @@
         { "predicate": { "angle": 0.390625 }, "model": "minecraft:item/compass_13" },
         { "predicate": { "angle": 0.421875 }, "model": "minecraft:item/compass_14" },
         { "predicate": { "angle": 0.453125 }, "model": "minecraft:item/compass_15" },
-        { "predicate": { "angle": 0.484375 }, "model": "minecraft:item/compass_16" },
+        { "predicate": { "angle": 0.484375 }, "model": "minecraft:item/compass" },
         { "predicate": { "angle": 0.515625 }, "model": "minecraft:item/compass_17" },
         { "predicate": { "angle": 0.546875 }, "model": "minecraft:item/compass_18" },
         { "predicate": { "angle": 0.578125 }, "model": "minecraft:item/compass_19" },

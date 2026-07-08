@@ -19,7 +19,6 @@ import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.damagesource.DamageSource;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.EquipmentSlot;
-import net.minecraft.world.entity.AgeableMob;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.Pose;
 import net.minecraft.world.entity.player.Player;
@@ -589,7 +588,10 @@ public class ClientRagdollManager {
             return null;
         }
         float scale = isPlayer ? 1.0f : entity.getBbHeight() / 1.8f;
-        boolean isBaby = entity instanceof AgeableMob ageable && ageable.isBaby();
+        // Use LivingEntity.isBaby() rather than an AgeableMob check: zombies, husks and
+        // piglins are Monsters (not AgeableMob) but still override isBaby(), so the
+        // instanceof check missed every baby zombie — they spawned adult-sized ragdolls.
+        boolean isBaby = entity.isBaby();
 
         MobPoseCapture.MobPose capturedPose = MobPoseCapture.getPose(entityId);
         Vec3 vel = calculateDeathVelocity(entity, damageSource);

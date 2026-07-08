@@ -50,6 +50,13 @@ public class ClientRagdollRenderer {
     private static HumanoidModel<?> standardHumanoidModel;
     private static SkeletonModel<?> skeletonModel;
     private static IllagerModel<?> illagerModel;
+    // Villagers/wandering traders render on the vanilla VillagerModel (correct UVs for their
+    // textures). Its single combined "arms" part (both stubs + the connecting bar) is anchored
+    // to the torso body so the crossed-arms silhouette survives — see renderVillagerParts.
+    private static ModelPart villagerRoot;
+    // Zombie villagers use the vanilla ZombieVillagerModel (a HumanoidModel with real
+    // separate arms and matching UVs) so they render through the standard humanoid path.
+    private static ZombieVillagerModel<?> zombieVillagerModel;
     private static DrownedModel<?> drownedModel;
     private static CreeperModel<?> creeperModel;
     // PiglinModel extends PlayerModel/HumanoidModel with extra ear/nose/tusk cubes on the
@@ -129,6 +136,10 @@ public class ClientRagdollRenderer {
 
             skeletonModel = new SkeletonModel<>(SkeletonModel.createBodyLayer().bakeRoot());
             illagerModel = new IllagerModel<>(IllagerModel.createBodyLayer().bakeRoot());
+            // Villager base model (vanilla, correct UVs); its combined arms ride the torso.
+            // Zombie villagers get their own vanilla model which has real separate arms.
+            villagerRoot = bakery.bakeLayer(ModelLayers.VILLAGER);
+            zombieVillagerModel = new ZombieVillagerModel<>(bakery.bakeLayer(ModelLayers.ZOMBIE_VILLAGER));
             drownedModel = new DrownedModel<>(DrownedModel.createBodyLayer(CubeDeformation.NONE).bakeRoot());
             creeperModel = new CreeperModel<>(CreeperModel.createBodyLayer(CubeDeformation.NONE).bakeRoot());
             // Use the bakery's already-baked PIGLIN layer so we share the same ModelPart
@@ -368,6 +379,16 @@ public class ClientRagdollRenderer {
             renderHumanoidPartPhysics(poseStack, vc, model.leftArm,  larm,  torso, light, RagdollPart.LEFT_ARM);
             renderHumanoidPartPhysics(poseStack, vc, model.rightArm, rarm,  torso, light, RagdollPart.RIGHT_ARM);
 
+            // Second skin layer (hat / jacket / sleeves / pants). PlayerModel keeps these as
+            // separate sibling parts, so the base-part passes above don't draw them; render
+            // each over its matching base part so the player's outer skin layer shows.
+            renderHumanoidPartPhysics(poseStack, vc, model.hat,         head,  torso, light, RagdollPart.HEAD);
+            renderHumanoidPartPhysics(poseStack, vc, model.jacket,      torso, torso, light, RagdollPart.TORSO);
+            renderHumanoidPartPhysics(poseStack, vc, model.leftPants,   lleg,  torso, light, RagdollPart.LEFT_LEG);
+            renderHumanoidPartPhysics(poseStack, vc, model.rightPants,  rleg,  torso, light, RagdollPart.RIGHT_LEG);
+            renderHumanoidPartPhysics(poseStack, vc, model.leftSleeve,  larm,  torso, light, RagdollPart.LEFT_ARM);
+            renderHumanoidPartPhysics(poseStack, vc, model.rightSleeve, rarm,  torso, light, RagdollPart.RIGHT_ARM);
+
             double armorDistSq = RagdollifiedConfig.getArmorRenderDistanceSq();
             double geckoDistSq = RagdollifiedConfig.getGeckoLibArmorRenderDistanceSq();
 
@@ -409,6 +430,17 @@ public class ClientRagdollRenderer {
                                                 RagdollTransform lleg, RagdollTransform rleg,
                                                 HumanoidModel<?> innerModel, HumanoidModel<?> outerModel,
                                                 net.minecraft.world.entity.LivingEntity entity) {
+        renderVanillaArmorSlot(stack, slot, poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg,
+                innerModel, outerModel, entity, HumanoidScale.ADULT);
+    }
+
+    private static void renderVanillaArmorSlot(ItemStack stack, EquipmentSlot slot, PoseStack poseStack,
+                                                MultiBufferSource buffer, int light,
+                                                RagdollTransform torso, RagdollTransform head,
+                                                RagdollTransform larm, RagdollTransform rarm,
+                                                RagdollTransform lleg, RagdollTransform rleg,
+                                                HumanoidModel<?> innerModel, HumanoidModel<?> outerModel,
+                                                net.minecraft.world.entity.LivingEntity entity, HumanoidScale modelScale) {
         if (stack.isEmpty()) return;
         Item item = stack.getItem();
         if (GeckoLibArmorHelper.isGeckoLibArmor(item)) return; // handled separately
@@ -438,39 +470,39 @@ public class ClientRagdollRenderer {
         }
 
         ResourceLocation baseTex = getArmorTexture(armorItem, slot, stack, entity, null);
-        renderArmorSlotParts(model, baseTex, slot, poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg, r, g, b);
+        renderArmorSlotParts(model, baseTex, slot, poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg, r, g, b, modelScale);
 
         if (dyeable) {
             ResourceLocation overlayTex = getArmorTexture(armorItem, slot, stack, entity, "overlay");
-            renderArmorSlotParts(model, overlayTex, slot, poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg, 1f, 1f, 1f);
+            renderArmorSlotParts(model, overlayTex, slot, poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg, 1f, 1f, 1f, modelScale);
         }
     }
 
-    /** Render the body parts relevant to one armor slot from {@code model}, tinted (r,g,b). */
+    // Render the body parts relevant to one armor slot from {@code model}, tinted (r,g,b).
     private static void renderArmorSlotParts(HumanoidModel<?> model, ResourceLocation texture, EquipmentSlot slot,
                                              PoseStack poseStack, MultiBufferSource buffer, int light,
                                              RagdollTransform torso, RagdollTransform head,
                                              RagdollTransform larm, RagdollTransform rarm,
                                              RagdollTransform lleg, RagdollTransform rleg,
-                                             float r, float g, float b) {
+                                             float r, float g, float b, HumanoidScale modelScale) {
         VertexConsumer vc = buffer.getBuffer(RenderType.armorCutoutNoCull(texture));
         switch (slot) {
             case HEAD:
-                renderHumanoidPartPhysicsTinted(poseStack, vc, model.head, head, torso, light, RagdollPart.HEAD, r, g, b, 1f);
+                renderHumanoidPartPhysicsTinted(poseStack, vc, model.head, head, torso, light, RagdollPart.HEAD, r, g, b, 1f, modelScale);
                 break;
             case CHEST:
-                renderHumanoidPartPhysicsTinted(poseStack, vc, model.body, torso, torso, light, RagdollPart.TORSO, r, g, b, 1f);
-                renderHumanoidPartPhysicsTinted(poseStack, vc, model.leftArm, larm, torso, light, RagdollPart.LEFT_ARM, r, g, b, 1f);
-                renderHumanoidPartPhysicsTinted(poseStack, vc, model.rightArm, rarm, torso, light, RagdollPart.RIGHT_ARM, r, g, b, 1f);
+                renderHumanoidPartPhysicsTinted(poseStack, vc, model.body, torso, torso, light, RagdollPart.TORSO, r, g, b, 1f, modelScale);
+                renderHumanoidPartPhysicsTinted(poseStack, vc, model.leftArm, larm, torso, light, RagdollPart.LEFT_ARM, r, g, b, 1f, modelScale);
+                renderHumanoidPartPhysicsTinted(poseStack, vc, model.rightArm, rarm, torso, light, RagdollPart.RIGHT_ARM, r, g, b, 1f, modelScale);
                 break;
             case LEGS:
-                renderHumanoidPartPhysicsTinted(poseStack, vc, model.body, torso, torso, light, RagdollPart.TORSO, r, g, b, 1f);
-                renderHumanoidPartPhysicsTinted(poseStack, vc, model.leftLeg, lleg, torso, light, RagdollPart.LEFT_LEG, r, g, b, 1f);
-                renderHumanoidPartPhysicsTinted(poseStack, vc, model.rightLeg, rleg, torso, light, RagdollPart.RIGHT_LEG, r, g, b, 1f);
+                renderHumanoidPartPhysicsTinted(poseStack, vc, model.body, torso, torso, light, RagdollPart.TORSO, r, g, b, 1f, modelScale);
+                renderHumanoidPartPhysicsTinted(poseStack, vc, model.leftLeg, lleg, torso, light, RagdollPart.LEFT_LEG, r, g, b, 1f, modelScale);
+                renderHumanoidPartPhysicsTinted(poseStack, vc, model.rightLeg, rleg, torso, light, RagdollPart.RIGHT_LEG, r, g, b, 1f, modelScale);
                 break;
             case FEET:
-                renderHumanoidPartPhysicsTinted(poseStack, vc, model.leftLeg, lleg, torso, light, RagdollPart.LEFT_LEG, r, g, b, 1f);
-                renderHumanoidPartPhysicsTinted(poseStack, vc, model.rightLeg, rleg, torso, light, RagdollPart.RIGHT_LEG, r, g, b, 1f);
+                renderHumanoidPartPhysicsTinted(poseStack, vc, model.leftLeg, lleg, torso, light, RagdollPart.LEFT_LEG, r, g, b, 1f, modelScale);
+                renderHumanoidPartPhysicsTinted(poseStack, vc, model.rightLeg, rleg, torso, light, RagdollPart.RIGHT_LEG, r, g, b, 1f, modelScale);
                 break;
         }
     }
@@ -535,6 +567,15 @@ public class ClientRagdollRenderer {
                                             RagdollTransform larm, RagdollTransform rarm,
                                             RagdollTransform lleg, RagdollTransform rleg,
                                             net.minecraft.world.entity.LivingEntity entity) {
+        renderGeckoLibSlot(stack, slot, poseStack, buffer, light, baseModel, torso, head, larm, rarm, lleg, rleg, entity, HumanoidScale.ADULT);
+    }
+
+    private static void renderGeckoLibSlot(ItemStack stack, EquipmentSlot slot, PoseStack poseStack,
+                                            MultiBufferSource buffer, int light, HumanoidModel<?> baseModel,
+                                            RagdollTransform torso, RagdollTransform head,
+                                            RagdollTransform larm, RagdollTransform rarm,
+                                            RagdollTransform lleg, RagdollTransform rleg,
+                                            net.minecraft.world.entity.LivingEntity entity, HumanoidScale modelScale) {
         if (stack.isEmpty()) return;
         if (!GeckoLibArmorHelper.isGeckoLibArmor(stack.getItem())) return;
 
@@ -548,7 +589,7 @@ public class ClientRagdollRenderer {
                 if (head != null) {
                     baseModel.head.visible = true;
                     resetPart(baseModel.head);
-                    renderGeckoLibPartPhysics(stack, slot, poseStack, buffer, light, baseModel, head, torso, RagdollPart.HEAD, entity);
+                    renderGeckoLibPartPhysics(stack, slot, poseStack, buffer, light, baseModel, head, torso, RagdollPart.HEAD, entity, modelScale);
                     baseModel.head.visible = false;
                 }
                 break;
@@ -556,17 +597,17 @@ public class ClientRagdollRenderer {
                 if (torso != null && larm != null && rarm != null) {
                     baseModel.body.visible = true;
                     resetPart(baseModel.body);
-                    renderGeckoLibPartPhysics(stack, slot, poseStack, buffer, light, baseModel, torso, torso, RagdollPart.TORSO, entity);
+                    renderGeckoLibPartPhysics(stack, slot, poseStack, buffer, light, baseModel, torso, torso, RagdollPart.TORSO, entity, modelScale);
                     baseModel.body.visible = false;
 
                     baseModel.leftArm.visible = true;
                     resetPart(baseModel.leftArm);
-                    renderGeckoLibPartPhysics(stack, slot, poseStack, buffer, light, baseModel, larm, torso, RagdollPart.LEFT_ARM, entity);
+                    renderGeckoLibPartPhysics(stack, slot, poseStack, buffer, light, baseModel, larm, torso, RagdollPart.LEFT_ARM, entity, modelScale);
                     baseModel.leftArm.visible = false;
 
                     baseModel.rightArm.visible = true;
                     resetPart(baseModel.rightArm);
-                    renderGeckoLibPartPhysics(stack, slot, poseStack, buffer, light, baseModel, rarm, torso, RagdollPart.RIGHT_ARM, entity);
+                    renderGeckoLibPartPhysics(stack, slot, poseStack, buffer, light, baseModel, rarm, torso, RagdollPart.RIGHT_ARM, entity, modelScale);
                     baseModel.rightArm.visible = false;
                 }
                 break;
@@ -574,17 +615,17 @@ public class ClientRagdollRenderer {
                 if (torso != null && lleg != null && rleg != null) {
                     baseModel.body.visible = true;
                     resetPart(baseModel.body);
-                    renderGeckoLibPartPhysics(stack, slot, poseStack, buffer, light, baseModel, torso, torso, RagdollPart.TORSO, entity);
+                    renderGeckoLibPartPhysics(stack, slot, poseStack, buffer, light, baseModel, torso, torso, RagdollPart.TORSO, entity, modelScale);
                     baseModel.body.visible = false;
 
                     baseModel.leftLeg.visible = true;
                     resetPart(baseModel.leftLeg);
-                    renderGeckoLibPartPhysics(stack, slot, poseStack, buffer, light, baseModel, lleg, torso, RagdollPart.LEFT_LEG, entity);
+                    renderGeckoLibPartPhysics(stack, slot, poseStack, buffer, light, baseModel, lleg, torso, RagdollPart.LEFT_LEG, entity, modelScale);
                     baseModel.leftLeg.visible = false;
 
                     baseModel.rightLeg.visible = true;
                     resetPart(baseModel.rightLeg);
-                    renderGeckoLibPartPhysics(stack, slot, poseStack, buffer, light, baseModel, rleg, torso, RagdollPart.RIGHT_LEG, entity);
+                    renderGeckoLibPartPhysics(stack, slot, poseStack, buffer, light, baseModel, rleg, torso, RagdollPart.RIGHT_LEG, entity, modelScale);
                     baseModel.rightLeg.visible = false;
                 }
                 break;
@@ -592,12 +633,12 @@ public class ClientRagdollRenderer {
                 if (lleg != null && rleg != null) {
                     baseModel.leftLeg.visible = true;
                     resetPart(baseModel.leftLeg);
-                    renderGeckoLibPartPhysics(stack, slot, poseStack, buffer, light, baseModel, lleg, torso, RagdollPart.LEFT_LEG, entity);
+                    renderGeckoLibPartPhysics(stack, slot, poseStack, buffer, light, baseModel, lleg, torso, RagdollPart.LEFT_LEG, entity, modelScale);
                     baseModel.leftLeg.visible = false;
 
                     baseModel.rightLeg.visible = true;
                     resetPart(baseModel.rightLeg);
-                    renderGeckoLibPartPhysics(stack, slot, poseStack, buffer, light, baseModel, rleg, torso, RagdollPart.RIGHT_LEG, entity);
+                    renderGeckoLibPartPhysics(stack, slot, poseStack, buffer, light, baseModel, rleg, torso, RagdollPart.RIGHT_LEG, entity, modelScale);
                     baseModel.rightLeg.visible = false;
                 }
                 break;
@@ -610,6 +651,15 @@ public class ClientRagdollRenderer {
                                                    RagdollTransform transform, RagdollTransform torso,
                                                    RagdollPart ragdollPart,
                                                    net.minecraft.world.entity.LivingEntity entity) {
+        renderGeckoLibPartPhysics(stack, slot, poseStack, buffer, light, baseModel, transform, torso, ragdollPart, entity, HumanoidScale.ADULT);
+    }
+
+    private static void renderGeckoLibPartPhysics(ItemStack stack, EquipmentSlot slot,
+                                                   PoseStack poseStack, MultiBufferSource buffer, int light,
+                                                   HumanoidModel<?> baseModel,
+                                                   RagdollTransform transform, RagdollTransform torso,
+                                                   RagdollPart ragdollPart,
+                                                   net.minecraft.world.entity.LivingEntity entity, HumanoidScale scale) {
         if (transform == null) return;
 
         poseStack.pushPose();
@@ -623,6 +673,10 @@ public class ClientRagdollRenderer {
             tempQuat.set(transform.rotation.x, transform.rotation.y, transform.rotation.z, transform.rotation.w);
             tempQuat.rotateZ((float) Math.PI);
             poseStack.mulPose(tempQuat);
+            float ms = scale.forPart(ragdollPart);
+            if (ms != 1.0f) {
+                poseStack.scale(ms, ms, ms);
+            }
 
             float centerX = 0, centerY = 0, centerZ = 0;
             switch (ragdollPart) {
@@ -667,6 +721,13 @@ public class ClientRagdollRenderer {
             ResourceLocation texture = getMobTexture(ragdoll);
             VertexConsumer vc = buffer.getBuffer(RenderType.entityCutoutNoCull(texture));
 
+            // Baby humanoids get their model + armor scaled to match the physics bodies built
+            // in RagdollBodyFactory.buildHumanoid. Whether the head is enlarged is decided
+            // per-mob to mirror vanilla (see ClientRagdoll#babyScalesHead) — big head for
+            // zombies/piglins/zombie-villagers, uniform shrink for plain villagers.
+            HumanoidScale humanoidScale = !ragdoll.isBabyHumanoid() ? HumanoidScale.ADULT
+                    : (ragdoll.babyScalesHead() ? HumanoidScale.BABY : HumanoidScale.BABY_UNIFORM);
+
             switch (modelType) {
                 case CREEPER:
                     renderCreeper(ragdoll, poseStack, vc, buffer, light, torso, head, larm, rarm, lleg, rleg);
@@ -677,24 +738,36 @@ public class ClientRagdollRenderer {
                 case CHICKEN:
                     renderChicken(ragdoll, poseStack, vc, light, torso, head, larm, rarm, lleg, rleg);
                     break;
-                case ILLAGER:
-                    renderIllager(ragdoll, poseStack, vc, light, torso, head, larm, rarm, lleg, rleg);
+                case ILLAGER: {
+                    // ILLAGER covers three texture/UV families: zombie villagers (vanilla
+                    // ZombieVillagerModel — a humanoid), plain villagers + wandering traders
+                    // (VillagerModel), and true illagers (pillager/vindicator/…). Route each
+                    // to the model its texture is actually drawn for.
+                    String mt = ragdoll.getMobType();
+                    if (mt.contains("zombie_villager")) {
+                        renderHumanoidMob(poseStack, vc, light, torso, head, larm, rarm, lleg, rleg, zombieVillagerModel, humanoidScale);
+                    } else if (!mt.contains("zombie") && (mt.contains("villager") || mt.contains("wandering_trader"))) {
+                        renderVillager(poseStack, vc, light, torso, head, larm, rarm, lleg, rleg, humanoidScale);
+                    } else {
+                        renderIllager(ragdoll, poseStack, vc, light, torso, head, larm, rarm, lleg, rleg, humanoidScale);
+                    }
                     break;
+                }
                 case HUMANOID_SKELETON:
-                    renderHumanoidMob(poseStack, vc, light, torso, head, larm, rarm, lleg, rleg, skeletonModel);
+                    renderHumanoidMob(poseStack, vc, light, torso, head, larm, rarm, lleg, rleg, skeletonModel, humanoidScale);
                     break;
                 case HUMANOID_DROWNED:
-                    renderHumanoidMob(poseStack, vc, light, torso, head, larm, rarm, lleg, rleg, drownedModel);
+                    renderHumanoidMob(poseStack, vc, light, torso, head, larm, rarm, lleg, rleg, drownedModel, humanoidScale);
                     break;
                 default:
                     HumanoidModel<?> humanoidModel = ragdoll.getMobType().contains("piglin")
                             ? piglinModel : standardHumanoidModel;
-                    renderHumanoidMob(poseStack, vc, light, torso, head, larm, rarm, lleg, rleg, humanoidModel);
+                    renderHumanoidMob(poseStack, vc, light, torso, head, larm, rarm, lleg, rleg, humanoidModel, humanoidScale);
                     break;
             }
 
             for (MobOverlay overlay : overlaysFor(ragdoll)) {
-                renderOverlay(overlay, poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg);
+                renderOverlay(overlay, poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg, humanoidScale);
             }
 
             if (isHumanoidType(modelType)) {
@@ -702,10 +775,10 @@ public class ClientRagdollRenderer {
                 double geckoDistSq = RagdollifiedConfig.getGeckoLibArmorRenderDistanceSq();
 
                 if (distSq <= armorDistSq) {
-                    renderMobVanillaArmor(ragdoll, poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg);
+                    renderMobVanillaArmor(ragdoll, poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg, humanoidScale);
 
                     if (distSq <= geckoDistSq) {
-                        renderMobGeckoLibArmor(ragdoll, poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg);
+                        renderMobGeckoLibArmor(ragdoll, poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg, humanoidScale);
                     }
                 }
             }
@@ -728,18 +801,30 @@ public class ClientRagdollRenderer {
                                            RagdollTransform larm, RagdollTransform rarm,
                                            RagdollTransform lleg, RagdollTransform rleg,
                                            HumanoidModel<?> model) {
-        renderHumanoidPartPhysics(poseStack, vc, model.body, torso, torso, light, RagdollPart.TORSO);
-        renderHumanoidPartPhysics(poseStack, vc, model.head, head, torso, light, RagdollPart.HEAD);
-        renderHumanoidPartPhysics(poseStack, vc, model.leftLeg, lleg, torso, light, RagdollPart.LEFT_LEG);
-        renderHumanoidPartPhysics(poseStack, vc, model.rightLeg, rleg, torso, light, RagdollPart.RIGHT_LEG);
-        renderHumanoidPartPhysics(poseStack, vc, model.leftArm, larm, torso, light, RagdollPart.LEFT_ARM);
-        renderHumanoidPartPhysics(poseStack, vc, model.rightArm, rarm, torso, light, RagdollPart.RIGHT_ARM);
+        renderHumanoidMob(poseStack, vc, light, torso, head, larm, rarm, lleg, rleg, model, HumanoidScale.ADULT);
+    }
+
+    private static void renderHumanoidMob(PoseStack poseStack, VertexConsumer vc, int light,
+                                           RagdollTransform torso, RagdollTransform head,
+                                           RagdollTransform larm, RagdollTransform rarm,
+                                           RagdollTransform lleg, RagdollTransform rleg,
+                                           HumanoidModel<?> model, HumanoidScale modelScale) {
+        renderHumanoidPartPhysics(poseStack, vc, model.body, torso, torso, light, RagdollPart.TORSO, modelScale);
+        renderHumanoidPartPhysics(poseStack, vc, model.head, head, torso, light, RagdollPart.HEAD, modelScale);
+        renderHumanoidPartPhysics(poseStack, vc, model.leftLeg, lleg, torso, light, RagdollPart.LEFT_LEG, modelScale);
+        renderHumanoidPartPhysics(poseStack, vc, model.rightLeg, rleg, torso, light, RagdollPart.RIGHT_LEG, modelScale);
+        renderHumanoidPartPhysics(poseStack, vc, model.leftArm, larm, torso, light, RagdollPart.LEFT_ARM, modelScale);
+        renderHumanoidPartPhysics(poseStack, vc, model.rightArm, rarm, torso, light, RagdollPart.RIGHT_ARM, modelScale);
+        // Second/overlay skin layer. HumanoidModel's "hat" is a sibling of "head" (not a
+        // child), so the head pass above never draws it — render it explicitly to match
+        // vanilla, which draws the hat for every humanoid (transparent on most mob textures).
+        renderHumanoidPartPhysics(poseStack, vc, model.hat, head, torso, light, RagdollPart.HEAD, modelScale);
     }
 
     private static void renderIllager(ClientRagdoll ragdoll, PoseStack poseStack, VertexConsumer vc, int light,
                                        RagdollTransform torso, RagdollTransform head,
                                        RagdollTransform larm, RagdollTransform rarm,
-                                       RagdollTransform lleg, RagdollTransform rleg) {
+                                       RagdollTransform lleg, RagdollTransform rleg, HumanoidScale modelScale) {
         ModelPart root = illagerModel.root();
         ModelPart body = root.getChild("body");
         ModelPart headPart = root.getChild("head");
@@ -754,12 +839,59 @@ public class ClientRagdollRenderer {
         leftArm.visible = true;
         rightArm.visible = true;
 
-        renderHumanoidPartPhysics(poseStack, vc, body, torso, torso, light, RagdollPart.TORSO);
-        renderHumanoidPartPhysics(poseStack, vc, headPart, head, torso, light, RagdollPart.HEAD);
-        renderHumanoidPartPhysics(poseStack, vc, leftLeg, lleg, torso, light, RagdollPart.LEFT_LEG);
-        renderHumanoidPartPhysics(poseStack, vc, rightLeg, rleg, torso, light, RagdollPart.RIGHT_LEG);
-        renderHumanoidPartPhysics(poseStack, vc, leftArm, larm, torso, light, RagdollPart.LEFT_ARM);
-        renderHumanoidPartPhysics(poseStack, vc, rightArm, rarm, torso, light, RagdollPart.RIGHT_ARM);
+        renderHumanoidPartPhysics(poseStack, vc, body, torso, torso, light, RagdollPart.TORSO, modelScale);
+        renderHumanoidPartPhysics(poseStack, vc, headPart, head, torso, light, RagdollPart.HEAD, modelScale);
+        renderHumanoidPartPhysics(poseStack, vc, leftLeg, lleg, torso, light, RagdollPart.LEFT_LEG, modelScale);
+        renderHumanoidPartPhysics(poseStack, vc, rightLeg, rleg, torso, light, RagdollPart.RIGHT_LEG, modelScale);
+        renderHumanoidPartPhysics(poseStack, vc, leftArm, larm, torso, light, RagdollPart.LEFT_ARM, modelScale);
+        renderHumanoidPartPhysics(poseStack, vc, rightArm, rarm, torso, light, RagdollPart.RIGHT_ARM, modelScale);
+    }
+
+    /**
+     * Regular villagers / wandering traders. Rendered on the vanilla VillagerModel (whose UVs
+     * the villager textures are drawn for) with our separate short arms replacing its single
+     * combined "arms" part, so every part — including arms and legs — textures correctly and
+     * the profession/type overlays can cover the whole body.
+     */
+    private static void renderVillager(PoseStack poseStack, VertexConsumer vc, int light,
+                                       RagdollTransform torso, RagdollTransform head,
+                                       RagdollTransform larm, RagdollTransform rarm,
+                                       RagdollTransform lleg, RagdollTransform rleg, HumanoidScale scale) {
+        renderVillagerParts(poseStack, vc, light, torso, head, larm, rarm, lleg, rleg, scale);
+    }
+
+    /** Draws the villager body with whatever texture {@code vc} targets — reused for the base
+     *  skin and for each profession/type/level overlay layer. */
+    private static void renderVillagerParts(PoseStack poseStack, VertexConsumer vc, int light,
+                                            RagdollTransform torso, RagdollTransform head,
+                                            RagdollTransform larm, RagdollTransform rarm,
+                                            RagdollTransform lleg, RagdollTransform rleg, HumanoidScale scale) {
+        ModelPart headPart = villagerRoot.getChild("head");
+        ModelPart body     = villagerRoot.getChild("body");
+        ModelPart arms     = villagerRoot.getChild("arms");
+        ModelPart leftLeg  = villagerRoot.getChild("left_leg");
+        ModelPart rightLeg = villagerRoot.getChild("right_leg");
+
+        renderVillagerPart(poseStack, vc, body,     torso, torso, light, scale.body());
+        renderVillagerPart(poseStack, vc, headPart, head,  torso, light, scale.head());
+        renderVillagerPart(poseStack, vc, leftLeg,  lleg,  torso, light, scale.body());
+        renderVillagerPart(poseStack, vc, rightLeg, rleg,  torso, light, scale.body());
+        // Villager arms are the vanilla crossed-arms unit (two stubs + the bar connecting
+        // them). A ragdoll's two separate arm bodies can't carry a rigid connector, so — per
+        // the chosen design — we anchor the whole arms part to the torso at its natural
+        // body-relative pose and let it tumble with the body, keeping the folded-arms look.
+        // Placement: arms pivot (0,3,-1) minus the body-cube centre (0,6,0) → (0,-3,-1), with
+        // the model's -0.75 rad forward pitch preserved via defaultXRot.
+        renderAnimalPart(poseStack, vc, arms, torso, torso, 0.0F, -3.0F, -1.0F, -0.75F, light, scale.body());
+    }
+
+    /** One villager part, centred on its physics body via setPosForPart (handles the villager's
+     *  tall head without hand-tuned offsets, same as the animal path). */
+    private static void renderVillagerPart(PoseStack poseStack, VertexConsumer vc, ModelPart part,
+                                           RagdollTransform transform, RagdollTransform torso,
+                                           int light, float modelScale) {
+        org.joml.Vector3f off = setPosForPart(part, 0);
+        renderAnimalPart(poseStack, vc, part, transform, torso, off.x, off.y, off.z, 0, light, modelScale);
     }
 
     private static void renderCreeper(ClientRagdoll ragdoll, PoseStack poseStack, VertexConsumer vc,
@@ -868,23 +1000,23 @@ public class ClientRagdollRenderer {
     private static void renderMobVanillaArmor(ClientRagdoll ragdoll, PoseStack poseStack, MultiBufferSource buffer,
                                                int light, RagdollTransform torso, RagdollTransform head,
                                                RagdollTransform larm, RagdollTransform rarm,
-                                               RagdollTransform lleg, RagdollTransform rleg) {
+                                               RagdollTransform lleg, RagdollTransform rleg, HumanoidScale modelScale) {
         // No real entity for mobs here; resolveArmorModel falls back to the proxy ArmorStand.
-        renderVanillaArmorSlot(ragdoll.getHelmet(), EquipmentSlot.HEAD, poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg, mobArmorInner, mobArmorOuter, null);
-        renderVanillaArmorSlot(ragdoll.getChestplate(), EquipmentSlot.CHEST, poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg, mobArmorInner, mobArmorOuter, null);
-        renderVanillaArmorSlot(ragdoll.getLeggings(), EquipmentSlot.LEGS, poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg, mobArmorInner, mobArmorOuter, null);
-        renderVanillaArmorSlot(ragdoll.getBoots(), EquipmentSlot.FEET, poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg, mobArmorInner, mobArmorOuter, null);
+        renderVanillaArmorSlot(ragdoll.getHelmet(), EquipmentSlot.HEAD, poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg, mobArmorInner, mobArmorOuter, null, modelScale);
+        renderVanillaArmorSlot(ragdoll.getChestplate(), EquipmentSlot.CHEST, poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg, mobArmorInner, mobArmorOuter, null, modelScale);
+        renderVanillaArmorSlot(ragdoll.getLeggings(), EquipmentSlot.LEGS, poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg, mobArmorInner, mobArmorOuter, null, modelScale);
+        renderVanillaArmorSlot(ragdoll.getBoots(), EquipmentSlot.FEET, poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg, mobArmorInner, mobArmorOuter, null, modelScale);
     }
 
     private static void renderMobGeckoLibArmor(ClientRagdoll ragdoll, PoseStack poseStack, MultiBufferSource buffer,
                                                 int light, RagdollTransform torso, RagdollTransform head,
                                                 RagdollTransform larm, RagdollTransform rarm,
-                                                RagdollTransform lleg, RagdollTransform rleg) {
+                                                RagdollTransform lleg, RagdollTransform rleg, HumanoidScale modelScale) {
         // GeckoLib uses the proxy ArmorStand inside GeckoLibArmorHelper — no real entity needed
-        renderGeckoLibSlot(ragdoll.getHelmet(), EquipmentSlot.HEAD, poseStack, buffer, light, mobArmorInner, torso, head, larm, rarm, lleg, rleg, null);
-        renderGeckoLibSlot(ragdoll.getChestplate(), EquipmentSlot.CHEST, poseStack, buffer, light, mobArmorInner, torso, head, larm, rarm, lleg, rleg, null);
-        renderGeckoLibSlot(ragdoll.getLeggings(), EquipmentSlot.LEGS, poseStack, buffer, light, mobArmorInner, torso, head, larm, rarm, lleg, rleg, null);
-        renderGeckoLibSlot(ragdoll.getBoots(), EquipmentSlot.FEET, poseStack, buffer, light, mobArmorInner, torso, head, larm, rarm, lleg, rleg, null);
+        renderGeckoLibSlot(ragdoll.getHelmet(), EquipmentSlot.HEAD, poseStack, buffer, light, mobArmorInner, torso, head, larm, rarm, lleg, rleg, null, modelScale);
+        renderGeckoLibSlot(ragdoll.getChestplate(), EquipmentSlot.CHEST, poseStack, buffer, light, mobArmorInner, torso, head, larm, rarm, lleg, rleg, null, modelScale);
+        renderGeckoLibSlot(ragdoll.getLeggings(), EquipmentSlot.LEGS, poseStack, buffer, light, mobArmorInner, torso, head, larm, rarm, lleg, rleg, null, modelScale);
+        renderGeckoLibSlot(ragdoll.getBoots(), EquipmentSlot.FEET, poseStack, buffer, light, mobArmorInner, torso, head, larm, rarm, lleg, rleg, null, modelScale);
     }
 
     // ============================
@@ -899,6 +1031,13 @@ public class ClientRagdollRenderer {
                                                          RagdollTransform transform, RagdollTransform torso,
                                                          int light, RagdollPart ragdollPart,
                                                          float r, float g, float b, float a) {
+        renderHumanoidPartPhysicsTinted(poseStack, vc, part, transform, torso, light, ragdollPart, r, g, b, a, HumanoidScale.ADULT);
+    }
+
+    private static void renderHumanoidPartPhysicsTinted(PoseStack poseStack, VertexConsumer vc, ModelPart part,
+                                                         RagdollTransform transform, RagdollTransform torso,
+                                                         int light, RagdollPart ragdollPart,
+                                                         float r, float g, float b, float a, HumanoidScale scale) {
         if (transform == null) return;
 
         poseStack.pushPose();
@@ -912,6 +1051,10 @@ public class ClientRagdollRenderer {
             tempQuat.set(transform.rotation.x, transform.rotation.y, transform.rotation.z, transform.rotation.w);
             tempQuat.rotateZ((float) Math.PI);
             poseStack.mulPose(tempQuat);
+            float ms = scale.forPart(ragdollPart);
+            if (ms != 1.0f) {
+                poseStack.scale(ms, ms, ms);
+            }
 
             switch (ragdollPart) {
                 case HEAD:      part.setPos(0, 4, 0);    break;
@@ -934,6 +1077,12 @@ public class ClientRagdollRenderer {
     private static void renderHumanoidPartPhysics(PoseStack poseStack, VertexConsumer vc, ModelPart part,
                                                    RagdollTransform transform, RagdollTransform torso,
                                                    int light, RagdollPart ragdollPart) {
+        renderHumanoidPartPhysics(poseStack, vc, part, transform, torso, light, ragdollPart, HumanoidScale.ADULT);
+    }
+
+    private static void renderHumanoidPartPhysics(PoseStack poseStack, VertexConsumer vc, ModelPart part,
+                                                   RagdollTransform transform, RagdollTransform torso,
+                                                   int light, RagdollPart ragdollPart, HumanoidScale scale) {
         if (transform == null) return;
 
         poseStack.pushPose();
@@ -947,6 +1096,10 @@ public class ClientRagdollRenderer {
             tempQuat.set(transform.rotation.x, transform.rotation.y, transform.rotation.z, transform.rotation.w);
             tempQuat.rotateZ((float) Math.PI);
             poseStack.mulPose(tempQuat);
+            float ms = scale.forPart(ragdollPart);
+            if (ms != 1.0f) {
+                poseStack.scale(ms, ms, ms);
+            }
 
             switch (ragdollPart) {
                 case HEAD:      part.setPos(0, 4, 0);    break;
@@ -963,6 +1116,24 @@ public class ClientRagdollRenderer {
             part.render(poseStack, vc, light, OverlayTexture.NO_OVERLAY);
         } finally {
             poseStack.popPose();
+        }
+    }
+
+    /**
+     * Body-vs-head scale for a humanoid ragdoll. Babies are not a uniform shrink: vanilla's
+     * young HumanoidModel draws the head at 0.75 and the body/arms/legs at 0.5, giving baby
+     * zombies their oversized head. Since we render each ModelPart individually (bypassing
+     * AgeableListModel#renderToBuffer), we reproduce that split by scaling the head part by
+     * {@code head} and every other part by {@code body}.
+     */
+    private record HumanoidScale(float body, float head) {
+        static final HumanoidScale ADULT = new HumanoidScale(1.0f, 1.0f);
+        // Big-head baby (zombie/husk/piglin/drowned/zombie-villager): head 0.75, body 0.5.
+        static final HumanoidScale BABY  = new HumanoidScale(0.5f, 0.75f);
+        // Uniform baby (plain villager/wandering trader): everything at 0.5, no big head.
+        static final HumanoidScale BABY_UNIFORM = new HumanoidScale(0.5f, 0.5f);
+        float forPart(RagdollPart part) {
+            return part == RagdollPart.HEAD ? head : body;
         }
     }
 
@@ -1159,10 +1330,14 @@ public class ClientRagdollRenderer {
     // will plug in here as several stacked HumanoidOverlay descriptors.
     // ============================
 
-    public sealed interface MobOverlay permits HumanoidOverlay, IllagerOverlay, QuadrupedOverlay, CreeperSwirlOverlay {}
+    public sealed interface MobOverlay permits HumanoidOverlay, IllagerOverlay, QuadrupedOverlay, VillagerOverlay, CreeperSwirlOverlay {}
 
     /** Full HumanoidModel render (drowned outer, stray clothing, zombie-villager profession). */
     public record HumanoidOverlay(ResourceLocation texture, HumanoidModel<?> model) implements MobOverlay {}
+
+    /** Villager profession/type/level layer — drawn on the VillagerModel + split arms so it
+     *  covers the whole body (used for plain villagers; zombie villagers use HumanoidOverlay). */
+    public record VillagerOverlay(ResourceLocation texture) implements MobOverlay {}
 
     /** Illager-shaped overlay (villager profession layers — IllagerModel extends
      *  HierarchicalModel, not HumanoidModel, so it needs its own dispatch).
@@ -1244,18 +1419,16 @@ public class ClientRagdollRenderer {
             boolean isNitwit = profKey.getNamespace().equals("minecraft")
                     && profKey.getPath().equals("nitwit");
 
-            ModelPart illagerRoot = illagerModel.root();
-
             // 1. Biome-type overlay — always rendered, even for "none" profession.
             ResourceLocation typeTex = new ResourceLocation(typeKey.getNamespace(),
                     basePath + "type/" + typeKey.getPath() + ".png");
-            result.add(new IllagerOverlay(typeTex, illagerRoot, true));
+            result.add(villagerLayer(typeTex, isZombieVillager));
 
             // 2. Profession overlay — skip for NONE (matches vanilla, avoids missing texture).
             if (!isNoneProfession) {
                 ResourceLocation profTex = new ResourceLocation(profKey.getNamespace(),
                         basePath + "profession/" + profKey.getPath() + ".png");
-                result.add(new IllagerOverlay(profTex, illagerRoot, true));
+                result.add(villagerLayer(profTex, isZombieVillager));
 
                 // 3. Profession-level necklace — skip for NONE and NITWIT.
                 int level = ragdoll.getVillagerLevel();
@@ -1271,12 +1444,18 @@ public class ClientRagdollRenderer {
                     if (levelName != null) {
                         ResourceLocation levelTex = new ResourceLocation("minecraft",
                                 "textures/entity/villager/profession_level/" + levelName + ".png");
-                        result.add(new IllagerOverlay(levelTex, illagerRoot, true));
+                        result.add(villagerLayer(levelTex, isZombieVillager));
                     }
                 }
             }
         }
         return result;
+    }
+
+    /** Build the right overlay carrier for a villager layer: zombie villagers render on the
+     *  humanoid ZombieVillagerModel, plain villagers on the VillagerModel + split arms. */
+    private static MobOverlay villagerLayer(ResourceLocation texture, boolean zombieVillager) {
+        return zombieVillager ? new HumanoidOverlay(texture, zombieVillagerModel) : new VillagerOverlay(texture);
     }
 
     /**
@@ -1286,12 +1465,15 @@ public class ClientRagdollRenderer {
     private static void renderOverlay(MobOverlay overlay, PoseStack poseStack, MultiBufferSource buffer, int light,
                                       RagdollTransform torso, RagdollTransform head,
                                       RagdollTransform larm, RagdollTransform rarm,
-                                      RagdollTransform lleg, RagdollTransform rleg) {
+                                      RagdollTransform lleg, RagdollTransform rleg, HumanoidScale humanoidScale) {
         if (overlay instanceof HumanoidOverlay h) {
             VertexConsumer ovc = buffer.getBuffer(RenderType.entityCutoutNoCull(h.texture()));
-            renderHumanoidMob(poseStack, ovc, light, torso, head, larm, rarm, lleg, rleg, h.model());
+            renderHumanoidMob(poseStack, ovc, light, torso, head, larm, rarm, lleg, rleg, h.model(), humanoidScale);
         } else if (overlay instanceof IllagerOverlay i) {
-            renderIllagerOverlayParts(poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg, i);
+            renderIllagerOverlayParts(poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg, i, humanoidScale);
+        } else if (overlay instanceof VillagerOverlay vil) {
+            VertexConsumer ovc = buffer.getBuffer(RenderType.entityCutoutNoCull(vil.texture()));
+            renderVillagerParts(poseStack, ovc, light, torso, head, larm, rarm, lleg, rleg, humanoidScale);
         } else if (overlay instanceof QuadrupedOverlay q) {
             renderQuadrupedOverlayParts(poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg, q);
         } else if (overlay instanceof CreeperSwirlOverlay c) {
@@ -1305,7 +1487,7 @@ public class ClientRagdollRenderer {
                                                   RagdollTransform torso, RagdollTransform head,
                                                   RagdollTransform larm, RagdollTransform rarm,
                                                   RagdollTransform lleg, RagdollTransform rleg,
-                                                  IllagerOverlay overlay) {
+                                                  IllagerOverlay overlay, HumanoidScale modelScale) {
         ModelPart root = overlay.root();
         ModelPart body = root.getChild("body");
         ModelPart headPart = root.getChild("head");
@@ -1322,13 +1504,13 @@ public class ClientRagdollRenderer {
         rightArm.visible = true;
 
         VertexConsumer vc = buffer.getBuffer(RenderType.entityCutoutNoCull(overlay.texture()));
-        renderHumanoidPartPhysics(poseStack, vc, body,     torso, torso, light, RagdollPart.TORSO);
-        renderHumanoidPartPhysics(poseStack, vc, headPart, head,  torso, light, RagdollPart.HEAD);
+        renderHumanoidPartPhysics(poseStack, vc, body,     torso, torso, light, RagdollPart.TORSO, modelScale);
+        renderHumanoidPartPhysics(poseStack, vc, headPart, head,  torso, light, RagdollPart.HEAD, modelScale);
         if (!overlay.limitToHeadBody()) {
-            renderHumanoidPartPhysics(poseStack, vc, leftLeg,  lleg,  torso, light, RagdollPart.LEFT_LEG);
-            renderHumanoidPartPhysics(poseStack, vc, rightLeg, rleg,  torso, light, RagdollPart.RIGHT_LEG);
-            renderHumanoidPartPhysics(poseStack, vc, leftArm,  larm,  torso, light, RagdollPart.LEFT_ARM);
-            renderHumanoidPartPhysics(poseStack, vc, rightArm, rarm,  torso, light, RagdollPart.RIGHT_ARM);
+            renderHumanoidPartPhysics(poseStack, vc, leftLeg,  lleg,  torso, light, RagdollPart.LEFT_LEG, modelScale);
+            renderHumanoidPartPhysics(poseStack, vc, rightLeg, rleg,  torso, light, RagdollPart.RIGHT_LEG, modelScale);
+            renderHumanoidPartPhysics(poseStack, vc, leftArm,  larm,  torso, light, RagdollPart.LEFT_ARM, modelScale);
+            renderHumanoidPartPhysics(poseStack, vc, rightArm, rarm,  torso, light, RagdollPart.RIGHT_ARM, modelScale);
         }
     }
 
@@ -1357,12 +1539,21 @@ public class ClientRagdollRenderer {
         org.joml.Vector3f lFrontOff    = setPosForPart(leftFront, 0);
         org.joml.Vector3f rFrontOff    = setPosForPart(rightFront, 0);
 
-        renderAnimalPartTinted(poseStack, vc, body,       torso, torso, bodyOff.x,    bodyOff.y,    bodyOff.z,    halfPI, light, r, g, b, overlay.bodyScale());
-        renderAnimalPartTinted(poseStack, vc, headPart,   head,  torso, headOff.x,    headOff.y,    headOff.z,    0,      light, r, g, b);
-        renderAnimalPartTinted(poseStack, vc, leftHind,   lleg,  torso, lHindOff.x,   lHindOff.y,   lHindOff.z,   0,      light, r, g, b, overlay.bodyScale());
-        renderAnimalPartTinted(poseStack, vc, rightHind,  rleg,  torso, rHindOff.x,   rHindOff.y,   rHindOff.z,   0,      light, r, g, b, overlay.bodyScale());
-        renderAnimalPartTinted(poseStack, vc, leftFront,  larm,  torso, lFrontOff.x,  lFrontOff.y,  lFrontOff.z,  0,      light, r, g, b, overlay.bodyScale());
-        renderAnimalPartTinted(poseStack, vc, rightFront, rarm,  torso, rFrontOff.x,  rFrontOff.y,  rFrontOff.z,  0,      light, r, g, b, overlay.bodyScale());
+        // The sheep wool model (SheepFurModel) doesn't sit flush on the physics-aligned body
+        // it rides: the head wool is 1px too far forward and the leg wool 3px too low. Correct
+        // only the wool — the pig saddle shares this path and must not move. Offsets are in
+        // model-pixel space (setPos units): +Z is toward the back of the head (face is -Z) and
+        // -Y is up (model +Y points down), and they scale with the part so baby sheep line up too.
+        boolean isWool = overlay.texture().equals(SHEEP_FUR_TEXTURE);
+        float woolHeadZ = isWool ? 1.0f  : 0.0f;
+        float woolLegY  = isWool ? -3.0f : 0.0f;
+
+        renderAnimalPartTinted(poseStack, vc, body,       torso, torso, bodyOff.x,    bodyOff.y,             bodyOff.z,               halfPI, light, r, g, b, overlay.bodyScale());
+        renderAnimalPartTinted(poseStack, vc, headPart,   head,  torso, headOff.x,    headOff.y,             headOff.z + woolHeadZ,   0,      light, r, g, b);
+        renderAnimalPartTinted(poseStack, vc, leftHind,   lleg,  torso, lHindOff.x,   lHindOff.y + woolLegY, lHindOff.z,              0,      light, r, g, b, overlay.bodyScale());
+        renderAnimalPartTinted(poseStack, vc, rightHind,  rleg,  torso, rHindOff.x,   rHindOff.y + woolLegY, rHindOff.z,              0,      light, r, g, b, overlay.bodyScale());
+        renderAnimalPartTinted(poseStack, vc, leftFront,  larm,  torso, lFrontOff.x,  lFrontOff.y + woolLegY, lFrontOff.z,            0,      light, r, g, b, overlay.bodyScale());
+        renderAnimalPartTinted(poseStack, vc, rightFront, rarm,  torso, rFrontOff.x,  rFrontOff.y + woolLegY, rFrontOff.z,            0,      light, r, g, b, overlay.bodyScale());
     }
 
     /** Charged-creeper energy-swirl overlay. Vanilla EnergySwirlLayer renders the
