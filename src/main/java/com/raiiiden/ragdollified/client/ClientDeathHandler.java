@@ -49,6 +49,13 @@ public class ClientDeathHandler {
             entity.setCustomNameVisible(false);
         }
 
+        // Snapshot procedural blood (Better Blood Overlay) so the ragdoll reproduces it. Mobs
+        // are captured every frame by EntityRenderCaptureHandler, but that path skips players,
+        // so capture them here — the player is still alive and its wounds are still present.
+        if (isPlayer) {
+            com.raiiiden.ragdollified.client.compat.BetterBloodOverlayCompat.capture(entity.getId(), entity);
+        }
+
         // Create the ragdoll
         ClientRagdollManager.createFromEntity(entity, event.getSource());
 

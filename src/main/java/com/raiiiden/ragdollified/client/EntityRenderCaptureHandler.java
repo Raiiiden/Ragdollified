@@ -2,6 +2,7 @@ package com.raiiiden.ragdollified.client;
 
 import com.raiiiden.ragdollified.MobModelHelper;
 import com.raiiiden.ragdollified.Ragdollified;
+import com.raiiiden.ragdollified.client.compat.BetterBloodOverlayCompat;
 import com.raiiiden.ragdollified.client.compat.ETFCompatibilityHelper;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.entity.LivingEntity;
@@ -34,6 +35,11 @@ public class EntityRenderCaptureHandler {
             ResourceLocation actualTexture = ETFCompatibilityHelper.getVariantTexture(entity, defaultTexture);
 
             ClientMobTextureCache.cacheTexture(entity.getId(), actualTexture);
+
+            // Snapshot the mob's current procedural blood so a ragdoll spawned on its death can
+            // reproduce it. BBO frees the wound textures when the mob leaves the level, so this
+            // has to happen while it's still alive — same reason we cache the texture here.
+            BetterBloodOverlayCompat.capture(entity.getId(), entity);
 
         } catch (Exception e) {
             // Ignore

@@ -43,6 +43,7 @@ public class Ragdollified {
     private void clientSetup(final FMLClientSetupEvent event) {
         event.enqueueWork(() -> {
             ETFCompatibilityHelper.initialize();
+            com.raiiiden.ragdollified.client.compat.BetterBloodOverlayCompat.initialize();
         });
     }
 

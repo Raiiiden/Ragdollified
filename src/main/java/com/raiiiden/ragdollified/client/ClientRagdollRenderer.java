@@ -3,6 +3,7 @@ package com.raiiiden.ragdollified.client;
 import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.blaze3d.vertex.VertexConsumer;
 import com.raiiiden.ragdollified.*;
+import com.raiiiden.ragdollified.client.compat.BetterBloodOverlayCompat;
 import com.raiiiden.ragdollified.client.compat.GeckoLibArmorHelper;
 import com.raiiiden.ragdollified.config.RagdollifiedConfig;
 import net.minecraft.client.Camera;
@@ -82,6 +83,16 @@ public class ClientRagdollRenderer {
     private static ModelPart sheepFurRoot; // wool overlay layer for non-sheared sheep
     private static ModelPart pigRoot;
     private static ModelPart chickenRoot;
+    // Cat/ocelot share the OcelotModel geometry (quadruped + tail). Bat and bee are winged.
+    // Baked ModelPart trees are used directly (parts are driven per-body by the renderer), so
+    // the EntityModel wrappers aren't needed — and BeeModel (AgeableListModel) has no root().
+    private static ModelPart catRoot;
+    private static ModelPart catCollarRoot; // dyed collar overlay for tamed cats
+    private static ModelPart batRoot;
+    private static ModelPart beeRoot;
+
+    private static final ResourceLocation CAT_COLLAR_TEXTURE =
+            new ResourceLocation("minecraft", "textures/entity/cat/cat_collar.png");
 
     private static final ResourceLocation SHEEP_FUR_TEXTURE =
             new ResourceLocation("minecraft", "textures/entity/sheep/sheep_fur.png");
@@ -165,6 +176,10 @@ public class ClientRagdollRenderer {
             // model so the same setPos calls work for both.
             pigSaddleRoot = bakery.bakeLayer(ModelLayers.PIG_SADDLE);
             chickenRoot = ChickenModel.createBodyLayer().bakeRoot();
+            catRoot = bakery.bakeLayer(ModelLayers.CAT);
+            catCollarRoot = bakery.bakeLayer(ModelLayers.CAT_COLLAR);
+            batRoot = bakery.bakeLayer(ModelLayers.BAT);
+            beeRoot = bakery.bakeLayer(ModelLayers.BEE);
 
             mobArmorInner = new HumanoidModel<>(bakery.bakeLayer(ModelLayers.PLAYER_INNER_ARMOR));
             mobArmorOuter = new HumanoidModel<>(bakery.bakeLayer(ModelLayers.PLAYER_OUTER_ARMOR));
@@ -185,6 +200,10 @@ public class ClientRagdollRenderer {
             makeAllChildrenVisible(pigRoot);
             makeAllChildrenVisible(pigSaddleRoot);
             makeAllChildrenVisible(chickenRoot);
+            makeAllChildrenVisible(catRoot);
+            makeAllChildrenVisible(catCollarRoot);
+            makeAllChildrenVisible(batRoot);
+            makeAllChildrenVisible(beeRoot);
 
             initialized = true;
         } catch (Exception e) {
@@ -213,6 +232,9 @@ public class ClientRagdollRenderer {
 
         initModels();
         if (!initialized) return;
+
+        // Free wound textures owned by ragdolls destroyed since last frame (render thread only).
+        com.raiiiden.ragdollified.client.compat.BetterBloodOverlayCompat.releasePending();
 
         long renderStart = System.nanoTime();
 
@@ -340,7 +362,7 @@ public class ClientRagdollRenderer {
         renderPlayerBody(poseStack, buffer, light, distSq, torso, head, larm, rarm, lleg, rleg,
                 skin, isSlim,
                 ragdoll.getHelmet(), ragdoll.getChestplate(), ragdoll.getLeggings(), ragdoll.getBoots(),
-                playerEntity, liquidBobOffset(ragdoll));
+                playerEntity, liquidBobOffset(ragdoll), ragdoll.getOriginalEntityId());
     }
 
     /**
@@ -348,7 +370,9 @@ public class ClientRagdollRenderer {
      * live ragdoll path and the corpse renderer. Coordinates follow the ragdoll convention:
      * the poseStack must already be camera-relative; this method translates to the torso and
      * draws each part using its position-relative-to-torso (rotation absolute). Pass distSq=0
-     * to always render armor. skin must be non-null.
+     * to always render armor. skin must be non-null. {@code bloodRagdollId} keys the Better
+     * Blood Overlay capture for the live-ragdoll path; pass -1 (e.g. the corpse renderer) to
+     * skip the blood pass.
      */
     static void renderPlayerBody(PoseStack poseStack, MultiBufferSource buffer, int light, double distSq,
                                  RagdollTransform torso, RagdollTransform head,
@@ -356,7 +380,7 @@ public class ClientRagdollRenderer {
                                  RagdollTransform lleg, RagdollTransform rleg,
                                  ResourceLocation skin, boolean isSlim,
                                  ItemStack helmet, ItemStack chestplate, ItemStack leggings, ItemStack boots,
-                                 AbstractClientPlayer playerEntity, float bob) {
+                                 AbstractClientPlayer playerEntity, float bob, int bloodRagdollId) {
         if (torso == null) return;
         // The corpse renderer calls this directly and can run before any live ragdoll has — e.g. a
         // corpse loaded from disk on world (re)load with no ragdoll around, in which case
@@ -388,6 +412,13 @@ public class ClientRagdollRenderer {
             renderHumanoidPartPhysics(poseStack, vc, model.rightPants,  rleg,  torso, light, RagdollPart.RIGHT_LEG);
             renderHumanoidPartPhysics(poseStack, vc, model.leftSleeve,  larm,  torso, light, RagdollPart.LEFT_ARM);
             renderHumanoidPartPhysics(poseStack, vc, model.rightSleeve, rarm,  torso, light, RagdollPart.RIGHT_ARM);
+
+            // Procedural blood carried over from the live player (under armor). No-op unless
+            // Better Blood Overlay is installed and the player was bleeding at death; -1 (corpse
+            // renderer) skips it.
+            if (bloodRagdollId != -1) {
+                renderHumanoidBlood(bloodRagdollId, poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg, model, HumanoidScale.ADULT);
+            }
 
             double armorDistSq = RagdollifiedConfig.getArmorRenderDistanceSq();
             double geckoDistSq = RagdollifiedConfig.getGeckoLibArmorRenderDistanceSq();
@@ -728,15 +759,40 @@ public class ClientRagdollRenderer {
             HumanoidScale humanoidScale = !ragdoll.isBabyHumanoid() ? HumanoidScale.ADULT
                     : (ragdoll.babyScalesHead() ? HumanoidScale.BABY : HumanoidScale.BABY_UNIFORM);
 
+            // Better Blood Overlay: set to the HumanoidModel actually drawn (it shares vanilla
+            // UVs, which BBO's wound atlas is authored against), or flag the villager/illager
+            // paths which render on their own (non-HumanoidModel) trees. All left unset for
+            // non-humanoid families BBO doesn't cover (creeper, animals, chicken, bat, bee).
+            HumanoidModel<?> bloodModel = null;
+            boolean villagerBlood = false;
+            boolean illagerBlood = false;
+
             switch (modelType) {
                 case CREEPER:
                     renderCreeper(ragdoll, poseStack, vc, buffer, light, torso, head, larm, rarm, lleg, rleg);
                     break;
-                case QUADRUPED:
-                    renderQuadruped(ragdoll, poseStack, vc, buffer, light, torso, head, larm, rarm, lleg, rleg);
+                case QUADRUPED: {
+                    String mt = ragdoll.getMobType();
+                    if (mt.contains("cat") || mt.contains("ocelot")) {
+                        renderCat(ragdoll, poseStack, vc, light, torso, head, larm, rarm, lleg, rleg);
+                        // wasSheared() carries "tamed" for cats (see PhysicsHooks); tamed cats
+                        // wear a dyed collar. Ocelots are never tamed so this stays off for them.
+                        if (mt.contains("cat") && ragdoll.wasSheared() && catCollarRoot != null) {
+                            renderCatCollar(ragdoll, poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg);
+                        }
+                    } else {
+                        renderQuadruped(ragdoll, poseStack, vc, buffer, light, torso, head, larm, rarm, lleg, rleg);
+                    }
                     break;
+                }
                 case CHICKEN:
                     renderChicken(ragdoll, poseStack, vc, light, torso, head, larm, rarm, lleg, rleg);
+                    break;
+                case BAT:
+                    renderBat(ragdoll, poseStack, vc, light, torso, head, larm, rarm, lleg, rleg);
+                    break;
+                case BEE:
+                    renderBee(ragdoll, poseStack, vc, light, torso, head, larm, rarm, lleg, rleg);
                     break;
                 case ILLAGER: {
                     // ILLAGER covers three texture/UV families: zombie villagers (vanilla
@@ -746,24 +802,42 @@ public class ClientRagdollRenderer {
                     String mt = ragdoll.getMobType();
                     if (mt.contains("zombie_villager")) {
                         renderHumanoidMob(poseStack, vc, light, torso, head, larm, rarm, lleg, rleg, zombieVillagerModel, humanoidScale);
+                        bloodModel = zombieVillagerModel;
                     } else if (!mt.contains("zombie") && (mt.contains("villager") || mt.contains("wandering_trader"))) {
                         renderVillager(poseStack, vc, light, torso, head, larm, rarm, lleg, rleg, humanoidScale);
+                        villagerBlood = true;
                     } else {
                         renderIllager(ragdoll, poseStack, vc, light, torso, head, larm, rarm, lleg, rleg, humanoidScale);
+                        illagerBlood = true;
                     }
                     break;
                 }
                 case HUMANOID_SKELETON:
                     renderHumanoidMob(poseStack, vc, light, torso, head, larm, rarm, lleg, rleg, skeletonModel, humanoidScale);
+                    bloodModel = skeletonModel;
                     break;
                 case HUMANOID_DROWNED:
                     renderHumanoidMob(poseStack, vc, light, torso, head, larm, rarm, lleg, rleg, drownedModel, humanoidScale);
+                    bloodModel = drownedModel;
                     break;
                 default:
                     HumanoidModel<?> humanoidModel = ragdoll.getMobType().contains("piglin")
                             ? piglinModel : standardHumanoidModel;
                     renderHumanoidMob(poseStack, vc, light, torso, head, larm, rarm, lleg, rleg, humanoidModel, humanoidScale);
+                    bloodModel = humanoidModel;
                     break;
+            }
+
+            // Procedural blood carried over from the live mob, drawn on the same physics-posed
+            // parts (under armor/overlays). No-op unless Better Blood Overlay is installed and
+            // the mob was bleeding at death.
+            int bloodId = ragdoll.getOriginalEntityId();
+            if (bloodModel != null) {
+                renderHumanoidBlood(bloodId, poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg, bloodModel, humanoidScale);
+            } else if (villagerBlood) {
+                renderVillagerBlood(bloodId, poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg, humanoidScale);
+            } else if (illagerBlood) {
+                renderIllagerBlood(bloodId, poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg, humanoidScale);
             }
 
             for (MobOverlay overlay : overlaysFor(ragdoll)) {
@@ -819,6 +893,199 @@ public class ClientRagdollRenderer {
         // child), so the head pass above never draws it — render it explicitly to match
         // vanilla, which draws the hat for every humanoid (transparent on most mob textures).
         renderHumanoidPartPhysics(poseStack, vc, model.hat, head, torso, light, RagdollPart.HEAD, modelScale);
+    }
+
+    /**
+     * Better Blood Overlay pass for a humanoid ragdoll. Draws the procedural blood decals
+     * captured from the live mob onto each physics-posed part, exactly how BBO's own
+     * {@code renderWounds} draws them on a live mob (same model part, translucent, scaled
+     * 1.001 to sit just above the skin). No-op when BBO is absent or the mob wasn't bleeding.
+     */
+    private static void renderHumanoidBlood(int id, PoseStack poseStack, MultiBufferSource buffer,
+                                            int light, RagdollTransform torso, RagdollTransform head,
+                                            RagdollTransform larm, RagdollTransform rarm,
+                                            RagdollTransform lleg, RagdollTransform rleg,
+                                            HumanoidModel<?> model, HumanoidScale scale) {
+        if (!BetterBloodOverlayCompat.hasBlood(id)) return;
+
+        renderBloodPart(id, "body",      model.body,     poseStack, buffer, torso, torso, light, RagdollPart.TORSO,     scale);
+        renderBloodPart(id, "head",      model.head,     poseStack, buffer, head,  torso, light, RagdollPart.HEAD,      scale);
+        renderBloodPart(id, "left_leg",  model.leftLeg,  poseStack, buffer, lleg,  torso, light, RagdollPart.LEFT_LEG,  scale);
+        renderBloodPart(id, "right_leg", model.rightLeg, poseStack, buffer, rleg,  torso, light, RagdollPart.RIGHT_LEG, scale);
+        renderBloodPart(id, "left_arm",  model.leftArm,  poseStack, buffer, larm,  torso, light, RagdollPart.LEFT_ARM,  scale);
+        renderBloodPart(id, "right_arm", model.rightArm, poseStack, buffer, rarm,  torso, light, RagdollPart.RIGHT_ARM, scale);
+
+        // Second skin layer. Only the player profile maps wounds to these overlay parts, and
+        // BBO only draws them when overlay-blood is enabled — so this is a no-op for mobs
+        // (decalsForPart returns empty) and gated to match BBO for players.
+        if (model instanceof PlayerModel<?> pm && BetterBloodOverlayCompat.isOverlayBloodEnabled()) {
+            renderBloodPart(id, "hat",          pm.hat,         poseStack, buffer, head,  torso, light, RagdollPart.HEAD,      scale);
+            renderBloodPart(id, "jacket",       pm.jacket,      poseStack, buffer, torso, torso, light, RagdollPart.TORSO,     scale);
+            renderBloodPart(id, "left_sleeve",  pm.leftSleeve,  poseStack, buffer, larm,  torso, light, RagdollPart.LEFT_ARM,  scale);
+            renderBloodPart(id, "right_sleeve", pm.rightSleeve, poseStack, buffer, rarm,  torso, light, RagdollPart.RIGHT_ARM, scale);
+            renderBloodPart(id, "left_pants",   pm.leftPants,   poseStack, buffer, lleg,  torso, light, RagdollPart.LEFT_LEG,  scale);
+            renderBloodPart(id, "right_pants",  pm.rightPants,  poseStack, buffer, rleg,  torso, light, RagdollPart.RIGHT_LEG, scale);
+        }
+    }
+
+    /**
+     * Better Blood Overlay pass for an illager (pillager/vindicator/evoker/illusioner). Illagers
+     * render on the non-HumanoidModel {@link IllagerModel} but with the same per-part physics
+     * posing as humanoids, so we resolve the parts by name and reuse {@link #renderBloodPart}.
+     * BBO's illager profile also paints a combined "arms" site, but our model shows the split
+     * arms (that part is hidden), so drawing left_arm/right_arm reproduces it correctly.
+     */
+    private static void renderIllagerBlood(int id, PoseStack poseStack, MultiBufferSource buffer, int light,
+                                           RagdollTransform torso, RagdollTransform head,
+                                           RagdollTransform larm, RagdollTransform rarm,
+                                           RagdollTransform lleg, RagdollTransform rleg, HumanoidScale scale) {
+        if (!BetterBloodOverlayCompat.hasBlood(id)) return;
+        ModelPart root = illagerModel.root();
+        renderBloodPart(id, "body",      root.getChild("body"),      poseStack, buffer, torso, torso, light, RagdollPart.TORSO,     scale);
+        renderBloodPart(id, "head",      root.getChild("head"),      poseStack, buffer, head,  torso, light, RagdollPart.HEAD,      scale);
+        renderBloodPart(id, "left_leg",  root.getChild("left_leg"),  poseStack, buffer, lleg,  torso, light, RagdollPart.LEFT_LEG,  scale);
+        renderBloodPart(id, "right_leg", root.getChild("right_leg"), poseStack, buffer, rleg,  torso, light, RagdollPart.RIGHT_LEG, scale);
+        renderBloodPart(id, "left_arm",  root.getChild("left_arm"),  poseStack, buffer, larm,  torso, light, RagdollPart.LEFT_ARM,  scale);
+        renderBloodPart(id, "right_arm", root.getChild("right_arm"), poseStack, buffer, rarm,  torso, light, RagdollPart.RIGHT_ARM, scale);
+    }
+
+    /**
+     * Better Blood Overlay pass for a villager / wandering trader. These render on the vanilla
+     * {@link net.minecraft.client.model.VillagerModel} via the animal-part path, and BBO's
+     * villager profile maps both arms to a single combined "arms" site — so we mirror
+     * {@link #renderVillagerParts} exactly, drawing blood on the same physics-posed parts.
+     */
+    private static void renderVillagerBlood(int id, PoseStack poseStack, MultiBufferSource buffer, int light,
+                                            RagdollTransform torso, RagdollTransform head,
+                                            RagdollTransform larm, RagdollTransform rarm,
+                                            RagdollTransform lleg, RagdollTransform rleg, HumanoidScale scale) {
+        if (!BetterBloodOverlayCompat.hasBlood(id)) return;
+        ModelPart headPart = villagerRoot.getChild("head");
+        ModelPart body     = villagerRoot.getChild("body");
+        ModelPart arms     = villagerRoot.getChild("arms");
+        ModelPart leftLeg  = villagerRoot.getChild("left_leg");
+        ModelPart rightLeg = villagerRoot.getChild("right_leg");
+
+        renderBloodVillagerPart(id, "body",      body,     poseStack, buffer, torso, torso, light, scale.body());
+        renderBloodVillagerPart(id, "head",      headPart, poseStack, buffer, head,  torso, light, scale.head());
+        renderBloodVillagerPart(id, "left_leg",  leftLeg,  poseStack, buffer, lleg,  torso, light, scale.body());
+        renderBloodVillagerPart(id, "right_leg", rightLeg, poseStack, buffer, rleg,  torso, light, scale.body());
+        // Combined "arms" part, anchored to the torso with the same offsets/pitch as the base
+        // pass (see renderVillagerParts). Both arm-limb wounds map here.
+        var armDecals = BetterBloodOverlayCompat.decalsForPart(id, "arms");
+        if (!armDecals.isEmpty()) {
+            renderBloodAnimalPart(arms, poseStack, buffer, torso, torso, 0.0F, -3.0F, -1.0F, -0.75F, light, scale.body(), armDecals);
+        }
+    }
+
+    /** Blood on one villager body part, centred on its physics body exactly like
+     *  {@link #renderVillagerPart}. */
+    private static void renderBloodVillagerPart(int id, String partName, ModelPart part,
+                                                PoseStack poseStack, MultiBufferSource buffer,
+                                                RagdollTransform transform, RagdollTransform torso,
+                                                int light, float modelScale) {
+        var decals = BetterBloodOverlayCompat.decalsForPart(id, partName);
+        if (decals.isEmpty()) return;
+        org.joml.Vector3f off = setPosForPart(part, 0);
+        renderBloodAnimalPart(part, poseStack, buffer, transform, torso, off.x, off.y, off.z, 0, light, modelScale, decals);
+    }
+
+    /**
+     * Pose {@code part} to its physics transform exactly like {@link #renderAnimalPart}, then
+     * draw the given blood decals over it (1.001 scale, translucent) — the animal-path
+     * counterpart of {@link #renderBloodPart}.
+     */
+    private static void renderBloodAnimalPart(ModelPart part, PoseStack poseStack, MultiBufferSource buffer,
+                                              RagdollTransform transform, RagdollTransform torso,
+                                              float setPosX, float setPosY, float setPosZ,
+                                              float defaultXRot, int light, float modelScale,
+                                              java.util.List<BetterBloodOverlayCompat.Decal> decals) {
+        if (transform == null) return;
+
+        poseStack.pushPose();
+        try {
+            poseStack.translate(
+                    transform.position.x - torso.position.x,
+                    transform.position.y - torso.position.y,
+                    transform.position.z - torso.position.z
+            );
+
+            tempQuat.set(transform.rotation.x, transform.rotation.y, transform.rotation.z, transform.rotation.w);
+            tempQuat.rotateZ((float) Math.PI);
+            poseStack.mulPose(tempQuat);
+            if (modelScale != 1.0f) {
+                poseStack.scale(modelScale, modelScale, modelScale);
+            }
+
+            part.setPos(setPosX, setPosY, setPosZ);
+            part.xRot = defaultXRot;
+            part.yRot = 0;
+            part.zRot = 0;
+
+            poseStack.pushPose();
+            poseStack.scale(1.001f, 1.001f, 1.001f);
+            for (BetterBloodOverlayCompat.Decal d : decals) {
+                VertexConsumer bvc = buffer.getBuffer(RenderType.entityTranslucent(d.texture()));
+                part.render(poseStack, bvc, light, OverlayTexture.NO_OVERLAY, d.r(), d.g(), d.b(), d.alpha());
+            }
+            poseStack.popPose();
+        } finally {
+            poseStack.popPose();
+        }
+    }
+
+    /**
+     * Pose {@code part} to its physics transform (identically to
+     * {@link #renderHumanoidPartPhysics}) and draw any blood decals mapped to {@code partName}.
+     */
+    private static void renderBloodPart(int ragdollId, String partName, ModelPart part,
+                                        PoseStack poseStack, MultiBufferSource buffer,
+                                        RagdollTransform transform, RagdollTransform torso,
+                                        int light, RagdollPart ragdollPart, HumanoidScale scale) {
+        if (transform == null) return;
+        var decals = BetterBloodOverlayCompat.decalsForPart(ragdollId, partName);
+        if (decals.isEmpty()) return;
+
+        poseStack.pushPose();
+        try {
+            poseStack.translate(
+                    transform.position.x - torso.position.x,
+                    transform.position.y - torso.position.y,
+                    transform.position.z - torso.position.z
+            );
+
+            tempQuat.set(transform.rotation.x, transform.rotation.y, transform.rotation.z, transform.rotation.w);
+            tempQuat.rotateZ((float) Math.PI);
+            poseStack.mulPose(tempQuat);
+            float ms = scale.forPart(ragdollPart);
+            if (ms != 1.0f) {
+                poseStack.scale(ms, ms, ms);
+            }
+
+            switch (ragdollPart) {
+                case HEAD:      part.setPos(0, 4, 0);    break;
+                case TORSO:     part.setPos(0, -6, 0);   break;
+                case LEFT_ARM:  part.setPos(-1, -4, 0);  break;
+                case RIGHT_ARM: part.setPos(1, -4, 0);   break;
+                case LEFT_LEG:
+                case RIGHT_LEG: part.setPos(0, -6, 0);   break;
+            }
+            part.xRot = 0;
+            part.yRot = 0;
+            part.zRot = 0;
+
+            // Nudge just above the skin so blood never z-fights with the base texture — same
+            // 1.001 scale BBO uses in renderWounds.
+            poseStack.pushPose();
+            poseStack.scale(1.001f, 1.001f, 1.001f);
+            for (BetterBloodOverlayCompat.Decal d : decals) {
+                VertexConsumer bvc = buffer.getBuffer(RenderType.entityTranslucent(d.texture()));
+                part.render(poseStack, bvc, light, OverlayTexture.NO_OVERLAY, d.r(), d.g(), d.b(), d.alpha());
+            }
+            poseStack.popPose();
+        } finally {
+            poseStack.popPose();
+        }
     }
 
     private static void renderIllager(ClientRagdoll ragdoll, PoseStack poseStack, VertexConsumer vc, int light,
@@ -995,6 +1262,172 @@ public class ClientRagdollRenderer {
         renderAnimalPart(poseStack, vc, rightLeg,  rleg,  torso, rightLegOff.x,  rightLegOff.y,  rightLegOff.z,  0,      light, bodyScale);
         renderAnimalPart(poseStack, vc, leftWing,  larm,  torso, leftWingOff.x,  leftWingOff.y,  leftWingOff.z,  0,      light, bodyScale);
         renderAnimalPart(poseStack, vc, rightWing, rarm,  torso, rightWingOff.x, rightWingOff.y, rightWingOff.z, 0,      light, bodyScale);
+    }
+
+    /**
+     * Cat / ocelot. Same six-body quadruped layout as cows/pigs (body, head, four legs) but on
+     * the OcelotModel geometry, plus the two tail segments anchored to the torso so the tail
+     * tumbles with the body. Front and hind legs differ in length in the model; the renderer
+     * centres each rendered leg cube on its own physics body via setPosForPart, so the visuals
+     * follow the real cube sizes regardless of the (uniform-ish) physics boxes.
+     */
+    private static void renderCat(ClientRagdoll ragdoll, PoseStack poseStack, VertexConsumer vc, int light,
+                                  RagdollTransform torso, RagdollTransform head,
+                                  RagdollTransform larm, RagdollTransform rarm,
+                                  RagdollTransform lleg, RagdollTransform rleg) {
+        ModelPart root = catRoot;
+        ModelPart body = root.getChild("body");
+        ModelPart headPart = root.getChild("head");
+        ModelPart rightHind = root.getChild("right_hind_leg");
+        ModelPart leftHind = root.getChild("left_hind_leg");
+        ModelPart rightFront = root.getChild("right_front_leg");
+        ModelPart leftFront = root.getChild("left_front_leg");
+        ModelPart tail1 = root.getChild("tail1");
+        ModelPart tail2 = root.getChild("tail2");
+
+        float halfPI = (float) (Math.PI / 2);
+        org.joml.Vector3f bodyOff       = setPosForPart(body, halfPI);
+        org.joml.Vector3f headOff       = setPosForPart(headPart, 0);
+        org.joml.Vector3f leftHindOff   = setPosForPart(leftHind, 0);
+        org.joml.Vector3f rightHindOff  = setPosForPart(rightHind, 0);
+        org.joml.Vector3f leftFrontOff  = setPosForPart(leftFront, 0);
+        org.joml.Vector3f rightFrontOff = setPosForPart(rightFront, 0);
+
+        // CatRenderer draws the model at 0.8×. Kittens are NOT a uniform shrink: OcelotModel has
+        // scaleHead=true (babyHeadScale=2), so the head renders at 1.5/2 = 0.75× and the body at
+        // 1.0/2 = 0.5× (AgeableListModel). Adults use 1.0× for both. Everything then ×0.8.
+        boolean baby = ragdoll.usesBabyBodyScale();
+        float bodyScale = (baby ? 0.5f  : 1.0f) * 0.8f;
+        float headScale = (baby ? 0.75f : 1.0f) * 0.8f;
+        renderAnimalPart(poseStack, vc, body,       torso, torso, bodyOff.x,       bodyOff.y,       bodyOff.z,       halfPI, light, bodyScale);
+        renderAnimalPart(poseStack, vc, headPart,   head,  torso, headOff.x,       headOff.y,       headOff.z,       0,      light, headScale);
+        renderAnimalPart(poseStack, vc, leftHind,   lleg,  torso, leftHindOff.x,   leftHindOff.y,   leftHindOff.z,   0,      light, bodyScale);
+        renderAnimalPart(poseStack, vc, rightHind,  rleg,  torso, rightHindOff.x,  rightHindOff.y,  rightHindOff.z,  0,      light, bodyScale);
+        renderAnimalPart(poseStack, vc, leftFront,  larm,  torso, leftFrontOff.x,  leftFrontOff.y,  leftFrontOff.z,  0,      light, bodyScale);
+        renderAnimalPart(poseStack, vc, rightFront, rarm,  torso, rightFrontOff.x, rightFrontOff.y, rightFrontOff.z, 0,      light, bodyScale);
+        // Tail segments ride the torso. setPos = part pivot − body-cube centre (root coords),
+        // matching how the villager arms unit is anchored; their resting xRot mirrors vanilla.
+        renderAnimalPart(poseStack, vc, tail1, torso, torso, 0, -2, 7,  0.9f,      light, bodyScale);
+        renderAnimalPart(poseStack, vc, tail2, torso, torso, 0,  3, 13, 1.7278761f, light, bodyScale);
+    }
+
+    /**
+     * Dyed collar overlay for a tamed cat. Mirrors {@link #renderCat}'s body/head/leg placement
+     * (same 0.8× scale) on the CAT_COLLAR geometry, tinted by the collar dye colour. The tail is
+     * skipped — the collar texture is empty there. Collar colour rides the cat's dyeColorId.
+     */
+    private static void renderCatCollar(ClientRagdoll ragdoll, PoseStack poseStack, MultiBufferSource buffer, int light,
+                                        RagdollTransform torso, RagdollTransform head,
+                                        RagdollTransform larm, RagdollTransform rarm,
+                                        RagdollTransform lleg, RagdollTransform rleg) {
+        ModelPart root = catCollarRoot;
+        ModelPart body = root.getChild("body");
+        ModelPart headPart = root.getChild("head");
+        ModelPart rightHind = root.getChild("right_hind_leg");
+        ModelPart leftHind = root.getChild("left_hind_leg");
+        ModelPart rightFront = root.getChild("right_front_leg");
+        ModelPart leftFront = root.getChild("left_front_leg");
+
+        net.minecraft.world.item.DyeColor color =
+                net.minecraft.world.item.DyeColor.byId(ragdoll.getDyeColorId() & 0xF);
+        float[] rgb = color.getTextureDiffuseColors();
+        VertexConsumer vc = buffer.getBuffer(RenderType.entityCutoutNoCull(CAT_COLLAR_TEXTURE));
+
+        float halfPI = (float) (Math.PI / 2);
+        org.joml.Vector3f bodyOff       = setPosForPart(body, halfPI);
+        org.joml.Vector3f headOff       = setPosForPart(headPart, 0);
+        org.joml.Vector3f leftHindOff   = setPosForPart(leftHind, 0);
+        org.joml.Vector3f rightHindOff  = setPosForPart(rightHind, 0);
+        org.joml.Vector3f leftFrontOff  = setPosForPart(leftFront, 0);
+        org.joml.Vector3f rightFrontOff = setPosForPart(rightFront, 0);
+
+        boolean baby = ragdoll.usesBabyBodyScale();
+        float bodyScale = (baby ? 0.5f  : 1.0f) * 0.8f;
+        float headScale = (baby ? 0.75f : 1.0f) * 0.8f;
+        renderAnimalPartTinted(poseStack, vc, body,       torso, torso, bodyOff.x,       bodyOff.y,       bodyOff.z,       halfPI, light, rgb[0], rgb[1], rgb[2], bodyScale);
+        renderAnimalPartTinted(poseStack, vc, headPart,   head,  torso, headOff.x,       headOff.y,       headOff.z,       0,      light, rgb[0], rgb[1], rgb[2], headScale);
+        renderAnimalPartTinted(poseStack, vc, leftHind,   lleg,  torso, leftHindOff.x,   leftHindOff.y,   leftHindOff.z,   0,      light, rgb[0], rgb[1], rgb[2], bodyScale);
+        renderAnimalPartTinted(poseStack, vc, rightHind,  rleg,  torso, rightHindOff.x,  rightHindOff.y,  rightHindOff.z,  0,      light, rgb[0], rgb[1], rgb[2], bodyScale);
+        renderAnimalPartTinted(poseStack, vc, leftFront,  larm,  torso, leftFrontOff.x,  leftFrontOff.y,  leftFrontOff.z,  0,      light, rgb[0], rgb[1], rgb[2], bodyScale);
+        renderAnimalPartTinted(poseStack, vc, rightFront, rarm,  torso, rightFrontOff.x, rightFrontOff.y, rightFrontOff.z, 0,      light, rgb[0], rgb[1], rgb[2], bodyScale);
+    }
+
+    /**
+     * Bat. Torso = main body (the lower membrane hangs below it, as in vanilla), head above,
+     * the two wings in the arm slots, and the two membrane tips in the leg slots. Each wing and
+     * tip is drawn detached from the vanilla parent/child hierarchy so it can ride its own
+     * physics body — visibility is toggled so nothing draws twice.
+     */
+    private static void renderBat(ClientRagdoll ragdoll, PoseStack poseStack, VertexConsumer vc, int light,
+                                  RagdollTransform torso, RagdollTransform head,
+                                  RagdollTransform larm, RagdollTransform rarm,
+                                  RagdollTransform lleg, RagdollTransform rleg) {
+        ModelPart root = batRoot;
+        ModelPart body = root.getChild("body");
+        ModelPart headPart = root.getChild("head");
+        ModelPart leftWing = body.getChild("left_wing");
+        ModelPart rightWing = body.getChild("right_wing");
+        ModelPart leftTip = leftWing.getChild("left_wing_tip");
+        ModelPart rightTip = rightWing.getChild("right_wing_tip");
+
+        // BatRenderer draws the model at 0.35×; the physics bodies are authored to match.
+        final float bs = 0.35f;
+        org.joml.Vector3f headOff = setPosForPart(headPart, 0);
+        org.joml.Vector3f lwOff = setPosForPart(leftWing, 0);
+        org.joml.Vector3f rwOff = setPosForPart(rightWing, 0);
+
+        try {
+            // Draw the body (main cube + membrane) without the wings, which ride their own bodies.
+            // The membrane is part of "body"; centre the MAIN 6x12x6 cube (centre y=10) so it
+            // hangs below exactly like vanilla — setPosForPart can't be used as it would average
+            // in the membrane cube.
+            leftWing.visible = false; rightWing.visible = false;
+            renderAnimalPart(poseStack, vc, body, torso, torso, 0, -10, 0, 0, light, bs);
+            renderAnimalPart(poseStack, vc, headPart, head, torso, headOff.x, headOff.y, headOff.z, 0, light, bs);
+
+            // Each wing is one rigid body: draw the wing with its tip (the wing's child) still
+            // visible so wing + membrane tip move together.
+            leftWing.visible = true; rightWing.visible = true;
+            renderAnimalPart(poseStack, vc, leftWing, larm, torso, lwOff.x, lwOff.y, lwOff.z, 0, light, bs);
+            renderAnimalPart(poseStack, vc, rightWing, rarm, torso, rwOff.x, rwOff.y, rwOff.z, 0, light, bs);
+        } finally {
+            leftWing.visible = true; rightWing.visible = true;
+            leftTip.visible = true; rightTip.visible = true;
+        }
+    }
+
+    /**
+     * Bee. Torso = body box (draws the antennae + stinger as its children), the two flat wings
+     * in the arm slots, and the leg strips grouped into the leg slots (front+middle on the left,
+     * back on the right). The bee has no separate head model part, so the head physics stub is
+     * not drawn.
+     */
+    private static void renderBee(ClientRagdoll ragdoll, PoseStack poseStack, VertexConsumer vc, int light,
+                                  RagdollTransform torso, RagdollTransform head,
+                                  RagdollTransform larm, RagdollTransform rarm,
+                                  RagdollTransform lleg, RagdollTransform rleg) {
+        ModelPart bone = beeRoot.getChild("bone");
+        ModelPart body = bone.getChild("body");
+        ModelPart leftWing = bone.getChild("left_wing");
+        ModelPart rightWing = bone.getChild("right_wing");
+        ModelPart frontLegs = bone.getChild("front_legs");
+        ModelPart middleLegs = bone.getChild("middle_legs");
+        ModelPart backLegs = bone.getChild("back_legs");
+
+        org.joml.Vector3f bodyOff = setPosForPart(body, 0);
+        org.joml.Vector3f lwOff = setPosForPart(leftWing, 0);
+        org.joml.Vector3f rwOff = setPosForPart(rightWing, 0);
+
+        // Baby bees render at half scale (vanilla). Wings ride their own bodies; the tiny flat
+        // leg strips stay glued to the body, so they're anchored to the torso via
+        // setPos = part pivot − body-cube centre (bone-space), like the cat tail / villager arms.
+        float bodyScale = ragdoll.isBabyBee() ? 0.5f : 1.0f;
+        renderAnimalPart(poseStack, vc, body, torso, torso, bodyOff.x, bodyOff.y, bodyOff.z, 0, light, bodyScale);
+        renderAnimalPart(poseStack, vc, leftWing, larm, torso, lwOff.x, lwOff.y, lwOff.z, 0, light, bodyScale);
+        renderAnimalPart(poseStack, vc, rightWing, rarm, torso, rwOff.x, rwOff.y, rwOff.z, 0, light, bodyScale);
+        renderAnimalPart(poseStack, vc, frontLegs,  torso, torso, 1.5f, 3.5f, -2f, 0, light, bodyScale);
+        renderAnimalPart(poseStack, vc, middleLegs, torso, torso, 1.5f, 3.5f,  0f, 0, light, bodyScale);
+        renderAnimalPart(poseStack, vc, backLegs,   torso, torso, 1.5f, 3.5f,  2f, 0, light, bodyScale);
     }
 
     private static void renderMobVanillaArmor(ClientRagdoll ragdoll, PoseStack poseStack, MultiBufferSource buffer,
@@ -1283,7 +1716,12 @@ public class ClientRagdollRenderer {
         if (mobType.contains("mooshroom")) return new ResourceLocation("minecraft", "textures/entity/cow/mooshroom.png");
         if (mobType.contains("sheep")) return new ResourceLocation("minecraft", "textures/entity/sheep/sheep.png");
         if (mobType.contains("pig")) return new ResourceLocation("minecraft", "textures/entity/pig/pig.png");
+        // Ocelot before cat: "ocelot" doesn't contain "cat", but keep the specific case first.
+        if (mobType.contains("ocelot")) return new ResourceLocation("minecraft", "textures/entity/cat/ocelot.png");
+        if (mobType.contains("cat")) return new ResourceLocation("minecraft", "textures/entity/cat/tabby.png");
         if (mobType.contains("chicken")) return new ResourceLocation("minecraft", "textures/entity/chicken.png");
+        if (mobType.contains("bat")) return new ResourceLocation("minecraft", "textures/entity/bat.png");
+        if (mobType.contains("bee")) return new ResourceLocation("minecraft", "textures/entity/bee/bee.png");
         return new ResourceLocation("minecraft", "textures/entity/zombie/zombie.png");
     }
 

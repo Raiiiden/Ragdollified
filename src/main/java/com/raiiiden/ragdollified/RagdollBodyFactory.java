@@ -32,7 +32,8 @@ public final class RagdollBodyFactory {
         COW,
         PIG,
         SHEEP,
-        CHICKEN
+        CHICKEN,
+        CAT
     }
 
     // ===========================
@@ -76,7 +77,12 @@ public final class RagdollBodyFactory {
                              Vector3f pos, Quat4f baseQuat, float scale,
                              Vector3f initialVel, MobPoseCapture.MobPose capturedPose,
                              BodyProfile bodyProfile, boolean isBaby, boolean babyBigHead) {
-        float bodyScale = bodyProfile == BodyProfile.DEFAULT ? scale : 1.0f;
+        // Bat/bee physics is authored at the vanilla model's natural pixel size (matching the
+        // unscaled BatModel/BeeModel the renderer draws), so keep their body scale at 1.0
+        // instead of the bbHeight-derived scale used for generic quadrupeds.
+        float bodyScale = (bodyProfile == BodyProfile.DEFAULT
+                && modelType != MobModelHelper.ModelType.BAT
+                && modelType != MobModelHelper.ModelType.BEE) ? scale : 1.0f;
 
         Quaternionf q = new Quaternionf(baseQuat.x, baseQuat.y, baseQuat.z, baseQuat.w);
         Function<Vector3f, Vector3f> worldOffset = local -> {
@@ -95,6 +101,12 @@ public final class RagdollBodyFactory {
             case CHICKEN:
                 buildQuadruped(world, parts, pos, baseQuat, bodyScale, initialVel, capturedPose,
                         modelType == MobModelHelper.ModelType.CHICKEN, bodyProfile, isBaby);
+                break;
+            case BAT:
+                buildBat(world, parts, pos, baseQuat, bodyScale, initialVel, capturedPose);
+                break;
+            case BEE:
+                buildBee(world, parts, pos, baseQuat, bodyScale, initialVel, capturedPose, isBaby);
                 break;
             default:
                 buildHumanoid(world, parts, pos, baseQuat, bodyScale, initialVel, capturedPose, worldOffset, isBaby, babyBigHead);
@@ -160,6 +172,65 @@ public final class RagdollBodyFactory {
         parts.add(makePart(world, new BoxShape(new Vector3f(0.12f*s,0.3f*s,  0.12f*s)),  brPos,   brRot,     3*s, vel));
     }
 
+    /**
+     * Bat. One body per wing (tip included, rendered as the wing's rigid child), plus torso and
+     * head. The two leg slots are unused by the bat model, so they hold tiny hidden stubs welded
+     * inside the torso — just enough to fill the six-body skeleton. Physics is authored at the
+     * model's 0.35 render scale (BatRenderer#scale) so the ragdoll matches the live mob's size.
+     */
+    private static void buildBat(DiscreteDynamicsWorld world, List<RigidBody> parts,
+                                 Vector3f pos, Quat4f baseQuat, float s,
+                                 Vector3f vel, MobPoseCapture.MobPose pose) {
+        final float ns = s * 0.35f; // BatRenderer draws the model at 0.35×
+        Quat4f torsoRot = pose != null ? mul(baseQuat, pose.getRotationQuaternion(RagdollPart.TORSO))     : baseQuat;
+        Quat4f headRot  = pose != null ? mul(baseQuat, pose.getRotationQuaternion(RagdollPart.HEAD))      : baseQuat;
+        Quat4f lwRot    = pose != null ? mul(baseQuat, pose.getRotationQuaternion(RagdollPart.LEFT_ARM))  : baseQuat;
+        Quat4f rwRot    = pose != null ? mul(baseQuat, pose.getRotationQuaternion(RagdollPart.RIGHT_ARM)) : baseQuat;
+        Quat4f lsRot    = pose != null ? mul(baseQuat, pose.getRotationQuaternion(RagdollPart.LEFT_LEG))  : baseQuat;
+        Quat4f rsRot    = pose != null ? mul(baseQuat, pose.getRotationQuaternion(RagdollPart.RIGHT_LEG)) : baseQuat;
+        Vector3f headPos = calcPos(pos, torsoRot, new Vector3f(0f, 0.625f*ns, 0f),                 headRot, new Vector3f());
+        Vector3f lwPos   = calcPos(pos, torsoRot, new Vector3f(-0.4375f*ns, 0.0625f*ns, 0.125f*ns), lwRot,  new Vector3f());
+        Vector3f rwPos   = calcPos(pos, torsoRot, new Vector3f( 0.4375f*ns, 0.0625f*ns, 0.125f*ns), rwRot,  new Vector3f());
+        Vector3f lsPos   = calcPos(pos, torsoRot, new Vector3f(-0.06f*ns, -0.1f*ns, 0f),             lsRot,  new Vector3f());
+        Vector3f rsPos   = calcPos(pos, torsoRot, new Vector3f( 0.06f*ns, -0.1f*ns, 0f),             rsRot,  new Vector3f());
+        parts.add(makePart(world, new BoxShape(new Vector3f(0.1875f*ns, 0.375f*ns,  0.1875f*ns)), pos,     torsoRot, 4*ns,    vel)); // TORSO
+        parts.add(makePart(world, new BoxShape(new Vector3f(0.1875f*ns, 0.1875f*ns, 0.1875f*ns)), headPos, headRot,  2*ns,    vel)); // HEAD
+        parts.add(makePart(world, new BoxShape(new Vector3f(0.05f*ns,   0.05f*ns,   0.05f*ns)),   lsPos,   lsRot,    0.3f*ns, vel)); // LEFT_LEG  stub
+        parts.add(makePart(world, new BoxShape(new Vector3f(0.05f*ns,   0.05f*ns,   0.05f*ns)),   rsPos,   rsRot,    0.3f*ns, vel)); // RIGHT_LEG stub
+        parts.add(makePart(world, new BoxShape(new Vector3f(0.3125f*ns, 0.5f*ns,    0.05f*ns)),   lwPos,   lwRot,    1.5f*ns, vel)); // LEFT_ARM  = left wing (+tip)
+        parts.add(makePart(world, new BoxShape(new Vector3f(0.3125f*ns, 0.5f*ns,    0.05f*ns)),   rwPos,   rwRot,    1.5f*ns, vel)); // RIGHT_ARM = right wing (+tip)
+    }
+
+    /**
+     * Bee. Torso = body box (carries the antennae + stinger in the render), a small hidden head
+     * stub at the front for the neck joint, and the two flat wings in the arm slots. The bee's
+     * legs are tiny flat strips that stay attached to the body (rendered on the torso), so the
+     * two leg slots hold hidden stubs welded inside the torso. Baby bees are built (and rendered)
+     * at half scale to match vanilla.
+     */
+    private static void buildBee(DiscreteDynamicsWorld world, List<RigidBody> parts,
+                                 Vector3f pos, Quat4f baseQuat, float s,
+                                 Vector3f vel, MobPoseCapture.MobPose pose, boolean isBaby) {
+        final float ns = isBaby ? s * 0.5f : s;
+        Quat4f torsoRot = pose != null ? mul(baseQuat, pose.getRotationQuaternion(RagdollPart.TORSO))     : baseQuat;
+        Quat4f headRot  = pose != null ? mul(baseQuat, pose.getRotationQuaternion(RagdollPart.HEAD))      : baseQuat;
+        Quat4f lwRot    = pose != null ? mul(baseQuat, pose.getRotationQuaternion(RagdollPart.LEFT_ARM))  : baseQuat;
+        Quat4f rwRot    = pose != null ? mul(baseQuat, pose.getRotationQuaternion(RagdollPart.RIGHT_ARM)) : baseQuat;
+        Quat4f lsRot    = pose != null ? mul(baseQuat, pose.getRotationQuaternion(RagdollPart.LEFT_LEG))  : baseQuat;
+        Quat4f rsRot    = pose != null ? mul(baseQuat, pose.getRotationQuaternion(RagdollPart.RIGHT_LEG)) : baseQuat;
+        Vector3f headPos = calcPos(pos, torsoRot, new Vector3f(0f, 0.1f*ns, -0.28f*ns),           headRot, new Vector3f());
+        Vector3f lwPos   = calcPos(pos, torsoRot, new Vector3f(-0.414f*ns, 0.219f*ns, -0.079f*ns), lwRot,  new Vector3f());
+        Vector3f rwPos   = calcPos(pos, torsoRot, new Vector3f( 0.414f*ns, 0.219f*ns, -0.079f*ns), rwRot,  new Vector3f());
+        Vector3f lsPos   = calcPos(pos, torsoRot, new Vector3f(-0.06f*ns, -0.05f*ns, 0f),           lsRot,  new Vector3f());
+        Vector3f rsPos   = calcPos(pos, torsoRot, new Vector3f( 0.06f*ns, -0.05f*ns, 0f),           rsRot,  new Vector3f());
+        parts.add(makePart(world, new BoxShape(new Vector3f(0.21875f*ns, 0.21875f*ns, 0.3125f*ns)), pos,     torsoRot, 4*ns,    vel)); // TORSO = body
+        parts.add(makePart(world, new BoxShape(new Vector3f(0.08f*ns,    0.08f*ns,    0.08f*ns)),    headPos, headRot,  0.5f*ns, vel)); // HEAD stub
+        parts.add(makePart(world, new BoxShape(new Vector3f(0.05f*ns,    0.05f*ns,    0.05f*ns)),    lsPos,   lsRot,    0.3f*ns, vel)); // LEFT_LEG  stub
+        parts.add(makePart(world, new BoxShape(new Vector3f(0.05f*ns,    0.05f*ns,    0.05f*ns)),    rsPos,   rsRot,    0.3f*ns, vel)); // RIGHT_LEG stub
+        parts.add(makePart(world, new BoxShape(new Vector3f(0.28f*ns,    0.02f*ns,    0.1875f*ns)),  lwPos,   lwRot,    0.5f*ns, vel)); // LEFT_ARM  = left wing
+        parts.add(makePart(world, new BoxShape(new Vector3f(0.28f*ns,    0.02f*ns,    0.1875f*ns)),  rwPos,   rwRot,    0.5f*ns, vel)); // RIGHT_ARM = right wing
+    }
+
     private static void buildQuadruped(DiscreteDynamicsWorld world, List<RigidBody> parts,
                                        Vector3f torsoPos, Quat4f baseQuat, float s,
                                        Vector3f vel, MobPoseCapture.MobPose pose,
@@ -198,7 +269,11 @@ public final class RagdollBodyFactory {
             float headY, float headZ, float headCenterZ, float headX, float headHalfY, float headHalfZ,
             float legX, float legY, float frontZ, float hindZ, float legCenterY, float legHalfX, float legHalfY, float legHalfZ,
             float torsoHalfX, float torsoHalfY, float torsoHalfZ,
-            float torsoMass, float headMass, float legMass) {}
+            float torsoMass, float headMass, float legMass,
+            // Hind-leg vertical layout, separated from the front legs so mobs whose front
+            // and hind legs differ in length or attach height (cats) place both correctly.
+            // Cow/pig/sheep pass the same values as their front legs → identical behaviour.
+            float hindLegY, float hindLegCenterY, float hindLegHalfY) {}
 
     private static QuadLayout layoutFor(BodyProfile profile, boolean baby) {
         BodyProfile p = profile == BodyProfile.DEFAULT ? BodyProfile.COW : profile;
@@ -210,19 +285,38 @@ public final class RagdollBodyFactory {
                     0.1875f * b, -0.25f * b, 0.3125f * b, 0.4375f * b, -0.075f * b,
                     0.105f * b, 0.16f * b, 0.105f * b,
                     0.28f * b, 0.23f * b, 0.44f * b,
-                    6f, 2.5f, 1.6f);
+                    6f, 2.5f, 1.6f,
+                    -0.25f * b, -0.075f * b, 0.16f * b);
             case SHEEP -> new QuadLayout(
                     (baby ? 0.125f : 0.25f), -0.425f * hb, -0.16f * hb, 0.1875f, 0.1875f, 0.25f,
                     0.1875f * b, -0.1875f * b, 0.3125f * b, 0.4375f * b, -0.235f * b,
                     0.105f * b, 0.34f * b, 0.105f * b,
                     0.23f * b, 0.17f * b, 0.44f * b,
-                    8f, 2.5f, 2.2f);
+                    8f, 2.5f, 2.2f,
+                    -0.1875f * b, -0.235f * b, 0.34f * b);
+            // All values are the natural OcelotModel geometry × 0.8 (CatRenderer#scale draws the
+            // model at 0.8×), so the physics bodies match the rendered cat/ocelot size. Unlike
+            // cow/pig/sheep (scaleHead=false → baby head stays 1.0×), OcelotModel has
+            // scaleHead=true with babyHeadScale=2, so a kitten's head renders at 1.5/2 = 0.75×
+            // while its body renders at 1.0/2 = 0.5×. The head box + offsets use that 0.75 factor
+            // (chf) so the physics head matches the rendered head instead of staying adult-sized.
+            case CAT -> {
+                float chf = baby ? 0.75f : 1.0f;
+                yield new QuadLayout(
+                        0.1f * b, -0.4f * b, -0.125f * chf, 0.125f * chf, 0.1f * chf, 0.125f * chf,
+                        0.0576f * b, 0.145f * b, 0.25f * b, 0.3f * b, -0.25f * b,
+                        0.05f * b, 0.25f * b, 0.05f * b,
+                        0.1f * b, 0.15f * b, 0.4f * b,
+                        3f, 1f, 0.6f,
+                        -0.05f * b, -0.15f * b, 0.15f * b);
+            }
             case COW, DEFAULT -> new QuadLayout(
                     (baby ? 0.11f : 0.22f), -0.56f * hb, -0.15f * hb, 0.3125f, 0.28125f, 0.1875f,
                     0.25f * b, -0.3125f * b, 0.4375f * b, 0.375f * b, -0.235f * b,
                     0.105f * b, 0.34f * b, 0.105f * b,
                     0.34f * b, 0.29f * b, 0.50f * b,
-                    10f, 3f, 3f);
+                    10f, 3f, 3f,
+                    -0.3125f * b, -0.235f * b, 0.34f * b);
             default -> throw new IllegalStateException("Unexpected quadruped profile " + p);
         };
     }
@@ -234,12 +328,12 @@ public final class RagdollBodyFactory {
         Vector3f headPos = calcPos(torsoPos, torsoRot, new Vector3f(0f, l.headY*s, l.headZ*s), headRot, new Vector3f(0f, 0f, l.headCenterZ*s));
         Vector3f flPos   = calcPos(torsoPos, torsoRot, new Vector3f( l.legX*s, l.legY*s, -l.frontZ*s), flRot, new Vector3f(0f, l.legCenterY*s, 0f));
         Vector3f frPos   = calcPos(torsoPos, torsoRot, new Vector3f(-l.legX*s, l.legY*s, -l.frontZ*s), frRot, new Vector3f(0f, l.legCenterY*s, 0f));
-        Vector3f blPos   = calcPos(torsoPos, torsoRot, new Vector3f( l.legX*s, l.legY*s,  l.hindZ*s), blRot, new Vector3f(0f, l.legCenterY*s, 0f));
-        Vector3f brPos   = calcPos(torsoPos, torsoRot, new Vector3f(-l.legX*s, l.legY*s,  l.hindZ*s), brRot, new Vector3f(0f, l.legCenterY*s, 0f));
+        Vector3f blPos   = calcPos(torsoPos, torsoRot, new Vector3f( l.legX*s, l.hindLegY*s,  l.hindZ*s), blRot, new Vector3f(0f, l.hindLegCenterY*s, 0f));
+        Vector3f brPos   = calcPos(torsoPos, torsoRot, new Vector3f(-l.legX*s, l.hindLegY*s,  l.hindZ*s), brRot, new Vector3f(0f, l.hindLegCenterY*s, 0f));
         parts.add(makePart(world, new BoxShape(new Vector3f(l.torsoHalfX*s, l.torsoHalfY*s, l.torsoHalfZ*s)), torsoPos, torsoRot, l.torsoMass*s, vel));
         parts.add(makePart(world, new BoxShape(new Vector3f(l.headX*s, l.headHalfY*s, l.headHalfZ*s)), headPos, headRot, l.headMass*s, vel));
-        parts.add(makePart(world, new BoxShape(new Vector3f(l.legHalfX*s, l.legHalfY*s, l.legHalfZ*s)), blPos, blRot, l.legMass*s, vel));
-        parts.add(makePart(world, new BoxShape(new Vector3f(l.legHalfX*s, l.legHalfY*s, l.legHalfZ*s)), brPos, brRot, l.legMass*s, vel));
+        parts.add(makePart(world, new BoxShape(new Vector3f(l.legHalfX*s, l.hindLegHalfY*s, l.legHalfZ*s)), blPos, blRot, l.legMass*s, vel));
+        parts.add(makePart(world, new BoxShape(new Vector3f(l.legHalfX*s, l.hindLegHalfY*s, l.legHalfZ*s)), brPos, brRot, l.legMass*s, vel));
         parts.add(makePart(world, new BoxShape(new Vector3f(l.legHalfX*s, l.legHalfY*s, l.legHalfZ*s)), flPos, flRot, l.legMass*s, vel));
         parts.add(makePart(world, new BoxShape(new Vector3f(l.legHalfX*s, l.legHalfY*s, l.legHalfZ*s)), frPos, frRot, l.legMass*s, vel));
     }
@@ -269,6 +363,8 @@ public final class RagdollBodyFactory {
             case CREEPER:   buildCreeperJoints  (world, joints, torso, head, lArm, rArm, lLeg, rLeg, tHead, tw, s); break;
             case QUADRUPED: buildQuadJoints     (world, joints, torso, head, lArm, rArm, lLeg, rLeg, tHead, tLArm, tRArm, tLLeg, tRLeg, tw, s, bodyProfile, isBaby); break;
             case CHICKEN:   buildChickenJoints  (world, joints, torso, head, lArm, rArm, lLeg, rLeg, tHead, tLArm, tRArm, tLLeg, tRLeg, tw, s); break;
+            case BAT:       buildBatJoints      (world, joints, torso, head, lArm, rArm, lLeg, rLeg, tHead, tLArm, tRArm, tLLeg, tRLeg, tw, s); break;
+            case BEE:       buildBeeJoints      (world, joints, torso, head, lArm, rArm, lLeg, rLeg, tHead, tLArm, tRArm, tLLeg, tRLeg, tw, s); break;
             default:        buildHumanoidJoints (world, joints, torso, head, lLeg, rLeg, lArm, rArm, tHead, tLLeg, tRLeg, tLArm, tRArm, tw, s, isBaby, babyBigHead); break;
         }
     }
@@ -326,8 +422,8 @@ public final class RagdollBodyFactory {
         Vector3f angL = v(-ll,-10,-10), angU = v(ll,10,10);
         joints.add(joint(world, torso, fl, tw.apply(new Vector3f( q.legX*s, q.legY*s,-q.frontZ*s)), lin, liu, angL, angU));
         joints.add(joint(world, torso, fr, tw.apply(new Vector3f(-q.legX*s, q.legY*s,-q.frontZ*s)), lin, liu, angL, angU));
-        joints.add(joint(world, torso, hl, tw.apply(new Vector3f( q.legX*s, q.legY*s, q.hindZ*s)), lin, liu, angL, angU));
-        joints.add(joint(world, torso, hr, tw.apply(new Vector3f(-q.legX*s, q.legY*s, q.hindZ*s)), lin, liu, angL, angU));
+        joints.add(joint(world, torso, hl, tw.apply(new Vector3f( q.legX*s, q.hindLegY*s, q.hindZ*s)), lin, liu, angL, angU));
+        joints.add(joint(world, torso, hr, tw.apply(new Vector3f(-q.legX*s, q.hindLegY*s, q.hindZ*s)), lin, liu, angL, angU));
     }
 
     private static void buildChickenJoints(DiscreteDynamicsWorld world, List<TypedConstraint> joints,
@@ -344,6 +440,36 @@ public final class RagdollBodyFactory {
         Vector3f li = v(-0.02f,-0.02f,-0.02f), lu = v(0.02f,0.02f,0.02f);
         joints.add(joint(world, torso, ll, tw.apply(new Vector3f( 0.1f*s,-0.2f*s,0f)), li, lu, v(-legl,-8,-8), v(legl,8,8)));
         joints.add(joint(world, torso, rl, tw.apply(new Vector3f(-0.1f*s,-0.2f*s,0f)), li, lu, v(-legl,-8,-8), v(legl,8,8)));
+    }
+
+    // Bat/bee joints anchor at body-origin midpoints (not torso-local offsets) so they stay
+    // correct regardless of the model-specific build scale (bat 0.35×, baby bee 0.5×) — the
+    // shared `s` passed here is the unscaled body scale and wouldn't match those bodies.
+    private static void buildBatJoints(DiscreteDynamicsWorld world, List<TypedConstraint> joints,
+            RigidBody torso, RigidBody head, RigidBody lWing, RigidBody rWing, RigidBody lStub, RigidBody rStub,
+            Transform tHead, Transform tLWing, Transform tRWing, Transform tLStub, Transform tRStub,
+            Function<Vector3f, Vector3f> tw, float s) {
+        Vector3f torsoO = tw.apply(v(0f, 0f, 0f));
+        joints.add(joint(world, torso, head, mid(torsoO, tHead.origin), v(0,0,0), v(0,0,0), v(-40,-40,-40), v(40,40,40)));
+        // wings hinge off the torso with a wide flap range
+        joints.add(joint(world, torso, lWing, mid(torsoO, tLWing.origin), v(0,0,0), v(0,0,0), v(-70,-60,-70), v(70,60,70)));
+        joints.add(joint(world, torso, rWing, mid(torsoO, tRWing.origin), v(0,0,0), v(0,0,0), v(-70,-60,-70), v(70,60,70)));
+        // unused leg stubs welded to the torso (rigid, invisible)
+        joints.add(joint(world, torso, lStub, tLStub.origin, v(0,0,0), v(0,0,0), v(-1,-1,-1), v(1,1,1)));
+        joints.add(joint(world, torso, rStub, tRStub.origin, v(0,0,0), v(0,0,0), v(-1,-1,-1), v(1,1,1)));
+    }
+
+    private static void buildBeeJoints(DiscreteDynamicsWorld world, List<TypedConstraint> joints,
+            RigidBody torso, RigidBody head, RigidBody lWing, RigidBody rWing, RigidBody lStub, RigidBody rStub,
+            Transform tHead, Transform tLWing, Transform tRWing, Transform tLStub, Transform tRStub,
+            Function<Vector3f, Vector3f> tw, float s) {
+        Vector3f torsoO = tw.apply(v(0f, 0f, 0f));
+        joints.add(joint(world, torso, head, mid(torsoO, tHead.origin), v(0,0,0), v(0,0,0), v(-30,-30,-30), v(30,30,30)));
+        joints.add(joint(world, torso, lWing, mid(torsoO, tLWing.origin), v(0,0,0), v(0,0,0), v(-60,-50,-60), v(60,50,60)));
+        joints.add(joint(world, torso, rWing, mid(torsoO, tRWing.origin), v(0,0,0), v(0,0,0), v(-60,-50,-60), v(60,50,60)));
+        // unused leg stubs welded to the torso (legs stay rendered on the body instead)
+        joints.add(joint(world, torso, lStub, tLStub.origin, v(0,0,0), v(0,0,0), v(-1,-1,-1), v(1,1,1)));
+        joints.add(joint(world, torso, rStub, tRStub.origin, v(0,0,0), v(0,0,0), v(-1,-1,-1), v(1,1,1)));
     }
 
     // ===========================

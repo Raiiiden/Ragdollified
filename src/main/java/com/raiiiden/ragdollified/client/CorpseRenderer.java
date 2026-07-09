@@ -69,7 +69,7 @@ public class CorpseRenderer extends EntityRenderer<CorpseEntity> {
                 pose[RagdollPart.TORSO.index], pose[RagdollPart.HEAD.index],
                 pose[RagdollPart.LEFT_ARM.index], pose[RagdollPart.RIGHT_ARM.index],
                 pose[RagdollPart.LEFT_LEG.index], pose[RagdollPart.RIGHT_LEG.index],
-                skin, isSlim, helmet, chest, legs, boots, pe, 0f);
+                skin, isSlim, helmet, chest, legs, boots, pe, 0f, -1);
         poseStack.popPose();
 
         super.render(corpse, entityYaw, partialTick, poseStack, buffer, packedLight);

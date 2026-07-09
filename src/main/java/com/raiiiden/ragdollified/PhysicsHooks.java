@@ -60,6 +60,12 @@ public class PhysicsHooks {
         if (entity instanceof net.minecraft.world.entity.animal.Sheep sheep) {
             sheepState = RagdollSpawnPacket.packSheepState(sheep.isSheared(), sheep.getColor().getId());
         }
+        // Cats reuse the same byte layout (bit0 = a boolean flag, bits1-4 = a dye colour): here
+        // bit0 = tamed (whether to draw the collar) and bits1-4 = the collar colour. The client
+        // reads them back through the same wasSheared()/dyeColorId accessors for the cat path.
+        if (entity instanceof net.minecraft.world.entity.animal.Cat cat) {
+            sheepState = RagdollSpawnPacket.packSheepState(cat.isTame(), cat.getCollarColor().getId());
+        }
 
         // Generic overlay-state bits for mobs whose corpse needs an extra layer based on
         // a single boolean (charged creeper → energy swirl, saddled pig → saddle, …).

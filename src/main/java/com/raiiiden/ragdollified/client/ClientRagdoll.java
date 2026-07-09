@@ -1241,6 +1241,10 @@ public class ClientRagdoll {
             spawnYOffset = 0.7f * data.scale;
         if (modelType == MobModelHelper.ModelType.CHICKEN)
             spawnYOffset = 0.4f * data.scale;
+        // Bat/bee are small winged mobs on their own layouts (not quadruped/chicken), so the
+        // 1.2 default above is far too high — drop them close to the ground.
+        if (modelType == MobModelHelper.ModelType.BAT) spawnYOffset = 0.3f;
+        if (modelType == MobModelHelper.ModelType.BEE) spawnYOffset = isBabyBee() ? 0.18f : 0.35f;
         RagdollBodyFactory.BodyProfile bodyProfile = getBodyProfile();
         if (bodyProfile == RagdollBodyFactory.BodyProfile.COW) {
             spawnYOffset = isBabyCow() ? 0.54f : 1.07f;
@@ -1248,6 +1252,8 @@ public class ClientRagdoll {
             spawnYOffset = isBabyPig() ? 0.32f : 0.63f;
         } else if (bodyProfile == RagdollBodyFactory.BodyProfile.SHEEP) {
             spawnYOffset = isBabySheep() ? 0.47f : 0.94f;
+        } else if (bodyProfile == RagdollBodyFactory.BodyProfile.CAT) {
+            spawnYOffset = isBabyCat() ? 0.20f : 0.36f;
         } else if (bodyProfile == RagdollBodyFactory.BodyProfile.CHICKEN) {
             spawnYOffset = isBabyChicken() ? 0.27f : 0.54f;
         }
@@ -1646,6 +1652,8 @@ public class ClientRagdoll {
         if (!isPlayer) {
             ClientMobTextureCache.evict(originalEntityId);
         }
+        // Queue this ragdoll's rebuilt blood textures for release on the render thread.
+        com.raiiiden.ragdollified.client.compat.BetterBloodOverlayCompat.evict(originalEntityId);
 
         ragdollParts.clear();
         ragdollJoints.clear();
@@ -1698,6 +1706,8 @@ public class ClientRagdoll {
     public boolean isBabyPig() { return isBaby && mobType.contains("pig"); }
     public boolean isBabySheep() { return isBaby && mobType.contains("sheep"); }
     public boolean isBabyChicken() { return isBaby && mobType.contains("chicken"); }
+    public boolean isBabyCat() { return isBaby && (mobType.contains("cat") || mobType.contains("ocelot")); }
+    public boolean isBabyBee() { return isBaby && mobType.contains("bee"); }
     // Baby humanoid (baby zombie/husk/piglin/zombie-villager, …) — scaled-down body + model.
     public boolean isBabyHumanoid() {
         return isBaby && MobModelHelper.isHumanoidModelType(modelType);
@@ -1717,12 +1727,13 @@ public class ClientRagdoll {
         return true;
     }
     public boolean usesBabyBodyScale() {
-        return isBabyCow() || isBabyPig() || isBabySheep() || isBabyChicken();
+        return isBabyCow() || isBabyPig() || isBabySheep() || isBabyChicken() || isBabyCat();
     }
     public RagdollBodyFactory.BodyProfile getBodyProfile() {
         if (mobType.contains("cow") || mobType.contains("mooshroom")) return RagdollBodyFactory.BodyProfile.COW;
         if (mobType.contains("pig")) return RagdollBodyFactory.BodyProfile.PIG;
         if (mobType.contains("sheep")) return RagdollBodyFactory.BodyProfile.SHEEP;
+        if (mobType.contains("cat") || mobType.contains("ocelot")) return RagdollBodyFactory.BodyProfile.CAT;
         if (mobType.contains("chicken")) return RagdollBodyFactory.BodyProfile.CHICKEN;
         return RagdollBodyFactory.BodyProfile.DEFAULT;
     }

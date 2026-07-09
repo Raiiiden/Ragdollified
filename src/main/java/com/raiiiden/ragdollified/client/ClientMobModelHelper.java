@@ -44,6 +44,11 @@ public final class ClientMobModelHelper {
             if (model instanceof net.minecraft.client.model.SkeletonModel) return MobModelHelper.ModelType.HUMANOID_SKELETON;
             if (model instanceof net.minecraft.client.model.DrownedModel) return MobModelHelper.ModelType.HUMANOID_DROWNED;
             if (model instanceof ChickenModel) return MobModelHelper.ModelType.CHICKEN;
+            if (model instanceof net.minecraft.client.model.BatModel) return MobModelHelper.ModelType.BAT;
+            if (model instanceof net.minecraft.client.model.BeeModel) return MobModelHelper.ModelType.BEE;
+            // OcelotModel (cats + ocelots) is not a QuadrupedModel subclass, so it needs an
+            // explicit check before the generic fallbacks.
+            if (model instanceof net.minecraft.client.model.OcelotModel) return MobModelHelper.ModelType.QUADRUPED;
             if (model instanceof QuadrupedModel) return MobModelHelper.ModelType.QUADRUPED;
             if (model instanceof HumanoidModel) return MobModelHelper.ModelType.HUMANOID_STANDARD;
 

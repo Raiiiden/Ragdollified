@@ -26,7 +26,12 @@ public class MobModelHelper {
         CREEPER,
         QUADRUPED,
         CHICKEN,
-        UNSUPPORTED
+        UNSUPPORTED,
+        // Appended so existing ordinals (used as the network wire value in
+        // RagdollSpawnPacket) stay stable. New winged mobs whose anatomy doesn't fit the
+        // humanoid or quadruped skeletons get their own layouts.
+        BAT,
+        BEE
     }
 
     public static boolean shouldHaveRagdoll(LivingEntity entity) {
@@ -81,8 +86,19 @@ public class MobModelHelper {
         if (mobType.contains("pig")) {
             return ModelType.QUADRUPED;
         }
+        // Cat + ocelot share the OcelotModel (a four-legged animal), so they ride the
+        // quadruped skeleton with their own CAT body profile.
+        if (mobType.contains("cat") || mobType.contains("ocelot")) {
+            return ModelType.QUADRUPED;
+        }
         if (mobType.contains("chicken")) {
             return ModelType.CHICKEN;
+        }
+        if (mobType.contains("bat")) {
+            return ModelType.BAT;
+        }
+        if (mobType.contains("bee")) {
+            return ModelType.BEE;
         }
 
         return ModelType.UNSUPPORTED;
@@ -99,6 +115,10 @@ public class MobModelHelper {
         if (entity instanceof Creeper) return ModelType.CREEPER;
         if (entity instanceof net.minecraft.world.entity.animal.Chicken) return ModelType.CHICKEN;
         if (entity instanceof Cow || entity instanceof Sheep || entity instanceof Pig) return ModelType.QUADRUPED;
+        if (entity instanceof net.minecraft.world.entity.animal.Cat
+                || entity instanceof net.minecraft.world.entity.animal.Ocelot) return ModelType.QUADRUPED;
+        if (entity instanceof net.minecraft.world.entity.ambient.Bat) return ModelType.BAT;
+        if (entity instanceof net.minecraft.world.entity.animal.Bee) return ModelType.BEE;
 
         if (entity instanceof Monster && isLikelyHumanoidByClass(entity)) {
             return ModelType.HUMANOID_STANDARD;
@@ -133,6 +153,8 @@ public class MobModelHelper {
             case CREEPER -> "Creeper Quadruped";
             case QUADRUPED -> "Quadruped Animal";
             case CHICKEN -> "Chicken";
+            case BAT -> "Bat";
+            case BEE -> "Bee";
             case UNSUPPORTED -> "Unsupported";
         };
     }
