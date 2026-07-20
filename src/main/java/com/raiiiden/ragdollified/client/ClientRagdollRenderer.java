@@ -132,13 +132,24 @@ public class ClientRagdollRenderer {
             Minecraft mc = Minecraft.getInstance();
             var bakery = mc.getEntityModels();
 
-            // Player models
-            normalModel = new PlayerModel<>(bakery.bakeLayer(ModelLayers.PLAYER), false);
-            slimModel = new PlayerModel<>(bakery.bakeLayer(ModelLayers.PLAYER_SLIM), true);
-            normalArmorInner = new HumanoidModel<>(bakery.bakeLayer(ModelLayers.PLAYER_INNER_ARMOR));
-            normalArmorOuter = new HumanoidModel<>(bakery.bakeLayer(ModelLayers.PLAYER_OUTER_ARMOR));
-            slimArmorInner = new HumanoidModel<>(bakery.bakeLayer(ModelLayers.PLAYER_INNER_ARMOR));
-            slimArmorOuter = new HumanoidModel<>(bakery.bakeLayer(ModelLayers.PLAYER_OUTER_ARMOR));
+            // Fresh vanilla player trees, deliberately bypassing EntityModelSet/bakeLayer.
+            // EMF/Fresh Moves can replace or mutate the registered PLAYER/PLAYER_SLIM layers;
+            // taking those baked trees lets its animation geometry corrupt physics-part pivots.
+            // Direct LayerDefinitions match the isolated standard-zombie path below while
+            // retaining separate Steve (wide-arm) and Alex (slim-arm) geometry.
+            LayerDefinition steveDef = LayerDefinition.create(
+                    PlayerModel.createMesh(CubeDeformation.NONE, false), 64, 64);
+            LayerDefinition alexDef = LayerDefinition.create(
+                    PlayerModel.createMesh(CubeDeformation.NONE, true), 64, 64);
+            normalModel = new PlayerModel<>(steveDef.bakeRoot(), false);
+            slimModel = new PlayerModel<>(alexDef.bakeRoot(), true);
+
+            // Isolate player armor layers too. These are vanilla's inner/outer armor
+            // deformations and 64x32 texture layout; each model gets its own mutable tree.
+            normalArmorInner = freshPlayerArmor(0.5F);
+            normalArmorOuter = freshPlayerArmor(1.0F);
+            slimArmorInner = freshPlayerArmor(0.5F);
+            slimArmorOuter = freshPlayerArmor(1.0F);
 
             // Mob models
             LayerDefinition standardDef = LayerDefinition.create(
@@ -209,6 +220,12 @@ public class ClientRagdollRenderer {
         } catch (Exception e) {
             Ragdollified.LOGGER.error("Failed to initialize ClientRagdollRenderer models", e);
         }
+    }
+
+    private static HumanoidModel<AbstractClientPlayer> freshPlayerArmor(float deformation) {
+        LayerDefinition definition = LayerDefinition.create(
+                HumanoidModel.createMesh(new CubeDeformation(deformation), 0.0F), 64, 32);
+        return new HumanoidModel<>(definition.bakeRoot());
     }
 
     private static void setAllPartsVisible(HumanoidModel<?> model) {
