@@ -109,7 +109,7 @@ public class ClientJbulletWorld {
         broadphase = new DbvtBroadphase();
         solver = new SequentialImpulseConstraintSolver();
         dynamicsWorld = new DiscreteDynamicsWorld(dispatcher, broadphase, solver, collisionConfig);
-        dynamicsWorld.setGravity(new Vector3f(0f, -RagdollifiedConfig.GRAVITY.get().floatValue(), 0f));
+        dynamicsWorld.setGravity(new Vector3f(0f, -(float) RagdollifiedConfig.get(RagdollifiedConfig.GRAVITY), 0f));
         dynamicsWorld.getSolverInfo().numIterations = 20;
     }
 

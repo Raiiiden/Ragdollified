@@ -18,20 +18,27 @@ public final class RagdollHitMapper {
         if (direction == null || direction.lengthSqr() < 1.0e-6) return null;
         double base;
         if (isMelee) {
-            base = com.raiiiden.ragdollified.config.RagdollifiedConfig.HIT_IMPULSE_MELEE.get();
+            base = com.raiiiden.ragdollified.config.RagdollifiedConfig.get(
+                    com.raiiiden.ragdollified.config.RagdollifiedConfig.HIT_IMPULSE_MELEE);
         } else if (isTaczBullet) {
             base = isHeadShot
-                    ? com.raiiiden.ragdollified.config.RagdollifiedConfig.HIT_IMPULSE_HEADSHOT.get()
-                    : com.raiiiden.ragdollified.config.RagdollifiedConfig.HIT_IMPULSE_BODY.get();
+                    ? com.raiiiden.ragdollified.config.RagdollifiedConfig.get(
+                            com.raiiiden.ragdollified.config.RagdollifiedConfig.HIT_IMPULSE_HEADSHOT)
+                    : com.raiiiden.ragdollified.config.RagdollifiedConfig.get(
+                            com.raiiiden.ragdollified.config.RagdollifiedConfig.HIT_IMPULSE_BODY);
         } else {
-            base = com.raiiiden.ragdollified.config.RagdollifiedConfig.HIT_IMPULSE_VANILLA_PROJECTILE.get();
+            base = com.raiiiden.ragdollified.config.RagdollifiedConfig.get(
+                    com.raiiiden.ragdollified.config.RagdollifiedConfig.HIT_IMPULSE_VANILLA_PROJECTILE);
         }
         if (damage > 0f
-                && com.raiiiden.ragdollified.config.RagdollifiedConfig.HIT_IMPULSE_DAMAGE_SCALING.get()) {
-            double ref = com.raiiiden.ragdollified.config.RagdollifiedConfig.HIT_IMPULSE_DAMAGE_REFERENCE.get();
+                && com.raiiiden.ragdollified.config.RagdollifiedConfig.get(
+                        com.raiiiden.ragdollified.config.RagdollifiedConfig.HIT_IMPULSE_DAMAGE_SCALING)) {
+            double ref = com.raiiiden.ragdollified.config.RagdollifiedConfig.get(
+                    com.raiiiden.ragdollified.config.RagdollifiedConfig.HIT_IMPULSE_DAMAGE_REFERENCE);
             base *= Math.sqrt(damage / ref);
         }
-        double vert = com.raiiiden.ragdollified.config.RagdollifiedConfig.HIT_IMPULSE_VERTICAL_BIAS.get();
+        double vert = com.raiiiden.ragdollified.config.RagdollifiedConfig.get(
+                com.raiiiden.ragdollified.config.RagdollifiedConfig.HIT_IMPULSE_VERTICAL_BIAS);
         return new net.minecraft.world.phys.Vec3(
                 direction.x * base,
                 direction.y * base + vert,
@@ -74,7 +81,8 @@ public final class RagdollHitMapper {
         double sin = Math.sin(yawRad);
         double rotX = localX * cos + localZ * sin;
         double centerBand = Math.max(0.05, entity.getBbWidth()
-                * com.raiiiden.ragdollified.config.RagdollifiedConfig.HIT_CENTER_LEEWAY.get());
+                * com.raiiiden.ragdollified.config.RagdollifiedConfig.get(
+                        com.raiiiden.ragdollified.config.RagdollifiedConfig.HIT_CENTER_LEEWAY));
         return Math.abs(rotX) <= centerBand;
     }
 

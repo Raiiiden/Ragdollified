@@ -123,9 +123,13 @@ public class ClientRagdollManager {
         public final int ragdollId;
         public final int partIndex;
         public final float x, y, z;
-        public ImpulseRequest(int ragdollId, int partIndex, float x, float y, float z) {
+        public final int revision;
+        public final boolean apply;
+        public ImpulseRequest(int ragdollId, int partIndex, float x, float y, float z,
+                              int revision, boolean apply) {
             this.ragdollId = ragdollId; this.partIndex = partIndex;
             this.x = x; this.y = y; this.z = z;
+            this.revision = revision; this.apply = apply;
         }
     }
     private static final ConcurrentLinkedQueue<ImpulseRequest> impulseQueue = new ConcurrentLinkedQueue<>();
@@ -182,7 +186,12 @@ public class ClientRagdollManager {
 
     /** Enqueue a punch/click impulse for the physics thread to apply on its next tick. */
     public static void enqueueImpulse(int ragdollId, int partIndex, float x, float y, float z) {
-        impulseQueue.offer(new ImpulseRequest(ragdollId, partIndex, x, y, z));
+        enqueueImpulse(ragdollId, partIndex, x, y, z, 0, true);
+    }
+
+    public static void enqueueImpulse(int ragdollId, int partIndex, float x, float y, float z,
+                                      int revision, boolean apply) {
+        impulseQueue.offer(new ImpulseRequest(ragdollId, partIndex, x, y, z, revision, apply));
     }
 
     /** Destroy a specific physics ragdoll (by entity id) on the physics thread (corpse handoff). */
@@ -192,9 +201,9 @@ public class ClientRagdollManager {
 
     /**
      * Main-thread (client tick) corpse bridge. Two jobs, both cheap and only active when
-     * corpses are enabled and the local player has a settled/settling ragdoll:
-     *  1. Report the local player's ragdoll settle to the server (once) so it can pose the
-     *     corpse at the true resting position + pose.
+     * corpses are enabled and this client has a settled/settling player ragdoll:
+     *  1. Report any player's ragdoll settle to the server (once) so a nearby observer can
+     *     pose the corpse at the true resting position even when its owner is far away.
      *  2. Once the posed corpse entity has arrived, drop the now-redundant physics ragdoll.
      */
     public static void tickCorpseClient() {
@@ -202,28 +211,21 @@ public class ClientRagdollManager {
         Minecraft mc = Minecraft.getInstance();
         if (mc.player == null || mc.level == null) return;
         if (ragdolls.isEmpty()) return; // nothing to report or hand off
-        UUID self = mc.player.getUUID();
-
-        // Job 1 — settle report for the LOCAL player's own corpse (owner-authoritative).
-        ClientRagdoll mine = null;
+        // Job 1 — settle reports for every player ragdoll simulated by this client. The
+        // server validates UUID + death entity id + reporter proximity and accepts only the
+        // first matching report, so every nearby observer can safely participate.
         for (ClientRagdoll r : ragdolls.values()) {
-            if (r.isPlayer() && self.equals(r.getPlayerUUID())) { mine = r; break; }
-        }
-        // Report when the ragdoll has settled, OR shortly before it would despawn / the
-        // server would time out — whichever comes first — so even a stuck (never-settling)
-        // ragdoll still reports its ACTUAL current pose + position. Otherwise the server
-        // timeout fires and the corpse appears as a synthetic pose at the death position
-        // (the "mush above the ragdoll" case).
-        if (mine != null && !mine.isCorpseSettleReported()) {
+            if (!r.isPlayer() || r.getPlayerUUID() == null || r.isCorpseSettleReported()) continue;
+
+            // Report when the ragdoll has settled, OR shortly before it would despawn / the
+            // server would time out, so a stuck ragdoll still reports its actual current pose.
             int limit = Math.min(RagdollifiedConfig.getRagdollLifetime(),
                                  RagdollifiedConfig.getCorpseSettleTimeoutTicks());
-            // Don't "give up" while the ragdoll is distance-frozen (paused because the player
-            // walked away): it isn't stuck, just suspended, and its ticks no longer advance.
-            // Reporting now would freeze the corpse at a mid-fall position; instead wait until
-            // the player returns and the body actually settles.
-            boolean nearGiveUp = !mine.isFrozen() && mine.getTicksExisted() >= Math.max(20, limit - 40);
-            if (mine.isSettled() || nearGiveUp) {
-                ClientRagdoll.TransformSnapshot snap = mine.getSnapshot();
+            // A distance-frozen observer is not near the body; let another nearby client
+            // report, or wait until this client returns and resumes the simulation.
+            boolean nearGiveUp = !r.isFrozen() && r.getTicksExisted() >= Math.max(20, limit - 40);
+            if (r.isSettled() || nearGiveUp) {
+                ClientRagdoll.TransformSnapshot snap = r.getSnapshot();
                 if (snap != null) {
                     Vector3f origin = snap.cachedTorsoPos;
                     RagdollTransform[] rel = new RagdollTransform[6];
@@ -234,8 +236,10 @@ public class ClientRagdollManager {
                                 new Vector3f(p.x - origin.x, p.y - origin.y, p.z - origin.z),
                                 new Quat4f(snap.rotations[i]));
                     }
-                    ModNetwork.CHANNEL.sendToServer(new CorpseSettlePacket(origin.x, origin.y, origin.z, rel));
-                    mine.markCorpseSettleReported();
+                    ModNetwork.CHANNEL.sendToServer(new CorpseSettlePacket(
+                            origin.x, origin.y, origin.z, rel,
+                            r.getPlayerUUID(), r.getOriginalEntityId(), r.getLastImpulseRevision()));
+                    r.markCorpseSettleReported();
                 }
             }
         }
@@ -267,9 +271,11 @@ public class ClientRagdollManager {
         while ((req = impulseQueue.poll()) != null) {
             ClientRagdoll r = ragdolls.get(req.ragdollId);
             if (r == null) continue;
+            if (req.revision > 0 && req.revision <= r.getLastImpulseRevision()) continue;
             RagdollPart part = RagdollPart.byIndex(req.partIndex);
             if (part == null) continue;
-            r.applyImpulse(part, new Vector3f(req.x, req.y, req.z));
+            if (req.apply) r.applyImpulse(part, new Vector3f(req.x, req.y, req.z));
+            if (req.revision > 0) r.acknowledgeImpulseRevision(req.revision);
         }
         // Corpse handoff removals — destroy the specific physics ragdoll (by id) on the
         // physics thread. The post-tick loop drops destroyed ragdolls from the map.
@@ -360,7 +366,7 @@ public class ClientRagdollManager {
         // Enforce active-ragdoll cap. ConcurrentHashMap doesn't preserve insertion order,
         // so we sort active ragdolls by ticksExisted (largest first = oldest first) and
         // retire the oldest. They've been jiggling longest so they're the best candidates.
-        int maxActiveRagdolls = RagdollifiedConfig.MAX_ACTIVE_RAGDOLLS.get();
+        int maxActiveRagdolls = RagdollifiedConfig.get(RagdollifiedConfig.MAX_ACTIVE_RAGDOLLS);
         if (activeCount > maxActiveRagdolls) {
             int toRetire = activeCount - maxActiveRagdolls;
             lastForceSettledThisTick = toRetire;
@@ -644,7 +650,7 @@ public class ClientRagdollManager {
         // Drop oldest queued spawn if the queue is overflowing — better than blocking
         // on a death event handler. processedEntityIds also leaks for dropped spawns;
         // cleared on world unload.
-        if (spawnQueue.size() >= RagdollifiedConfig.MAX_SPAWN_QUEUE_SIZE.get()) {
+        if (spawnQueue.size() >= RagdollifiedConfig.get(RagdollifiedConfig.MAX_SPAWN_QUEUE_SIZE)) {
             spawnQueue.poll();
         }
         spawnQueue.add(data);
@@ -653,7 +659,7 @@ public class ClientRagdollManager {
 
     /** Pop up to the configured spawn budget; returns count actually constructed. */
     private static int processSpawnQueue(ClientJbulletWorld physicsWorld) {
-        int budget = RagdollifiedConfig.MAX_SPAWNS_PER_TICK.get();
+        int budget = RagdollifiedConfig.get(RagdollifiedConfig.MAX_SPAWNS_PER_TICK);
         int spawned = 0;
         ClientRagdoll.SpawnData data;
         while (budget-- > 0 && (data = spawnQueue.poll()) != null) {
@@ -694,7 +700,7 @@ public class ClientRagdollManager {
             processedEntityIds.remove(data.originalEntityId);
             return;
         }
-        if (spawnQueue.size() >= RagdollifiedConfig.MAX_SPAWN_QUEUE_SIZE.get()) {
+        if (spawnQueue.size() >= RagdollifiedConfig.get(RagdollifiedConfig.MAX_SPAWN_QUEUE_SIZE)) {
             spawnQueue.poll();
         }
         spawnQueue.offer(data);
@@ -763,6 +769,10 @@ public class ClientRagdollManager {
      * is safe here. Corpses aren't in the ragdolls map, so they're inherently excluded.
      */
     private static void enforceMaxRagdollsPerPlayer(UUID playerUUID) {
+        // A corpse-bound player ragdoll is the live visual/physics representation of protected
+        // loot until the server materializes its corpse. Never cull it through the cosmetic
+        // per-player limit; rapid repeat deaths already materialize the older pending corpse.
+        if (RagdollifiedConfig.isCorpseEnabled()) return;
         int max = RagdollifiedConfig.getMaxRagdollsPerPlayer();
         while (true) {
             int count = 0;

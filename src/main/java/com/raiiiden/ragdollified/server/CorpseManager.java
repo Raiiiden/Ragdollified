@@ -42,13 +42,15 @@ import java.util.UUID;
  * <p>On death the player's inventory (and optionally XP) is captured into a
  * {@link PendingCorpse}, the inventory is cleared so vanilla drops nothing, and the pending
  * is persisted via {@link PendingCorpseStore}. <b>No corpse entity exists yet.</b> When the
- * owner's client reports its ragdoll has settled, the corpse is spawned <i>directly at the
+ * a nearby client reports its ragdoll has settled, the corpse is spawned <i>directly at the
  * rest position</i> with the settled pose — so it never visibly teleports. A timeout (stuck
  * ragdoll / disconnect) or a server restart (crash recovery) instead spawns it flat at the
  * recorded death position. Either way the loot is safe from the moment of death.
  */
 @Mod.EventBusSubscriber(modid = Ragdollified.MODID)
 public class CorpseManager {
+
+    private static final int SETTLE_QUIET_TICKS = 5;
 
     // LOWEST so the inventory is cleared only AFTER PhysicsHooks (HIGHEST) has read the worn
     // armor into the ragdoll spawn packet — otherwise the ragdoll would render without armor.
@@ -108,6 +110,7 @@ public class CorpseManager {
         PendingCorpse old = store.pending.remove(p.owner);
         if (old != null) spawnFlat(player.server, old);
         store.pending.put(p.owner, p);
+        store.lastDeaths.put(p.owner, p.corpseId);
 
         // Queue a Corpse Compass for this player's next respawn, targeting the death position.
         // If the corpse finishes settling before they respawn, finishSpawn refreshes this to the
@@ -191,11 +194,24 @@ public class CorpseManager {
         PendingCorpseStore store = PendingCorpseStore.get(server.overworld());
         if (store.pending.isEmpty()) return;
         long now = server.getTickCount();
-        double physDist = RagdollifiedConfig.PHYSICS_DISTANCE.get();
+        double physDist = RagdollifiedConfig.get(RagdollifiedConfig.PHYSICS_DISTANCE);
         boolean changed = false;
         Iterator<Map.Entry<UUID, PendingCorpse>> it = store.pending.entrySet().iterator();
         while (it.hasNext()) {
             PendingCorpse p = it.next().getValue();
+
+            // A settle waits a few server ticks before materialization. If a push was already
+            // in flight, its newer revision invalidates the candidate before this point.
+            if (p.settleOrigin != null) {
+                if (now >= p.settleReadyTick && p.settleRevision == p.impulseRevision) {
+                    spawnCaptured(server, p, p.settleOrigin, p.settleTransforms);
+                    it.remove();
+                    changed = true;
+                }
+                // Never let the ordinary timeout replace a validated candidate with a flat
+                // corpse during its short impulse-race quiet window.
+                continue;
+            }
 
             // While the owner is online but too far from the death position, their ragdoll is
             // distance-frozen (paused) on their client and physically cannot report a settle
@@ -242,15 +258,49 @@ public class CorpseManager {
      */
     public static void handleSettle(ServerPlayer sender, double ox, double oy, double oz,
                                     RagdollTransform[] transforms) {
+        handleSettleFor(sender, sender.getUUID(), -1, -1, false, ox, oy, oz, transforms);
+    }
+
+    /**
+     * Apply a settle observed by any nearby player. UUID plus death entity id prevents a stale
+     * or unrelated ragdoll from consuming the pending corpse; proximity and dimension checks
+     * prevent remote clients from choosing its position.
+     */
+    public static void handleObservedSettle(ServerPlayer sender, UUID ownerUUID, int ragdollEntityId,
+                                            int impulseRevision,
+                                            double ox, double oy, double oz,
+                                            RagdollTransform[] transforms) {
+        handleSettleFor(sender, ownerUUID, ragdollEntityId, impulseRevision,
+                true, ox, oy, oz, transforms);
+    }
+
+    private static void handleSettleFor(ServerPlayer sender, UUID ownerUUID, int ragdollEntityId,
+                                        int impulseRevision, boolean observed, double ox, double oy, double oz,
+                                        RagdollTransform[] transforms) {
         PendingCorpseStore store = PendingCorpseStore.get(sender.server.overworld());
-        PendingCorpse p = store.pending.get(sender.getUUID());
+        PendingCorpse p = store.pending.get(ownerUUID);
         if (p == null) return; // already spawned or timed out
+        if (observed && p.deathEntityId != ragdollEntityId) return;
+        if (observed && p.impulseRevision != impulseRevision) return;
+
+        ServerLevel level = sender.server.getLevel(p.dimension);
+        if (level == null) return;
+
+        if (!Double.isFinite(ox) || !Double.isFinite(oy) || !Double.isFinite(oz)) return;
+        Vec3 origin = new Vec3(ox, oy, oz);
+
+        if (observed) {
+            if (!sender.level().dimension().equals(p.dimension)) return;
+            double reportRange = RagdollifiedConfig.get(RagdollifiedConfig.PHYSICS_DISTANCE) + 16.0;
+            if (sender.position().distanceToSqr(origin) > reportRange * reportRange) return;
+        }
+
+        if (!isSanePose(transforms)) return;
 
         // Anti-cheat sanity on the client-reported rest position. Be generous vertically: a
         // ragdoll legitimately falls a long way before settling (off a cliff, into a ravine),
         // so only a large horizontal offset or ending up well ABOVE the death point is rejected.
-        Vec3 origin = new Vec3(ox, oy, oz);
-        double maxHoriz = Math.max(64.0, RagdollifiedConfig.PHYSICS_DISTANCE.get());
+        double maxHoriz = Math.max(64.0, RagdollifiedConfig.get(RagdollifiedConfig.PHYSICS_DISTANCE));
         double dx = origin.x - p.deathPos.x;
         double dz = origin.z - p.deathPos.z;
         double dy = origin.y - p.deathPos.y;
@@ -258,15 +308,41 @@ public class CorpseManager {
             origin = p.deathPos; // reject implausible teleport
         }
 
-        ServerLevel level = sender.server.getLevel(p.dimension);
-        if (level == null) level = sender.serverLevel();
-
-        CorpseEntity corpse = build(level, p, origin);
-        corpse.applyPose(transforms);
-        finishSpawn(level, corpse, p, origin);
-
-        store.pending.remove(sender.getUUID());
+        // Do not materialize in the packet handler. A settle from another observer can race an
+        // impulse that is already travelling to the server; a short quiet window lets that
+        // impulse increment the revision and invalidate this candidate instead of teleporting
+        // the pushed ragdoll into a stale corpse pose.
+        if (p.settleOrigin == null || p.settleRevision != impulseRevision) {
+            p.settleOrigin = origin;
+            p.settleTransforms = transforms;
+            p.settleRevision = impulseRevision;
+            p.settleReadyTick = sender.server.getTickCount() + SETTLE_QUIET_TICKS;
+        }
         store.setDirty();
+    }
+
+    private static void spawnCaptured(MinecraftServer server, PendingCorpse p, Vec3 origin,
+                                      RagdollTransform[] transforms) {
+        ServerLevel level = server.getLevel(p.dimension);
+        if (level == null) level = server.overworld();
+        CorpseEntity corpse = build(level, p, origin);
+        finishSpawn(level, corpse, p, origin, transforms);
+    }
+
+    private static boolean isSanePose(RagdollTransform[] transforms) {
+        if (transforms == null || transforms.length < 6) return false;
+        for (int i = 0; i < 6; i++) {
+            RagdollTransform t = transforms[i];
+            if (t == null) continue;
+            if (t.partId != i || !Float.isFinite(t.position.x) || !Float.isFinite(t.position.y)
+                    || !Float.isFinite(t.position.z) || Math.abs(t.position.x) > 16.0f
+                    || Math.abs(t.position.y) > 16.0f || Math.abs(t.position.z) > 16.0f
+                    || !Float.isFinite(t.rotation.x) || !Float.isFinite(t.rotation.y)
+                    || !Float.isFinite(t.rotation.z) || !Float.isFinite(t.rotation.w)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /**
@@ -296,7 +372,22 @@ public class CorpseManager {
             store.setDirty();
             return true;
         }
+        // Spawned but its chunk is unloaded: recover from the persistent loot index. The
+        // tombstone makes the chunk-stored entity discard itself when that chunk next loads.
+        PendingCorpse indexed = store.materialized.remove(corpseId);
+        if (indexed != null) {
+            givePendingTo(indexed, target);
+            store.removedCorpseIds.add(corpseId);
+            store.setDirty();
+            return true;
+        }
         return false;
+    }
+
+    public static boolean retrieveLastDeath(MinecraftServer server, UUID owner, ServerPlayer target) {
+        PendingCorpseStore store = PendingCorpseStore.get(server.overworld());
+        UUID corpseId = store.lastDeaths.get(owner);
+        return corpseId != null && retrieveByCorpseId(server, corpseId, target);
     }
 
     private static void givePendingTo(PendingCorpse p, ServerPlayer target) {
@@ -321,8 +412,7 @@ public class CorpseManager {
         ServerLevel level = server.getLevel(p.dimension);
         if (level == null) level = server.overworld();
         CorpseEntity corpse = build(level, p, p.deathPos);
-        corpse.markPosedFlat();
-        finishSpawn(level, corpse, p, p.deathPos);
+        finishSpawn(level, corpse, p, p.deathPos, null);
     }
 
     private static CorpseEntity build(ServerLevel level, PendingCorpse p, Vec3 pos) {
@@ -333,18 +423,28 @@ public class CorpseManager {
         return corpse;
     }
 
-    private static void finishSpawn(ServerLevel level, CorpseEntity corpse, PendingCorpse p, Vec3 pos) {
+    private static void finishSpawn(ServerLevel level, CorpseEntity corpse, PendingCorpse p, Vec3 pos,
+                                    RagdollTransform[] reportedPose) {
         // Make sure the target chunk is loaded so the entity is accepted and persisted —
         // matters for the restart-recovery path where the death chunk is cold.
         level.getChunkAt(BlockPos.containing(pos.x, pos.y, pos.z));
 
-        // Settle the corpse onto the ground BEFORE it's networked. The ragdoll's reported rest Y is
-        // a little above the actual floor, so with real gravity the body would visibly drop into
-        // place just after the handoff. Resolving that short fall here (server-side, one move) means
-        // clients receive the corpse already at rest — no post-spawn jump.
+        // Ground the corpse's interaction/physics anchor before networking it. The captured
+        // visual pose is compensated below, so this collision move does not move the body parts.
         corpse.move(net.minecraft.world.entity.MoverType.SELF, new Vec3(0.0, -4.0, 0.0));
         corpse.setDeltaMovement(Vec3.ZERO);
         corpse.setOldPosAndRot();
+        Vec3 settledAnchor = corpse.position();
+
+        // The reported origin is the already-settled torso center, while the corpse entity's
+        // position is the bottom of its interaction box. Grounding that box moves its origin
+        // downward. Offset the relative pose by the inverse movement so every rendered body
+        // part stays at exactly the world position reported by the observing client.
+        if (reportedPose != null) {
+            corpse.applyPose(translatePose(reportedPose, pos.subtract(settledAnchor)));
+        } else {
+            corpse.markPosedFlat();
+        }
 
         // If this player hasn't respawned yet, refresh their queued compass target to the corpse's
         // actual resting position (more accurate than the raw death position it was seeded with).
@@ -352,14 +452,36 @@ public class CorpseManager {
         CompoundTag queued = store.deathTargets.get(p.owner);
         if (queued != null && p.corpseId != null && queued.hasUUID("CorpseId")
                 && p.corpseId.equals(queued.getUUID("CorpseId"))) {
-            store.deathTargets.put(p.owner, buildTarget(p, pos));
+            store.deathTargets.put(p.owner, buildTarget(p, settledAnchor));
             store.setDirty();
         }
 
         if (!level.addFreshEntity(corpse)) {
-            Ragdollified.LOGGER.warn("Corpse for {} failed to spawn; dropping its loot at {}", p.name, pos);
-            dropPendingLoot(level, p, pos);
+            Ragdollified.LOGGER.warn("Corpse for {} failed to spawn; dropping its loot at {}", p.name, settledAnchor);
+            dropPendingLoot(level, p, settledAnchor);
+            if (p.corpseId != null) store.removedCorpseIds.add(p.corpseId);
+            store.setDirty();
+        } else if (p.corpseId != null) {
+            PendingCorpse indexed = p.copy();
+            indexed.deathPos = settledAnchor;
+            store.materialized.put(p.corpseId, indexed);
+            store.setDirty();
         }
+    }
+
+    private static RagdollTransform[] translatePose(RagdollTransform[] pose, Vec3 offset) {
+        RagdollTransform[] translated = new RagdollTransform[6];
+        for (int i = 0; i < translated.length && i < pose.length; i++) {
+            RagdollTransform t = pose[i];
+            if (t == null) continue;
+            translated[i] = new RagdollTransform(i,
+                    new javax.vecmath.Vector3f(
+                            t.position.x + (float) offset.x,
+                            t.position.y + (float) offset.y,
+                            t.position.z + (float) offset.z),
+                    new javax.vecmath.Quat4f(t.rotation));
+        }
+        return translated;
     }
 
     /** Last-resort fallback if the corpse entity can't be added: drop everything on the ground. */

@@ -82,9 +82,13 @@ public class RagdollClickHandler {
         dir.normalize();
         dir.scale(baseStrength);
 
-        // Enqueue for the physics worker to apply on its next tick.
-        // The 1-tick (50ms) latency between click and motion is imperceptible.
-        ClientRagdollManager.enqueueImpulse(hitRagdoll.getId(), hitPart.index, dir.x, dir.y, dir.z);
+        // On a modded server, wait for its sequenced broadcast so every observer applies
+        // simultaneous pushes in exactly the same order. On a vanilla server there is no
+        // broadcast, so retain the local-only interaction behavior.
+        if (!com.raiiiden.ragdollified.config.RagdollifiedConfig.hasServerSnapshot()) {
+            ClientRagdollManager.enqueueImpulse(
+                    hitRagdoll.getId(), hitPart.index, dir.x, dir.y, dir.z);
+        }
 
         // Send to server for broadcast to other players (synchronous from main thread).
         try {

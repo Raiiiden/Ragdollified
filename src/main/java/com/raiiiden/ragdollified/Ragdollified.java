@@ -14,6 +14,8 @@ import net.minecraftforge.fml.common.Mod;
 import net.minecraftforge.fml.event.lifecycle.FMLClientSetupEvent;
 import net.minecraftforge.fml.event.lifecycle.FMLCommonSetupEvent;
 import net.minecraftforge.fml.javafmlmod.FMLJavaModLoadingContext;
+import net.minecraftforge.fml.event.config.ModConfigEvent;
+import net.minecraftforge.server.ServerLifecycleHooks;
 import org.slf4j.Logger;
 
 @Mod(Ragdollified.MODID)
@@ -33,6 +35,7 @@ public class Ragdollified {
                 com.raiiiden.ragdollified.client.RagdollHitTracker.registerOptionalTaczHandler(MinecraftForge.EVENT_BUS));
         modEventBus.addListener(this::commonSetup);
         modEventBus.addListener(this::clientSetup);
+        modEventBus.addListener(this::onConfigReload);
         RagdollifiedConfig.register();
     }
 
@@ -45,6 +48,14 @@ public class Ragdollified {
             ETFCompatibilityHelper.initialize();
             com.raiiiden.ragdollified.client.compat.BetterBloodOverlayCompat.initialize();
         });
+    }
+
+    private void onConfigReload(final ModConfigEvent.Reloading event) {
+        if (event.getConfig().getSpec() != RagdollifiedConfig.GAMEPLAY_SPEC) return;
+        var server = ServerLifecycleHooks.getCurrentServer();
+        if (server != null) {
+            com.raiiiden.ragdollified.config.GameplayConfigSyncEvents.sendToAll(server);
+        }
     }
 
     // NOTE: instance (non-static) on purpose. This mod subscribes to the Forge bus via

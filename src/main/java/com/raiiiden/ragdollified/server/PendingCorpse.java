@@ -1,6 +1,7 @@
 package com.raiiiden.ragdollified.server;
 
 import com.raiiiden.ragdollified.entity.CorpseEntity;
+import com.raiiiden.ragdollified.RagdollTransform;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.ListTag;
@@ -49,9 +50,23 @@ public class PendingCorpse {
     public ItemStack legs = ItemStack.EMPTY;
     public ItemStack boots = ItemStack.EMPTY;
     public int storedXp = 0;
+    /** Latest server-issued impulse sequence incorporated by an acceptable settle report. */
+    public int impulseRevision = 0;
 
     /** Server tick by which, if no settle has arrived, the corpse is spawned flat. In-memory only. */
     public transient long deadlineTick;
+    /** Validated settle candidate, briefly delayed so in-flight pushes can invalidate it. */
+    public transient Vec3 settleOrigin;
+    public transient RagdollTransform[] settleTransforms;
+    public transient int settleRevision = -1;
+    public transient long settleReadyTick;
+
+    public void invalidateSettleCandidate() {
+        settleOrigin = null;
+        settleTransforms = null;
+        settleRevision = -1;
+        settleReadyTick = 0L;
+    }
 
     public CompoundTag save() {
         CompoundTag t = new CompoundTag();
@@ -64,6 +79,7 @@ public class PendingCorpse {
         t.putDouble("Dz", deathPos.z);
         t.putInt("StoredXp", storedXp);
         t.putInt("DeathEntityId", deathEntityId);
+        t.putInt("ImpulseRevision", impulseRevision);
         t.put("Items", saveStacks(items));
         t.put("CurioStacks", saveStacks(curioStacks));
         ListTag ids = new ListTag();
@@ -87,6 +103,7 @@ public class PendingCorpse {
         p.deathPos = new Vec3(t.getDouble("Dx"), t.getDouble("Dy"), t.getDouble("Dz"));
         p.storedXp = t.getInt("StoredXp");
         p.deathEntityId = t.contains("DeathEntityId") ? t.getInt("DeathEntityId") : -1;
+        p.impulseRevision = t.getInt("ImpulseRevision");
         ListTag ids = t.getList("CurioIds", 8); // 8 = StringTag
         for (int i = 0; i < ids.size(); i++) p.curioIds.add(ids.getString(i));
         loadStacks(t.getList("Items", 10), p.items, CorpseEntity.VANILLA_SLOTS);
@@ -96,6 +113,10 @@ public class PendingCorpse {
         p.legs = ItemStack.of(t.getCompound("Legs"));
         p.boots = ItemStack.of(t.getCompound("Boots"));
         return p;
+    }
+
+    public PendingCorpse copy() {
+        return load(save());
     }
 
     private static ListTag saveStacks(List<ItemStack> list) {

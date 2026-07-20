@@ -2,7 +2,9 @@ package com.raiiiden.ragdollified.client;
 
 import com.raiiiden.ragdollified.Ragdollified;
 import com.raiiiden.ragdollified.client.compat.GeckoLibArmorHelper;
+import com.raiiiden.ragdollified.config.RagdollifiedConfig;
 import net.minecraft.core.BlockPos;
+import net.minecraftforge.client.event.ClientPlayerNetworkEvent;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.event.level.BlockEvent;
@@ -57,5 +59,10 @@ public class ClientTickHandler {
             ClientRagdollManager.onWorldUnload();
             GeckoLibArmorHelper.onWorldUnload();
         }
+    }
+
+    @SubscribeEvent
+    public static void onLogout(ClientPlayerNetworkEvent.LoggingOut event) {
+        RagdollifiedConfig.clearServerSnapshot();
     }
 }

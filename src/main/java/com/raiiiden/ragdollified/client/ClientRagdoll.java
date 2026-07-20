@@ -683,7 +683,7 @@ public class ClientRagdoll {
 
         double distSq = cameraPos.distanceToSqr(cachedTorsoPos.x, cachedTorsoPos.y, cachedTorsoPos.z);
 
-        double physicsDistance = RagdollifiedConfig.PHYSICS_DISTANCE.get();
+        double physicsDistance = RagdollifiedConfig.get(RagdollifiedConfig.PHYSICS_DISTANCE);
         if (distSq > physicsDistance * physicsDistance) {
             // Too far to simulate: pause the ragdoll. Crucially we do NOT advance ticksExisted
             // here, so a distance-frozen body is suspended rather than aging — it resumes exactly
@@ -712,9 +712,9 @@ public class ClientRagdoll {
         t = System.nanoTime();
         for (RigidBody r : ragdollParts) {
             r.getLinearVelocity(scratchVel);
-            float maxFallSpeed = RagdollifiedConfig.MAX_FALL_SPEED.get().floatValue();
-            float maxLinearSpeed = RagdollifiedConfig.MAX_LINEAR_SPEED.get().floatValue();
-            float maxAngularSpeed = RagdollifiedConfig.MAX_ANGULAR_SPEED.get().floatValue();
+            float maxFallSpeed = (float) RagdollifiedConfig.get(RagdollifiedConfig.MAX_FALL_SPEED);
+            float maxLinearSpeed = (float) RagdollifiedConfig.get(RagdollifiedConfig.MAX_LINEAR_SPEED);
+            float maxAngularSpeed = (float) RagdollifiedConfig.get(RagdollifiedConfig.MAX_ANGULAR_SPEED);
             if (scratchVel.y < -maxFallSpeed) scratchVel.y = -maxFallSpeed;
             float speed = scratchVel.length();
             if (speed > maxLinearSpeed) { scratchVel.scale(maxLinearSpeed / speed); r.setLinearVelocity(scratchVel); }
@@ -734,7 +734,7 @@ public class ClientRagdoll {
         PHASE_STATS.fluidForcesNanos += System.nanoTime() - t;
 
         // 3. player collisions
-        double playerCollisionDistance = RagdollifiedConfig.PLAYER_COLLISION_DISTANCE.get();
+        double playerCollisionDistance = RagdollifiedConfig.get(RagdollifiedConfig.PLAYER_COLLISION_DISTANCE);
         if (distSq <= playerCollisionDistance * playerCollisionDistance) {
             t = System.nanoTime();
             applyPlayerCollisions();
@@ -1180,7 +1180,7 @@ public class ClientRagdoll {
                             RigidBody rb = new RigidBody(new RigidBodyConstructionInfo(
                                     0f, new DefaultMotionState(t), cs, new Vector3f()));
                             rb.setCollisionFlags(rb.getCollisionFlags() | CollisionFlags.STATIC_OBJECT);
-                            rb.setFriction(RagdollifiedConfig.FRICTION.get().floatValue());
+                            rb.setFriction((float) RagdollifiedConfig.get(RagdollifiedConfig.FRICTION));
                             rb.setRestitution(0f);
                             world.addRigidBody(rb);
                             bodies.add(rb);
@@ -1283,7 +1283,7 @@ public class ClientRagdoll {
                 (float) data.velocity.y,
                 (float) data.velocity.z
         );
-        initialVel.scale(RagdollifiedConfig.INITIAL_VELOCITY_SCALE.get().floatValue());
+        initialVel.scale((float) RagdollifiedConfig.get(RagdollifiedConfig.INITIAL_VELOCITY_SCALE));
 
         RagdollBodyFactory.build(world, ragdollParts, ragdollJoints,
                 modelType, pos, baseQuat, scale, initialVel, data.capturedPose, bodyProfile,
@@ -1437,10 +1437,20 @@ public class ClientRagdoll {
         Vector3f scaled = new Vector3f(impulse);
         scaled.scale(RagdollifiedConfig.getPartKnockbackMultiplier(part));
         body.applyCentralImpulse(scaled);
+        // Any previously sent settle pose predates this push and must be reported again after
+        // the body comes to rest. The server also rejects reports with an older revision.
+        corpseSettleReported = false;
+    }
+
+    private int lastImpulseRevision = 0;
+    public int getLastImpulseRevision() { return lastImpulseRevision; }
+    public void acknowledgeImpulseRevision(int revision) {
+        if (revision > lastImpulseRevision) lastImpulseRevision = revision;
     }
 
     private void applyCenteredDeathImpulse(Vec3 impulse) {
-        float centerScale = Math.max(0.75f, RagdollifiedConfig.HIT_CENTER_DISTRIBUTION_SCALE.get().floatValue());
+        float centerScale = Math.max(0.75f,
+                (float) RagdollifiedConfig.get(RagdollifiedConfig.HIT_CENTER_DISTRIBUTION_SCALE));
         for (int i = 0; i < ragdollParts.size() && i < 6; i++) {
             RagdollPart part = RagdollPart.byIndex(i);
             if (part == null) continue;
@@ -1745,8 +1755,8 @@ public class ClientRagdoll {
     public ResourceLocation getCachedPlayerSkin() { return cachedPlayerSkin; }
     public boolean isCachedSlim() { return cachedIsSlim; }
 
-    // Corpse feature — one-shot guard so the local player's client reports its settle
-    // to the server exactly once. Read/set on the physics thread from ClientRagdollManager.
+    // Corpse feature — per-client one-shot guard so each observer reports this ragdoll's
+    // settle at most once. The server de-duplicates reports from multiple observers.
     private boolean corpseSettleReported = false;
     public boolean isCorpseSettleReported() { return corpseSettleReported; }
     public void markCorpseSettleReported() { corpseSettleReported = true; }

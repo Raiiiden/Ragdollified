@@ -25,10 +25,9 @@ import java.util.UUID;
  */
 public class CorpseRenderer extends EntityRenderer<CorpseEntity> {
 
-    // The body is drawn from the torso pivot at the entity origin (bounding-box bottom), which now
-    // rests on the ground thanks to real gravity. A body lying on its back extends ~half its
-    // thickness below that pivot, so it clips into the floor; lift the whole render up to sit it on
-    // top of the ground. Tunable — raise if it still sinks, lower if it floats.
+    // The synthetic flat fallback is drawn from the torso pivot at the grounded entity origin.
+    // Half its thickness would extend below the floor, so lift that fallback only. Captured poses
+    // are already world-collision-correct and must not receive this adjustment.
     private static final float GROUND_LIFT = 0.2f;
 
     public CorpseRenderer(EntityRendererProvider.Context context) {
@@ -41,7 +40,8 @@ public class CorpseRenderer extends EntityRenderer<CorpseEntity> {
         if (!corpse.isPosed()) return;
 
         RagdollTransform[] pose = corpse.getCorpsePose();
-        if (pose == null) pose = buildDefaultPose();
+        boolean usesFallbackPose = pose == null;
+        if (usesFallbackPose) pose = buildDefaultPose();
 
         UUID owner = corpse.getOwnerUUID();
         // pe is only used for the GeckoLib armor proxy below; it may be null when the owner is
@@ -61,10 +61,11 @@ public class CorpseRenderer extends EntityRenderer<CorpseEntity> {
         // The EntityRenderer poseStack is already at the entity origin (camera-relative),
         // and the stored transforms are entity-relative — renderPlayerBody translates to the
         // torso for us, so we pass the transforms directly. distSq=0 -> always draw armor.
-        // Lift up first (world-up here) so the settled/lying body sits on top of the ground
-        // instead of sinking into it now that gravity lands the box bottom on the floor.
+        // Only the synthetic timeout/recovery pose needs a ground lift. A captured physics
+        // pose is already collision-correct in world space, so lifting it would introduce a
+        // visible upward snap during the ragdoll-to-corpse handoff.
         poseStack.pushPose();
-        poseStack.translate(0.0, GROUND_LIFT, 0.0);
+        if (usesFallbackPose) poseStack.translate(0.0, GROUND_LIFT, 0.0);
         ClientRagdollRenderer.renderPlayerBody(poseStack, buffer, packedLight, 0.0,
                 pose[RagdollPart.TORSO.index], pose[RagdollPart.HEAD.index],
                 pose[RagdollPart.LEFT_ARM.index], pose[RagdollPart.RIGHT_ARM.index],

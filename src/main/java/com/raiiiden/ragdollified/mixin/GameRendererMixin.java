@@ -40,7 +40,7 @@ public class GameRendererMixin {
                                          PoseStack poseStack, CallbackInfo ci) {
         Minecraft mc = minecraft;
         if (mc.player == null)                                 { rdeath$active = false; return; }
-        if (!RagdollifiedConfig.ENABLE_PLAYER_RAGDOLLS.get()) { rdeath$active = false; return; }
+        if (!RagdollifiedConfig.get(RagdollifiedConfig.ENABLE_PLAYER_RAGDOLLS)) { rdeath$active = false; return; }
         if (!RagdollifiedConfig.ENABLE_DEATH_CAMERA.get())    { rdeath$active = false; return; }
         if (!mc.player.isDeadOrDying())                        { rdeath$active = false; return; }
 

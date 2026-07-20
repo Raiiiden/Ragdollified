@@ -3,6 +3,7 @@ package com.raiiiden.ragdollified.network;
 import com.raiiiden.ragdollified.Ragdollified;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraftforge.network.NetworkRegistry;
+import net.minecraftforge.network.NetworkDirection;
 import net.minecraftforge.network.simple.SimpleChannel;
 
 public class ModNetwork {
@@ -36,5 +37,11 @@ public class ModNetwork {
                 CorpseSettlePacket::encode,
                 CorpseSettlePacket::decode,
                 CorpseSettlePacket::handle);
+
+        CHANNEL.messageBuilder(GameplayConfigSyncPacket.class, nextId(), NetworkDirection.PLAY_TO_CLIENT)
+                .encoder(GameplayConfigSyncPacket::encode)
+                .decoder(GameplayConfigSyncPacket::decode)
+                .consumerMainThread(GameplayConfigSyncPacket::handle)
+                .add();
     }
 }

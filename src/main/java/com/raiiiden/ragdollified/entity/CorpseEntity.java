@@ -4,6 +4,8 @@ import com.raiiiden.ragdollified.RagdollPart;
 import com.raiiiden.ragdollified.RagdollTransform;
 import com.raiiiden.ragdollified.config.RagdollifiedConfig;
 import com.raiiiden.ragdollified.menu.CorpseMenu;
+import com.raiiiden.ragdollified.server.PendingCorpse;
+import com.raiiiden.ragdollified.server.PendingCorpseStore;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.ListTag;
 import net.minecraft.network.chat.Component;
@@ -64,6 +66,7 @@ public class CorpseEntity extends Entity {
     // Cached, parsed pose for the renderer (client). Rebuilt lazily when RENDER_DATA changes.
     private RagdollTransform[] cachedPose = null;
     private CompoundTag cachedPoseSource = null;
+    private boolean suppressPersistentSync = false;
 
     public CorpseEntity(EntityType<? extends CorpseEntity> type, Level level) {
         super(type, level);
@@ -103,6 +106,7 @@ public class CorpseEntity extends Entity {
             ItemStack s = curioStacks.get(i);
             inventory.setItem(VANILLA_SLOTS + i, s == null ? ItemStack.EMPTY : s);
         }
+        attachInventoryListener();
         rebuildRenderData(false, null, helmet, chest, legs, boots);
     }
 
@@ -130,7 +134,10 @@ public class CorpseEntity extends Entity {
     }
 
     public void addStoredXp(int amount) {
-        if (amount > 0) this.storedXp += amount;
+        if (amount > 0) {
+            this.storedXp += amount;
+            syncPersistentRecord();
+        }
     }
 
     /** Settle-timeout fallback: mark posed with no captured pose so the renderer draws a flat body. */
@@ -252,6 +259,16 @@ public class CorpseEntity extends Entity {
         super.tick();
         if (level().isClientSide) return;
 
+        if (corpseId != null && level() instanceof ServerLevel server) {
+            PendingCorpseStore store = PendingCorpseStore.get(server.getServer().overworld());
+            if (store.removedCorpseIds.contains(corpseId)) {
+                discard();
+                return;
+            }
+            // Backfill the index for corpses created by older versions.
+            if (!store.materialized.containsKey(corpseId)) syncPersistentRecord();
+        }
+
         tickPhysics();
 
         // Expiry — drop remaining loot + release stored XP, then discard.
@@ -313,6 +330,7 @@ public class CorpseEntity extends Entity {
      */
     public void retrieveInto(ServerPlayer target) {
         if (level().isClientSide) return;
+        suppressPersistentSync = true;
         for (int i = 0; i < inventory.getContainerSize(); i++) {
             ItemStack s = inventory.getItem(i);
             if (s.isEmpty()) continue;
@@ -324,6 +342,7 @@ public class CorpseEntity extends Entity {
             target.giveExperiencePoints(storedXp);
             storedXp = 0;
         }
+        markPersistentRemoved();
         discard();
     }
 
@@ -332,6 +351,7 @@ public class CorpseEntity extends Entity {
             ExperienceOrb.award(server, position(), storedXp);
             storedXp = 0;
         }
+        markPersistentRemoved();
         discard();
     }
 
@@ -383,6 +403,7 @@ public class CorpseEntity extends Entity {
         for (int i = 0; i < ids.size(); i++) curioSlotIds.add(ids.getString(i));
         inventory = new SimpleContainer(VANILLA_SLOTS + curioSlotIds.size());
         inventory.fromTag(tag.getList("Items", 10));
+        attachInventoryListener();
         if (tag.contains("RenderData")) {
             getEntityData().set(RENDER_DATA, tag.getCompound("RenderData"));
         }
@@ -403,5 +424,45 @@ public class CorpseEntity extends Entity {
         for (String slotId : curioSlotIds) ids.add(net.minecraft.nbt.StringTag.valueOf(slotId));
         tag.put("CurioIds", ids);
         tag.put("RenderData", getRenderData().copy());
+    }
+
+    private void attachInventoryListener() {
+        inventory.addListener(container -> syncPersistentRecord());
+    }
+
+    private void syncPersistentRecord() {
+        if (suppressPersistentSync || corpseId == null || ownerUUID == null
+                || !(level() instanceof ServerLevel server)) return;
+        PendingCorpseStore store = PendingCorpseStore.get(server.getServer().overworld());
+        if (store.removedCorpseIds.contains(corpseId)) return;
+
+        PendingCorpse record = new PendingCorpse();
+        record.owner = ownerUUID;
+        record.corpseId = corpseId;
+        record.name = ownerName;
+        record.dimension = level().dimension();
+        record.deathPos = position();
+        record.deathEntityId = getRagdollEntityId();
+        record.storedXp = storedXp;
+        for (int i = 0; i < VANILLA_SLOTS; i++) record.items.add(inventory.getItem(i).copy());
+        for (int i = VANILLA_SLOTS; i < inventory.getContainerSize(); i++) {
+            record.curioStacks.add(inventory.getItem(i).copy());
+        }
+        record.curioIds.addAll(curioSlotIds);
+        record.helmet = getArmor("Helmet").copy();
+        record.chest = getArmor("Chest").copy();
+        record.legs = getArmor("Legs").copy();
+        record.boots = getArmor("Boots").copy();
+        store.materialized.put(corpseId, record);
+        store.lastDeaths.putIfAbsent(ownerUUID, corpseId);
+        store.setDirty();
+    }
+
+    private void markPersistentRemoved() {
+        if (corpseId == null || !(level() instanceof ServerLevel server)) return;
+        PendingCorpseStore store = PendingCorpseStore.get(server.getServer().overworld());
+        store.materialized.remove(corpseId);
+        store.removedCorpseIds.add(corpseId);
+        store.setDirty();
     }
 }

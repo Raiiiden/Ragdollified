@@ -1,19 +1,26 @@
 package com.raiiiden.ragdollified.config;
 
 import com.raiiiden.ragdollified.RagdollPart;
+import net.minecraft.nbt.CompoundTag;
+import net.minecraft.nbt.ListTag;
+import net.minecraft.nbt.StringTag;
+import net.minecraft.nbt.Tag;
 import net.minecraftforge.common.ForgeConfigSpec;
 import net.minecraftforge.fml.ModLoadingContext;
 import net.minecraftforge.fml.config.ModConfig;
 
 import java.util.List;
+import java.util.IdentityHashMap;
+import java.util.Map;
 
 public class RagdollifiedConfig {
 
     // ============================
-    // SERVER config (synced to clients on join)
+    // GAMEPLAY COMMON config. The server sends a runtime snapshot on join; client-side
+    // gameplay reads resolve through that snapshot while connected to a modded server.
     // ============================
     public static final ForgeConfigSpec.Builder SERVER_BUILDER = new ForgeConfigSpec.Builder();
-    public static final ForgeConfigSpec SERVER_SPEC;
+    public static final ForgeConfigSpec GAMEPLAY_SPEC;
 
     public static final ForgeConfigSpec.IntValue RAGDOLL_LIFETIME;
     public static final ForgeConfigSpec.IntValue MAX_RAGDOLLS;
@@ -81,6 +88,9 @@ public class RagdollifiedConfig {
     private static ForgeConfigSpec.BooleanValue debugRenderPhysics;
     private static ForgeConfigSpec.BooleanValue logPhysicsPerf;
 
+    private static final Map<ForgeConfigSpec.ConfigValue<?>, String> GAMEPLAY_KEYS = new IdentityHashMap<>();
+    private static volatile CompoundTag remoteGameplaySnapshot;
+
     public static double getArmorRenderDistanceSq() {
         double d = ARMOR_RENDER_DISTANCE.get();
         return d * d;
@@ -108,7 +118,8 @@ public class RagdollifiedConfig {
         MAX_RAGDOLLS_PER_PLAYER = SERVER_BUILDER
                 .comment("Maximum number of a single player's death ragdolls that can exist at once. When a player",
                         "dies past this many times in quick succession, their oldest ragdoll is removed to make room.",
-                        "Corpses are separate entities and do NOT count toward this limit.")
+                        "Ignored while corpses are enabled so a loot-bound ragdoll is never culled before handoff.",
+                        "Materialized corpses are separate entities and never count toward this limit.")
                 .defineInRange("maxRagdollsPerPlayer", 3, 1, 20);
 
         ENABLE_RAGDOLLS = SERVER_BUILDER
@@ -269,7 +280,8 @@ public class RagdollifiedConfig {
                 .define("enableCorpseCompass", true);
 
         SERVER_BUILDER.pop();
-        SERVER_SPEC = SERVER_BUILDER.build();
+        GAMEPLAY_SPEC = SERVER_BUILDER.build();
+        registerGameplayKeys();
 
         // ============================
         // CLIENT spec
@@ -308,25 +320,140 @@ public class RagdollifiedConfig {
     }
 
     public static void register() {
-        ModLoadingContext.get().registerConfig(ModConfig.Type.SERVER, SERVER_SPEC, "ragdollified-server.toml");
+        ModLoadingContext.get().registerConfig(ModConfig.Type.COMMON, GAMEPLAY_SPEC, "ragdollified-common.toml");
         ModLoadingContext.get().registerConfig(ModConfig.Type.CLIENT, CLIENT_SPEC, "ragdollified-client.toml");
     }
 
-    public static int getRagdollLifetime() { return RAGDOLL_LIFETIME.get(); }
-    public static int getMaxRagdolls() { return MAX_RAGDOLLS.get(); }
+    private static void registerGameplayKeys() {
+        register("ragdollLifetime", RAGDOLL_LIFETIME);
+        register("maxRagdolls", MAX_RAGDOLLS);
+        register("maxRagdollsPerPlayer", MAX_RAGDOLLS_PER_PLAYER);
+        register("enableRagdolls", ENABLE_RAGDOLLS);
+        register("enablePlayerRagdolls", ENABLE_PLAYER_RAGDOLLS);
+        register("entityDenylist", ENTITY_DENYLIST);
+        register("hitImpulseHeadshot", HIT_IMPULSE_HEADSHOT);
+        register("hitImpulseBody", HIT_IMPULSE_BODY);
+        register("hitImpulseMelee", HIT_IMPULSE_MELEE);
+        register("hitImpulseVanillaProjectile", HIT_IMPULSE_VANILLA_PROJECTILE);
+        register("hitImpulseExplosion", HIT_IMPULSE_EXPLOSION);
+        register("hitImpulseVerticalBias", HIT_IMPULSE_VERTICAL_BIAS);
+        register("hitImpulseDamageScaling", HIT_IMPULSE_DAMAGE_SCALING);
+        register("hitImpulseDamageReference", HIT_IMPULSE_DAMAGE_REFERENCE);
+        register("hitCenterLeeway", HIT_CENTER_LEEWAY);
+        register("hitCenterDistributionScale", HIT_CENTER_DISTRIBUTION_SCALE);
+        register("partKnockbackTorso", PART_KNOCKBACK_TORSO);
+        register("partKnockbackHead", PART_KNOCKBACK_HEAD);
+        register("partKnockbackLeftLeg", PART_KNOCKBACK_LEFT_LEG);
+        register("partKnockbackRightLeg", PART_KNOCKBACK_RIGHT_LEG);
+        register("partKnockbackLeftArm", PART_KNOCKBACK_LEFT_ARM);
+        register("partKnockbackRightArm", PART_KNOCKBACK_RIGHT_ARM);
+        register("deathPartKnockbackTorso", DEATH_PART_KNOCKBACK_TORSO);
+        register("deathPartKnockbackHead", DEATH_PART_KNOCKBACK_HEAD);
+        register("deathPartKnockbackLeftLeg", DEATH_PART_KNOCKBACK_LEFT_LEG);
+        register("deathPartKnockbackRightLeg", DEATH_PART_KNOCKBACK_RIGHT_LEG);
+        register("deathPartKnockbackLeftArm", DEATH_PART_KNOCKBACK_LEFT_ARM);
+        register("deathPartKnockbackRightArm", DEATH_PART_KNOCKBACK_RIGHT_ARM);
+        register("gravity", GRAVITY);
+        register("massScale", MASS_SCALE);
+        register("initialVelocityScale", INITIAL_VELOCITY_SCALE);
+        register("linearDamping", LINEAR_DAMPING);
+        register("angularDamping", ANGULAR_DAMPING);
+        register("friction", FRICTION);
+        register("restitution", RESTITUTION);
+        register("maxLinearSpeed", MAX_LINEAR_SPEED);
+        register("maxFallSpeed", MAX_FALL_SPEED);
+        register("maxAngularSpeed", MAX_ANGULAR_SPEED);
+        register("maxActiveRagdolls", MAX_ACTIVE_RAGDOLLS);
+        register("maxSpawnsPerTick", MAX_SPAWNS_PER_TICK);
+        register("maxSpawnQueueSize", MAX_SPAWN_QUEUE_SIZE);
+        register("physicsDistance", PHYSICS_DISTANCE);
+        register("playerCollisionDistance", PLAYER_COLLISION_DISTANCE);
+        register("enableCorpses", ENABLE_CORPSES);
+        register("corpseExpiryTicks", CORPSE_EXPIRY_TICKS);
+        register("corpseSettleTimeoutTicks", CORPSE_SETTLE_TIMEOUT_TICKS);
+        register("corpseStoreXp", CORPSE_STORE_XP);
+        register("enableCorpseCompass", ENABLE_CORPSE_COMPASS);
+    }
 
-    // Read from the client physics/tick loop (also active at the main menu / on vanilla
-    // servers where the SERVER spec never loads), so gate on isLoaded() and fall back to
-    // the default to avoid ForgeConfigSpec#get() throwing.
+    private static void register(String key, ForgeConfigSpec.ConfigValue<?> value) {
+        GAMEPLAY_KEYS.put(value, key);
+    }
+
+    /** Capture the server's current COMMON gameplay values for transmission to a client. */
+    public static CompoundTag createGameplaySnapshot() {
+        CompoundTag tag = new CompoundTag();
+        tag.putInt("schema", 1);
+        for (Map.Entry<ForgeConfigSpec.ConfigValue<?>, String> entry : GAMEPLAY_KEYS.entrySet()) {
+            Object value = entry.getKey().get();
+            String key = entry.getValue();
+            if (value instanceof Boolean b) tag.putBoolean(key, b);
+            else if (value instanceof Integer i) tag.putInt(key, i);
+            else if (value instanceof Double d) tag.putDouble(key, d);
+            else if (value instanceof List<?> list) {
+                ListTag strings = new ListTag();
+                for (Object item : list) if (item instanceof String s) strings.add(StringTag.valueOf(s));
+                tag.put(key, strings);
+            }
+        }
+        return tag;
+    }
+
+    /** Install a server-owned runtime snapshot without modifying the client's TOML file. */
+    public static void applyServerSnapshot(CompoundTag snapshot) {
+        remoteGameplaySnapshot = snapshot == null ? null : snapshot.copy();
+    }
+
+    public static void clearServerSnapshot() {
+        remoteGameplaySnapshot = null;
+    }
+
+    public static boolean hasServerSnapshot() {
+        return remoteGameplaySnapshot != null;
+    }
+
+    public static int get(ForgeConfigSpec.IntValue value) {
+        CompoundTag snapshot = remoteGameplaySnapshot;
+        String key = GAMEPLAY_KEYS.get(value);
+        return snapshot != null && key != null && snapshot.contains(key, Tag.TAG_INT)
+                ? snapshot.getInt(key) : value.get();
+    }
+
+    public static double get(ForgeConfigSpec.DoubleValue value) {
+        CompoundTag snapshot = remoteGameplaySnapshot;
+        String key = GAMEPLAY_KEYS.get(value);
+        return snapshot != null && key != null && snapshot.contains(key, Tag.TAG_DOUBLE)
+                ? snapshot.getDouble(key) : value.get();
+    }
+
+    public static boolean get(ForgeConfigSpec.BooleanValue value) {
+        CompoundTag snapshot = remoteGameplaySnapshot;
+        String key = GAMEPLAY_KEYS.get(value);
+        return snapshot != null && key != null && snapshot.contains(key, Tag.TAG_BYTE)
+                ? snapshot.getBoolean(key) : value.get();
+    }
+
+    private static List<? extends String> getStringList(ForgeConfigSpec.ConfigValue<List<? extends String>> value) {
+        CompoundTag snapshot = remoteGameplaySnapshot;
+        String key = GAMEPLAY_KEYS.get(value);
+        if (snapshot == null || key == null || !snapshot.contains(key, Tag.TAG_LIST)) return value.get();
+        ListTag list = snapshot.getList(key, Tag.TAG_STRING);
+        java.util.ArrayList<String> result = new java.util.ArrayList<>(list.size());
+        for (int i = 0; i < list.size(); i++) result.add(list.getString(i));
+        return result;
+    }
+
+    public static int getRagdollLifetime() { return get(RAGDOLL_LIFETIME); }
+    public static int getMaxRagdolls() { return get(MAX_RAGDOLLS); }
+
     public static int getMaxRagdollsPerPlayer() {
-        return SERVER_SPEC.isLoaded() ? MAX_RAGDOLLS_PER_PLAYER.get() : 3;
+        return get(MAX_RAGDOLLS_PER_PLAYER);
     }
 
     public static boolean isRagdollEnabledFor(String entityId, boolean isPlayer) {
-        if (!ENABLE_RAGDOLLS.get()) return false;
+        if (!get(ENABLE_RAGDOLLS)) return false;
         String id = isPlayer ? "minecraft:player" : entityId;
-        if (isPlayer && !ENABLE_PLAYER_RAGDOLLS.get()) return false;
-        for (String denied : ENTITY_DENYLIST.get()) {
+        if (isPlayer && !get(ENABLE_PLAYER_RAGDOLLS)) return false;
+        for (String denied : getStringList(ENTITY_DENYLIST)) {
             if (denied != null && denied.trim().equalsIgnoreCase(id)) return false;
         }
         return true;
@@ -334,35 +461,32 @@ public class RagdollifiedConfig {
 
     public static float getPartKnockbackMultiplier(RagdollPart part) {
         return switch (part) {
-            case TORSO -> PART_KNOCKBACK_TORSO.get().floatValue();
-            case HEAD -> PART_KNOCKBACK_HEAD.get().floatValue();
-            case LEFT_LEG -> PART_KNOCKBACK_LEFT_LEG.get().floatValue();
-            case RIGHT_LEG -> PART_KNOCKBACK_RIGHT_LEG.get().floatValue();
-            case LEFT_ARM -> PART_KNOCKBACK_LEFT_ARM.get().floatValue();
-            case RIGHT_ARM -> PART_KNOCKBACK_RIGHT_ARM.get().floatValue();
+            case TORSO -> (float) get(PART_KNOCKBACK_TORSO);
+            case HEAD -> (float) get(PART_KNOCKBACK_HEAD);
+            case LEFT_LEG -> (float) get(PART_KNOCKBACK_LEFT_LEG);
+            case RIGHT_LEG -> (float) get(PART_KNOCKBACK_RIGHT_LEG);
+            case LEFT_ARM -> (float) get(PART_KNOCKBACK_LEFT_ARM);
+            case RIGHT_ARM -> (float) get(PART_KNOCKBACK_RIGHT_ARM);
         };
     }
 
     public static float getDeathPartKnockbackMultiplier(RagdollPart part) {
         return switch (part) {
-            case TORSO -> DEATH_PART_KNOCKBACK_TORSO.get().floatValue();
-            case HEAD -> DEATH_PART_KNOCKBACK_HEAD.get().floatValue();
-            case LEFT_LEG -> DEATH_PART_KNOCKBACK_LEFT_LEG.get().floatValue();
-            case RIGHT_LEG -> DEATH_PART_KNOCKBACK_RIGHT_LEG.get().floatValue();
-            case LEFT_ARM -> DEATH_PART_KNOCKBACK_LEFT_ARM.get().floatValue();
-            case RIGHT_ARM -> DEATH_PART_KNOCKBACK_RIGHT_ARM.get().floatValue();
+            case TORSO -> (float) get(DEATH_PART_KNOCKBACK_TORSO);
+            case HEAD -> (float) get(DEATH_PART_KNOCKBACK_HEAD);
+            case LEFT_LEG -> (float) get(DEATH_PART_KNOCKBACK_LEFT_LEG);
+            case RIGHT_LEG -> (float) get(DEATH_PART_KNOCKBACK_RIGHT_LEG);
+            case LEFT_ARM -> (float) get(DEATH_PART_KNOCKBACK_LEFT_ARM);
+            case RIGHT_ARM -> (float) get(DEATH_PART_KNOCKBACK_RIGHT_ARM);
         };
     }
 
     public static boolean shouldDebugRenderPhysics() { return debugRenderPhysics.get(); }
     public static boolean shouldLogPhysicsPerf() { return logPhysicsPerf.get(); }
 
-    // Read defensively: this SERVER value is queried from the client tick loop, which also
-    // runs at the main menu (no config loaded) and on vanilla servers (config never synced).
-    // ForgeConfigSpec#get() throws if the data isn't loaded yet, so gate on isLoaded().
-    public static boolean isCorpseEnabled() { return SERVER_SPEC.isLoaded() && ENABLE_CORPSES.get(); }
-    public static int getCorpseExpiryTicks() { return CORPSE_EXPIRY_TICKS.get(); }
-    public static int getCorpseSettleTimeoutTicks() { return CORPSE_SETTLE_TIMEOUT_TICKS.get(); }
-    public static boolean shouldStoreCorpseXp() { return CORPSE_STORE_XP.get(); }
-    public static boolean isCorpseCompassEnabled() { return isCorpseEnabled() && ENABLE_CORPSE_COMPASS.get(); }
+    public static boolean isCorpseEnabled() { return get(ENABLE_CORPSES); }
+    public static int getCorpseExpiryTicks() { return get(CORPSE_EXPIRY_TICKS); }
+    public static int getCorpseSettleTimeoutTicks() { return get(CORPSE_SETTLE_TIMEOUT_TICKS); }
+    public static boolean shouldStoreCorpseXp() { return get(CORPSE_STORE_XP); }
+    public static boolean isCorpseCompassEnabled() { return isCorpseEnabled() && get(ENABLE_CORPSE_COMPASS); }
 }

@@ -171,7 +171,8 @@ public class PhysicsHooks {
                     float baseStrength = Math.min(entity.getMaxHealth() / 10f, 5f);
                     float distanceFalloff = Math.max(0.5f, 1.0f - (distance / 10f));
                     float explosionStrength = baseStrength * distanceFalloff;
-                    double impulse = com.raiiiden.ragdollified.config.RagdollifiedConfig.HIT_IMPULSE_EXPLOSION.get();
+                    double impulse = com.raiiiden.ragdollified.config.RagdollifiedConfig.get(
+                            com.raiiiden.ragdollified.config.RagdollifiedConfig.HIT_IMPULSE_EXPLOSION);
                     vel = new Vec3(
                             direction.x * impulse * explosionStrength,
                             direction.y * impulse * 0.8 * explosionStrength + 3.0,

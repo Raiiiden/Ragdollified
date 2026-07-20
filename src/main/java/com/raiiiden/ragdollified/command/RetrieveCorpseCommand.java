@@ -29,7 +29,10 @@ public class RetrieveCorpseCommand {
                                 .then(Commands.argument("corpseId", UuidArgument.uuid())
                                         .executes(ctx -> run(ctx, false))
                                         .then(Commands.argument("player", EntityArgument.player())
-                                                .executes(ctx -> run(ctx, true))))));
+                                                .executes(ctx -> run(ctx, true))))
+                                .then(Commands.argument("owner", EntityArgument.player())
+                                        .then(Commands.literal("lastdeath")
+                                                .executes(RetrieveCorpseCommand::runLastDeath)))));
     }
 
     private static int run(CommandContext<CommandSourceStack> ctx, boolean explicitTarget) throws CommandSyntaxException {
@@ -46,7 +49,21 @@ public class RetrieveCorpseCommand {
             return 1;
         }
         source.sendFailure(Component.literal(
-                "No corpse found with id " + corpseId + " (it may be in an unloaded chunk — get closer and retry)."));
+                "No recoverable corpse found with id " + corpseId + "."));
+        return 0;
+    }
+
+    private static int runLastDeath(CommandContext<CommandSourceStack> ctx) throws CommandSyntaxException {
+        CommandSourceStack source = ctx.getSource();
+        ServerPlayer owner = EntityArgument.getPlayer(ctx, "owner");
+        boolean ok = CorpseManager.retrieveLastDeath(source.getServer(), owner.getUUID(), owner);
+        if (ok) {
+            source.sendSuccess(() -> Component.literal(
+                    "Retrieved " + owner.getName().getString() + "'s last unlooted corpse"), true);
+            return 1;
+        }
+        source.sendFailure(Component.literal(
+                owner.getName().getString() + " has no recoverable last-death corpse."));
         return 0;
     }
 }
