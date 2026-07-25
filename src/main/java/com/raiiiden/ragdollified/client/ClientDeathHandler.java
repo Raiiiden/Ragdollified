@@ -3,7 +3,6 @@ package com.raiiiden.ragdollified.client;
 import com.raiiiden.ragdollified.MobModelHelper;
 import com.raiiiden.ragdollified.Ragdollified;
 import com.raiiiden.ragdollified.config.RagdollifiedConfig;
-import net.minecraft.client.Minecraft;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.player.Player;
 import net.minecraftforge.api.distmarker.Dist;
@@ -26,8 +25,8 @@ public class ClientDeathHandler {
         // Only handle on client side
         if (!entity.level().isClientSide) return;
 
-        // Skip if we already have a ragdoll for this entity
-        if (ClientRagdollManager.hasRagdollFor(entity.getId())) return;
+        // Skip if either spawn path has already queued or constructed this entity.
+        if (ClientRagdollManager.hasPendingOrActiveRagdoll(entity.getId())) return;
 
         // Check if this entity should have a ragdoll
         boolean isPlayer = entity instanceof Player;
@@ -42,13 +41,6 @@ public class ClientDeathHandler {
             return;
         }
 
-        // Hide the original entity on client
-        entity.setInvisible(true);
-        entity.clearFire();
-        if (isPlayer) {
-            entity.setCustomNameVisible(false);
-        }
-
         // Snapshot procedural blood (Better Blood Overlay) so the ragdoll reproduces it. Mobs
         // are captured every frame by EntityRenderCaptureHandler, but that path skips players,
         // so capture them here — the player is still alive and its wounds are still present.
@@ -59,7 +51,7 @@ public class ClientDeathHandler {
         // Create the ragdoll
         ClientRagdollManager.createFromEntity(entity, event.getSource());
 
-        Ragdollified.LOGGER.debug("Client created ragdoll for {} (id: {})",
+        Ragdollified.LOGGER.debug("Client queued ragdoll for {} (id: {})",
                 entity.getName().getString(), entity.getId());
     }
 }

@@ -24,7 +24,8 @@ import java.util.function.Supplier;
 
 /**
  * Server→Client: Sent when an entity dies on the server.
- * Contains authoritative spawn data (position, velocity, armor, etc.)
+ * Contains authoritative spawn data (exact entity position, velocity in blocks/second,
+ * armor, etc.)
  * so all clients create the ragdoll from the same state.
  */
 public class RagdollSpawnPacket {
@@ -307,14 +308,6 @@ public class RagdollSpawnPacket {
             return;
         }
 
-        if (worldEntity instanceof net.minecraft.world.entity.LivingEntity living) {
-            living.setInvisible(true);
-            living.clearFire();
-            if (msg.isPlayer) {
-                living.setCustomNameVisible(false);
-            }
-        }
-
         // Get captured pose if available locally
         MobPoseCapture.MobPose capturedPose = MobPoseCapture.getPose(msg.originalEntityId);
 
@@ -329,7 +322,9 @@ public class RagdollSpawnPacket {
         // receiving this packet anyway, or PhysicsHooks ran before the hit landed).
         int hitPartIndex;
         Vec3 hitImpulse;
-        if (msg.hitPartIndex >= 0 || msg.hitPartIndex == RagdollHitMapper.CENTER_HIT_PART_INDEX) {
+        if (msg.hitPartIndex >= 0
+                || msg.hitPartIndex == RagdollHitMapper.CENTER_HIT_PART_INDEX
+                || msg.hitPartIndex == RagdollHitMapper.GLOBAL_VELOCITY_KICK_INDEX) {
             hitPartIndex = msg.hitPartIndex;
             hitImpulse = new Vec3(msg.hitImpulseX, msg.hitImpulseY, msg.hitImpulseZ);
         } else {

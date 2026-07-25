@@ -10,14 +10,18 @@ import com.bulletphysics.dynamics.RigidBody;
 import com.bulletphysics.dynamics.constraintsolver.ConstraintSolver;
 import com.bulletphysics.dynamics.constraintsolver.SequentialImpulseConstraintSolver;
 import com.raiiiden.ragdollified.config.RagdollifiedConfig;
+import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
+import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.Blocks;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.api.distmarker.OnlyIn;
 
 import javax.vecmath.Vector3f;
 import java.util.*;
-import java.util.function.Supplier;
+import java.util.function.Function;
 
 @OnlyIn(Dist.CLIENT)
 public class ClientJbulletWorld {
@@ -46,18 +50,19 @@ public class ClientJbulletWorld {
         }
     }
 
-    // Cap new cache-entry creation to 3 per tick. Each miss scans up to 7³=343 blocks and
-    // assembles a CompoundShape — doing many at once causes a visible frame hitch on spawn.
-    // Ragdolls that hit the cap keep their old geometry and retry the next tick; they may
-    // fall without floor collision for 1–2 ticks (< 0.05 blocks of drop), imperceptible.
+    // Limit expensive region acquisitions when many ragdolls spawn together.
     private static final int MAX_NEW_CACHE_ENTRIES_PER_TICK = 3;
+    private static final int UNLOADED_STATE_ID = Block.getId(Blocks.AIR.defaultBlockState());
     private int newCacheEntriesThisTick = 0;
 
     /** Per-tick stats. Reset once at the start of ClientRagdollManager.tickAll(). */
     public static final class CacheStats {
         public int hits;            // cache hit, no work done
-        public int misses;          // cache miss, supplier called → new bodies created
+        public int misses;          // region needed one or more block entries
         public int rateLimited;     // miss but creation budget exhausted, returned null
+        public int unloadedSkipped; // region was not fully available yet
+        public int poseDeferred;
+        public int poseRejected;
         public int staticBodiesCreatedThisTick; // sum of bodies created this tick
         public int liveCacheEntries;            // current size of the cache map
         public int liveStaticBodies;            // total static bodies across all cache entries
@@ -66,6 +71,9 @@ public class ClientJbulletWorld {
             hits = 0;
             misses = 0;
             rateLimited = 0;
+            unloadedSkipped = 0;
+            poseDeferred = 0;
+            poseRejected = 0;
             staticBodiesCreatedThisTick = 0;
         }
     }
@@ -84,18 +92,57 @@ public class ClientJbulletWorld {
     // churn (mass-spawn / pile collapse) we don't accumulate a huge backlog of stale
     // static-body geometry. Was 40 (2s) but in spike scenarios let cache grow to 91
     // entries / 5483 bodies; halving it caps the broadphase footprint.
-    private final Map<BlockPos, CachedCollisionData> collisionCache = new HashMap<>();
+    private final Long2ObjectOpenHashMap<CachedBlockCollisionData> collisionCache =
+            new Long2ObjectOpenHashMap<>();
+    private final BlockPos.MutableBlockPos cacheBuildPos = new BlockPos.MutableBlockPos();
     private static final int CACHE_LIFETIME_TICKS = 20;
     private int tickCount = 0;
 
-    private static class CachedCollisionData {
+    public static final class BuiltBlockCollisionGeometry {
         final List<RigidBody> bodies;
-        final int createdTick;
-        int refCount = 0;
+        final int stateId;
 
-        CachedCollisionData(List<RigidBody> bodies, int tick) {
+        public BuiltBlockCollisionGeometry(List<RigidBody> bodies, int stateId) {
             this.bodies = bodies;
-            this.createdTick = tick;
+            this.stateId = stateId;
+        }
+    }
+
+    public static final class CollisionGeometryHandle {
+        private final CachedBlockCollisionData[] blocks;
+        private final long terrainSignature;
+        private boolean released;
+
+        private CollisionGeometryHandle(CachedBlockCollisionData[] blocks, long terrainSignature) {
+            this.blocks = blocks;
+            this.terrainSignature = terrainSignature;
+        }
+
+        public boolean isValid() {
+            if (released) return false;
+            for (CachedBlockCollisionData block : blocks) {
+                if (block != null && !block.valid) return false;
+            }
+            return true;
+        }
+
+        public long terrainSignature() {
+            return terrainSignature;
+        }
+    }
+
+    private static final class CachedBlockCollisionData {
+        final long key;
+        final List<RigidBody> bodies;
+        final int stateId;
+        int refCount = 0;
+        int unusedSinceTick = -1;
+        boolean valid = true;
+
+        CachedBlockCollisionData(long key, List<RigidBody> bodies, int stateId) {
+            this.key = key;
+            this.bodies = bodies;
+            this.stateId = stateId;
         }
     }
 
@@ -164,12 +211,14 @@ public class ClientJbulletWorld {
     }
 
     private void tickCacheCleanup() {
-        collisionCache.entrySet().removeIf(entry -> {
-            CachedCollisionData data = entry.getValue();
-            if (data.refCount == 0 && (tickCount - data.createdTick) > CACHE_LIFETIME_TICKS) {
+        collisionCache.long2ObjectEntrySet().removeIf(entry -> {
+            CachedBlockCollisionData data = entry.getValue();
+            if (data.refCount == 0 && data.unusedSinceTick >= 0
+                    && (tickCount - data.unusedSinceTick) > CACHE_LIFETIME_TICKS) {
                 for (RigidBody body : data.bodies) {
                     dynamicsWorld.removeRigidBody(body);
                 }
+                data.valid = false;
                 return true;
             }
             return false;
@@ -177,85 +226,150 @@ public class ClientJbulletWorld {
         tickCount++;
     }
 
-    /**
-     * Returns the cached static bodies for {@code center}, creating them if necessary.
-     * Returns {@code null} (without creating) when the per-tick creation budget is full —
-     * the caller should retain its old geometry and retry on the next tick.
-     */
-    public List<RigidBody> getOrCreateCollisionGeometry(BlockPos center,
-                                                        Supplier<List<RigidBody>> creator) {
-        CachedCollisionData cached = collisionCache.get(center);
-        if (cached != null && (tickCount - cached.createdTick) <= CACHE_LIFETIME_TICKS) {
-            cached.refCount++;
-            cacheStats.hits++;
-            return cached.bodies; // cache hit — free, no budget consumed
+    // Returns null when the per-tick creation budget is full.
+    public CollisionGeometryHandle getOrCreateCollisionGeometry(
+            BlockPos center, int radius, Function<BlockPos, BuiltBlockCollisionGeometry> creator) {
+        boolean needsCreation = false;
+        for (int dx = -radius; dx <= radius && !needsCreation; dx++) {
+            for (int dy = -radius; dy <= radius && !needsCreation; dy++) {
+                for (int dz = -radius; dz <= radius; dz++) {
+                    int x = center.getX() + dx;
+                    int z = center.getZ() + dz;
+                    if (!isBlockChunkLoaded(x, z)) {
+                        continue;
+                    }
+                    long key = BlockPos.asLong(
+                            x, center.getY() + dy, z);
+                    CachedBlockCollisionData cached = collisionCache.get(key);
+                    if (cached == null || !cached.valid) {
+                        needsCreation = true;
+                        break;
+                    }
+                }
+            }
         }
 
-        // Stale entry (age > TTL) with no active users — eagerly remove its bodies from
-        // the world now so we don't add a duplicate set alongside the about-to-be-created ones.
-        if (cached != null && cached.refCount == 0) {
-            for (RigidBody body : cached.bodies) dynamicsWorld.removeRigidBody(body);
-            collisionCache.remove(center);
-        }
-
-        // Rate-limit new entry creation to avoid a hitch when many ragdolls spawn at once.
-        if (newCacheEntriesThisTick >= MAX_NEW_CACHE_ENTRIES_PER_TICK) {
+        if (needsCreation && newCacheEntriesThisTick >= MAX_NEW_CACHE_ENTRIES_PER_TICK) {
             cacheStats.rateLimited++;
-            return null; // caller keeps old geometry and retries next tick
+            return null;
         }
-        newCacheEntriesThisTick++;
+        if (needsCreation) newCacheEntriesThisTick++;
 
-        List<RigidBody> newBodies = creator.get();
-        cacheStats.misses++;
-        cacheStats.staticBodiesCreatedThisTick += newBodies.size();
-        CachedCollisionData newData = new CachedCollisionData(newBodies, tickCount);
-        newData.refCount = 1;
-        collisionCache.put(center, newData);
-        return newBodies;
+        int diameter = radius * 2 + 1;
+        CachedBlockCollisionData[] acquired =
+                new CachedBlockCollisionData[diameter * diameter * diameter];
+        int acquiredIndex = 0;
+        boolean countedUnavailable = false;
+        long signature = 0xcbf29ce484222325L;
+        for (int dx = -radius; dx <= radius; dx++) {
+            for (int dy = -radius; dy <= radius; dy++) {
+                for (int dz = -radius; dz <= radius; dz++) {
+                    int x = center.getX() + dx;
+                    int y = center.getY() + dy;
+                    int z = center.getZ() + dz;
+                    if (!isBlockChunkLoaded(x, z)) {
+                        if (!countedUnavailable) {
+                            cacheStats.unloadedSkipped++;
+                            countedUnavailable = true;
+                        }
+                        acquired[acquiredIndex++] = null;
+                        signature ^= UNLOADED_STATE_ID;
+                        signature *= 1099511628211L;
+                        continue;
+                    }
+                    long key = BlockPos.asLong(x, y, z);
+                    CachedBlockCollisionData data = collisionCache.get(key);
+                    if (data == null || !data.valid) {
+                        BuiltBlockCollisionGeometry built = creator.apply(cacheBuildPos.set(x, y, z));
+                        data = new CachedBlockCollisionData(key, built.bodies, built.stateId);
+                        collisionCache.put(key, data);
+                        cacheStats.staticBodiesCreatedThisTick += built.bodies.size();
+                    }
+                    data.refCount++;
+                    data.unusedSinceTick = -1;
+                    acquired[acquiredIndex++] = data;
+                    signature ^= data.stateId;
+                    signature *= 1099511628211L;
+                }
+            }
+        }
+
+        if (needsCreation) cacheStats.misses++;
+        else cacheStats.hits++;
+        return new CollisionGeometryHandle(acquired, signature);
+    }
+
+    private boolean isBlockChunkLoaded(int blockX, int blockZ) {
+        return level.getChunkSource().hasChunk(blockX >> 4, blockZ >> 4);
     }
 
     /** Refreshes liveCacheEntries / liveStaticBodies — call after step() each tick. */
     public void updateLiveCacheStats() {
         cacheStats.liveCacheEntries = collisionCache.size();
         int total = 0;
-        for (CachedCollisionData d : collisionCache.values()) total += d.bodies.size();
+        for (CachedBlockCollisionData d : collisionCache.values()) total += d.bodies.size();
         cacheStats.liveStaticBodies = total;
     }
 
-    // Mirrors JbulletWorld.releaseCollisionGeometry() exactly
-    public void releaseCollisionGeometry(BlockPos center) {
-        CachedCollisionData cached = collisionCache.get(center);
-        if (cached != null) {
-            cached.refCount = Math.max(0, cached.refCount - 1);
+    public void releaseCollisionGeometry(CollisionGeometryHandle handle) {
+        if (handle == null || handle.released) return;
+        handle.released = true;
+        for (CachedBlockCollisionData data : handle.blocks) {
+            if (data == null) continue;
+            data.refCount = Math.max(0, data.refCount - 1);
+            if (data.refCount == 0) {
+                data.unusedSinceTick = tickCount;
+            }
         }
     }
 
-    /**
-     * Drop any cache entries whose region contains the changed block, immediately
-     * removing their static bodies from the dynamics world. Called when a block
-     * is broken / placed / changed so ragdolls don't keep colliding with phantom
-     * floor geometry. Ragdolls referencing the dropped entries must reset their
-     * own currentCachedBodies / lastCollisionCenter — see ClientRagdoll.onBlockChangedNear.
-     *
-     * Caller must already be on the physics thread (drainInputQueues).
-     *
-     * @param radius cache region half-extent — must match ClientRagdoll.COLLISION_RADIUS
-     */
-    public int invalidateCacheNear(BlockPos pos, int radius) {
+    public void invalidateCollisionGeometry(CollisionGeometryHandle handle) {
+        if (handle == null) return;
+        for (CachedBlockCollisionData data : handle.blocks) {
+            if (data == null) continue;
+            invalidateBlock(data);
+        }
+    }
+
+    private boolean invalidateBlock(BlockPos pos) {
+        CachedBlockCollisionData data = collisionCache.get(pos.asLong());
+        if (data == null) return false;
+        return invalidateBlock(data);
+    }
+
+    private boolean invalidateBlock(CachedBlockCollisionData data) {
+        if (!data.valid) return false;
+        data.valid = false;
+        for (RigidBody body : data.bodies) {
+            dynamicsWorld.removeRigidBody(body);
+        }
+        if (collisionCache.get(data.key) == data) {
+            collisionCache.remove(data.key);
+        }
+        return true;
+    }
+
+    // Contextual block shapes can change when a direct neighbor changes.
+    public int invalidateBlockChange(BlockPos pos) {
         int removed = 0;
-        Iterator<Map.Entry<BlockPos, CachedCollisionData>> it = collisionCache.entrySet().iterator();
-        while (it.hasNext()) {
-            Map.Entry<BlockPos, CachedCollisionData> entry = it.next();
-            BlockPos center = entry.getKey();
-            int dx = Math.abs(center.getX() - pos.getX());
-            int dy = Math.abs(center.getY() - pos.getY());
-            int dz = Math.abs(center.getZ() - pos.getZ());
-            if (dx > radius || dy > radius || dz > radius) continue;
-            for (RigidBody body : entry.getValue().bodies) {
-                dynamicsWorld.removeRigidBody(body);
+        if (invalidateBlock(pos)) removed++;
+        for (Direction direction : Direction.values()) {
+            if (invalidateBlock(pos.relative(direction))) removed++;
+        }
+        return removed;
+    }
+
+    public int invalidateCacheRegion(BlockPos center, int radius) {
+        int removed = 0;
+        for (int dx = -radius; dx <= radius; dx++) {
+            for (int dy = -radius; dy <= radius; dy++) {
+                for (int dz = -radius; dz <= radius; dz++) {
+                    long key = BlockPos.asLong(
+                            center.getX() + dx, center.getY() + dy, center.getZ() + dz);
+                    CachedBlockCollisionData data = collisionCache.get(key);
+                    if (data != null && invalidateBlock(data)) removed++;
+                }
             }
-            it.remove();
-            removed++;
         }
         return removed;
     }
@@ -267,7 +381,8 @@ public class ClientJbulletWorld {
     public int getTickCount() { return tickCount; }
 
     public void destroy() {
-        for (CachedCollisionData data : collisionCache.values()) {
+        for (CachedBlockCollisionData data : collisionCache.values()) {
+            data.valid = false;
             for (RigidBody body : data.bodies) {
                 dynamicsWorld.removeRigidBody(body);
             }

@@ -5,6 +5,7 @@ import net.minecraft.world.phys.Vec3;
 
 public final class RagdollHitMapper {
     public static final int CENTER_HIT_PART_INDEX = -2;
+    public static final int GLOBAL_VELOCITY_KICK_INDEX = -3;
 
     private RagdollHitMapper() {}
     public static net.minecraft.world.phys.Vec3 computeImpulse(

@@ -5,6 +5,7 @@ import com.raiiiden.ragdollified.client.ClientRagdoll;
 import com.raiiiden.ragdollified.client.ClientRagdollManager;
 import com.raiiiden.ragdollified.server.PendingCorpse;
 import com.raiiiden.ragdollified.server.PendingCorpseStore;
+import com.raiiiden.ragdollified.server.ServerRagdollSyncManager;
 import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraftforge.api.distmarker.Dist;
@@ -87,6 +88,7 @@ public class RagdollImpulsePacket {
         if (magnitudeSq > 50.0 * 50.0) return;
 
         int revision = SERVER_SEQUENCE.updateAndGet(v -> v == Integer.MAX_VALUE ? 1 : v + 1);
+        ServerRagdollSyncManager.invalidateSettledPose(sender, msg.ragdollId, revision);
         PendingCorpseStore store = PendingCorpseStore.get(sender.server.overworld());
         for (PendingCorpse pending : store.pending.values()) {
             if (pending.deathEntityId == msg.ragdollId && pending.dimension != null

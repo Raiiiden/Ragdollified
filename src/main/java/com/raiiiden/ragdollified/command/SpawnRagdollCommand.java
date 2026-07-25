@@ -43,7 +43,8 @@ public class SpawnRagdollCommand {
                     player.getItemBySlot(EquipmentSlot.FEET).copy()
             );
 
-            ModNetwork.CHANNEL.send(PacketDistributor.ALL.noArg(), packet);
+            ModNetwork.CHANNEL.send(
+                    PacketDistributor.TRACKING_ENTITY_AND_SELF.with(() -> player), packet);
 
             source.sendSuccess(
                     () -> Component.literal("Spawned death ragdoll at your position"),

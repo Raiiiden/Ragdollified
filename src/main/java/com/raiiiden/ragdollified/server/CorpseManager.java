@@ -425,6 +425,9 @@ public class CorpseManager {
 
     private static void finishSpawn(ServerLevel level, CorpseEntity corpse, PendingCorpse p, Vec3 pos,
                                     RagdollTransform[] reportedPose) {
+        // The persistent corpse entity now owns late tracking for this player death.
+        ServerRagdollSyncManager.remove(p.deathEntityId);
+
         // Make sure the target chunk is loaded so the entity is accepted and persisted —
         // matters for the restart-recovery path where the death chunk is cold.
         level.getChunkAt(BlockPos.containing(pos.x, pos.y, pos.z));

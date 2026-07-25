@@ -1,19 +1,17 @@
 package com.raiiiden.ragdollified;
 
-import com.raiiiden.ragdollified.network.ModNetwork;
 import com.raiiiden.ragdollified.network.RagdollSpawnPacket;
 import com.raiiiden.ragdollified.config.RagdollifiedConfig;
+import com.raiiiden.ragdollified.server.ServerRagdollSyncManager;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.Pose;
-import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.phys.Vec3;
 import net.minecraftforge.event.entity.living.LivingDeathEvent;
 import net.minecraftforge.eventbus.api.EventPriority;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
-import net.minecraftforge.network.PacketDistributor;
 
 @Mod.EventBusSubscriber(modid = Ragdollified.MODID)
 public class PhysicsHooks {
@@ -37,15 +35,7 @@ public class PhysicsHooks {
             Ragdollified.LOGGER.debug("Sending ragdoll candidate for client-side model detection: {}", mobType);
         }
 
-        if (isPlayer || MobModelHelper.isSupportedModelType(modelType)) {
-            entity.setInvisible(true);
-            entity.clearFire();
-        }
-        if (isPlayer) {
-            entity.setCustomNameVisible(false);
-        }
-
-        Vec3 vel = calculateDeathVelocity(entity, event.getSource());
+        Vec3 vel = RagdollSpawnState.captureLinearVelocity(entity);
 
         float scale = isPlayer ? 1.0f : entity.getBbHeight() / 1.8f;
         // Use LivingEntity.isBaby() rather than an AgeableMob check: zombies, husks and
@@ -103,7 +93,13 @@ public class PhysicsHooks {
         ServerRagdollHitTracker.HitInfo hitInfo = ServerRagdollHitTracker.consume(entity.getId());
         byte hitPartIndex = -1;
         float hitImpulseX = 0f, hitImpulseY = 0f, hitImpulseZ = 0f;
-        if (hitInfo != null) {
+        Vec3 explosionKick = RagdollSpawnState.captureExplosionVelocityKick(entity, event.getSource());
+        if (explosionKick != null) {
+            hitPartIndex = (byte) RagdollHitMapper.GLOBAL_VELOCITY_KICK_INDEX;
+            hitImpulseX = (float) explosionKick.x;
+            hitImpulseY = (float) explosionKick.y;
+            hitImpulseZ = (float) explosionKick.z;
+        } else if (hitInfo != null) {
             Vec3 impulse = RagdollHitMapper.computeImpulse(
                     hitInfo.direction, hitInfo.isHeadShot, hitInfo.isTaczBullet, hitInfo.isMelee, hitInfo.damage);
             if (impulse != null) {
@@ -140,48 +136,7 @@ public class PhysicsHooks {
                 villagerType, villagerProfession, villagerLevel
         );
 
-        ModNetwork.CHANNEL.send(PacketDistributor.ALL.noArg(), packet);
+        ServerRagdollSyncManager.registerDeath(entity, packet);
     }
 
-    private static Vec3 calculateDeathVelocity(LivingEntity entity, net.minecraft.world.damagesource.DamageSource damageSource) {
-        Vec3 delta = entity.getDeltaMovement();
-        Vec3 vel = new Vec3(delta.x * 8, delta.y * 6, delta.z * 8);
-
-        boolean hasLowVelocity = delta.lengthSqr() < 0.5;
-
-        if (damageSource != null) {
-            String damageType = damageSource.getMsgId();
-
-            if (damageType.contains("tacz.bullet") && hasLowVelocity) {
-                Vec3 damagePos = damageSource.getSourcePosition();
-                if (damagePos != null) {
-                    Vec3 direction = entity.position().subtract(damagePos).normalize();
-                    vel = new Vec3(direction.x * 3.0, direction.y * 4.0 + 2.0, direction.z * 3.0);
-                } else {
-                    Vec3 lookVec = entity.getLookAngle();
-                    vel = new Vec3(lookVec.x * 5.0, 2.0, lookVec.z * 5.0);
-                }
-            }
-
-            if (damageType.contains("explosion")) {
-                Vec3 explosionCenter = damageSource.getSourcePosition();
-                if (explosionCenter != null) {
-                    Vec3 direction = entity.position().subtract(explosionCenter).normalize();
-                    float distance = (float) entity.position().distanceTo(explosionCenter);
-                    float baseStrength = Math.min(entity.getMaxHealth() / 10f, 5f);
-                    float distanceFalloff = Math.max(0.5f, 1.0f - (distance / 10f));
-                    float explosionStrength = baseStrength * distanceFalloff;
-                    double impulse = com.raiiiden.ragdollified.config.RagdollifiedConfig.get(
-                            com.raiiiden.ragdollified.config.RagdollifiedConfig.HIT_IMPULSE_EXPLOSION);
-                    vel = new Vec3(
-                            direction.x * impulse * explosionStrength,
-                            direction.y * impulse * 0.8 * explosionStrength + 3.0,
-                            direction.z * impulse * explosionStrength
-                    );
-                }
-            }
-        }
-
-        return vel;
-    }
 }

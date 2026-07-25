@@ -18,10 +18,14 @@ import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.resources.ResourceLocation;
+import net.minecraft.tags.FluidTags;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.material.FluidState;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
+import net.minecraft.world.phys.shapes.Shapes;
 import net.minecraft.world.phys.shapes.VoxelShape;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.api.distmarker.OnlyIn;
@@ -41,13 +45,17 @@ public class ClientRagdoll {
     private final ClientJbulletWorld physicsWorld;
     private final DiscreteDynamicsWorld world;
     public final List<RigidBody> ragdollParts = new ArrayList<>(6);
-    // O(1) membership mirror of ragdollParts. Used in correctInterpenetrations which
-    // scans every manifold in the global dynamics world every tick — ArrayList.contains()
-    // was a linear scan inside that hot loop.
+    // O(1) body membership for contact and hit checks.
     private final Set<RigidBody> ragdollPartsSet = new HashSet<>(8);
     private final List<TypedConstraint> ragdollJoints = new ArrayList<>(5);
     private BlockPos lastCollisionCenter = BlockPos.ZERO;
-    private List<RigidBody> currentCachedBodies = null;
+    private ClientJbulletWorld.CollisionGeometryHandle currentCollisionGeometry;
+    private BlockPos settledTerrainCenter = BlockPos.ZERO;
+    private long settledTerrainSignature;
+    private boolean hasSettledTerrainSignature;
+    private int collisionGeometryAcquiredTick = Integer.MIN_VALUE;
+    private final Set<BlockPos> activeGroundSupportBlocks = new HashSet<>(8);
+    private final Set<BlockPos> settledGroundSupportBlocks = new HashSet<>(8);
     public static final int COLLISION_RADIUS = 3;
 
     // Scratch vectors reused across per-tick physics calls. Each ragdoll has its own
@@ -56,6 +64,27 @@ public class ClientRagdoll {
     private final Vector3f scratchVel = new Vector3f();
     private final Vector3f scratchAng = new Vector3f();
     private final Vector3f scratchNormal = new Vector3f();
+    private final Vector3f groupPenetrationCorrection = new Vector3f();
+    private final Vector3f supportAabbMin = new Vector3f();
+    private final Vector3f supportAabbMax = new Vector3f();
+    private final Vector3f supportHalfExtents = new Vector3f();
+    private final float[] supportRotation = new float[9];
+    private final float[] supportAbsRotation = new float[9];
+    private final float[] supportTranslation = new float[3];
+    private final float[] supportWorldDelta = new float[3];
+    private final float[] supportBoxExtents = new float[3];
+    private final float[] supportTerrainExtents = new float[3];
+    private final BlockPos.MutableBlockPos fluidSamplePos = new BlockPos.MutableBlockPos();
+    private final BlockPos.MutableBlockPos fluidSurfacePos = new BlockPos.MutableBlockPos();
+    private final BlockPos.MutableBlockPos supportBlockPos = new BlockPos.MutableBlockPos();
+    private final BlockPos.MutableBlockPos terrainScanPos = new BlockPos.MutableBlockPos();
+    private static final float TERRAIN_CONTACT_DISTANCE = 0.05f;
+    private static final float GROUND_NORMAL_MIN_Y = 0.55f;
+    private static final double SUPPORT_BELOW_TOLERANCE = 0.12;
+    private static final double SUPPORT_ABOVE_TOLERANCE = 0.08;
+    private static final float PHANTOM_VERTICAL_SPEED = 0.12f;
+    private static final float FLUID_SURFACE_BELOW = 1.0f;
+    private static final float FLUID_SURFACE_ABOVE = 0.2f;
 
 
     // Lifecycle
@@ -66,6 +95,7 @@ public class ClientRagdoll {
     // Settled detection
     private int settledTicks = 0;
     private boolean settled = false;
+    private boolean pendingTerrainValidation = false;
     // Set alongside `settled` when the resting surface was fluid (water/lava) instead of
     // solid ground. Renderer reads this to apply a sin-based bob offset so frozen bodies
     // visibly float without re-running physics. Cleared on every wake path.
@@ -339,6 +369,8 @@ public class ClientRagdoll {
         public final ItemStack chestplate;
         public final ItemStack leggings;
         public final ItemStack boots;
+        // Exact death position (entity feet/origin) and inherited linear velocity in
+        // jBullet units (blocks per second).
         public final Vec3 position;
         public final float yRot;
         public final float xRot;
@@ -593,7 +625,9 @@ public class ClientRagdoll {
         // first rendered frame already shows the recoil. Runs on the physics worker
         // (we're inside processSpawnQueue), so direct jbullet calls are safe here.
         if (data.hitImpulse != null) {
-            if (data.hitPartIndex == CENTER_HIT_PART_INDEX) {
+            if (data.hitPartIndex == RagdollHitMapper.GLOBAL_VELOCITY_KICK_INDEX) {
+                applyGlobalVelocityKick(data.hitImpulse);
+            } else if (data.hitPartIndex == CENTER_HIT_PART_INDEX) {
                 applyCenteredDeathImpulse(data.hitImpulse);
             } else if (data.hitPartIndex >= 0 && data.hitPartIndex < ragdollParts.size()) {
                 RagdollPart part = RagdollPart.byIndex(data.hitPartIndex);
@@ -669,12 +703,43 @@ public class ClientRagdoll {
                 destroy();
                 return;
             }
+            if (pendingTerrainValidation) {
+                BlockPos torsoBlock = currentTorsoBlock();
+                if (!isSupportAreaLoaded()) return;
+                pendingTerrainValidation = false;
+                boolean onGround = collectWorldTerrainSupport();
+                boolean atSurface = isFloatingAtSurface();
+                boolean submergedBelowSurface = !atSurface && isSubmergedBelowSurface();
+                if ((!onGround && !atSurface) || submergedBelowSurface) {
+                    physicsWorld.cacheStats.poseRejected++;
+                    unsettleAndDropCache();
+                    PHASE_STATS.floorLostThisTick++;
+                    return;
+                }
+                settledOnLiquid = atSurface;
+                settledGroundSupportBlocks.clear();
+                if (!atSurface) settledGroundSupportBlocks.addAll(activeGroundSupportBlocks);
+                settledTerrainCenter = torsoBlock;
+                settledTerrainSignature = computeTerrainSignature(torsoBlock);
+                hasSettledTerrainSignature = true;
+            }
             // Periodic support check — ragdolls don't always get a NeighborNotifyEvent
             // when their support block is broken (especially for server-initiated
             // changes that don't fire client-side events). Every 10 ticks (0.5s),
             // verify there's still ground under us — OR fluid carrying us. If neither,
             // wake up and force the collision cache to rebuild.
-            if (ticksExisted % 10 == 0 && !isRestingOnGround() && !isInLiquidAtTorso()) {
+            boolean terrainChanged = hasSettledTerrainSignature
+                    && Math.floorMod(ticksExisted + id, 20) == 0
+                    && computeTerrainSignature(settledTerrainCenter) != settledTerrainSignature;
+            boolean supportLost = false;
+            boolean submergedBelowSurface = false;
+            if (ticksExisted % 10 == 0) {
+                boolean atFluidSurface = isFloatingAtSurface();
+                boolean liquidSupported = settledOnLiquid && atFluidSurface;
+                submergedBelowSurface = !atFluidSurface && isSubmergedBelowSurface();
+                supportLost = !liquidSupported && !hasSettledGroundSupport();
+            }
+            if (terrainChanged || supportLost || submergedBelowSurface) {
                 unsettleAndDropCache();
                 PHASE_STATS.floorLostThisTick++;
             }
@@ -746,11 +811,6 @@ public class ClientRagdoll {
         updateLocalWorldCollision();
         PHASE_STATS.updateLocalWorldCollisionNanos += System.nanoTime() - t;
 
-        // 5. correct interpenetrations
-        t = System.nanoTime();
-        correctInterpenetrations();
-        PHASE_STATS.correctInterpenetrationsNanos += System.nanoTime() - t;
-
         // Settled detection — only check every 5 ticks to save CPU
         if (ticksExisted % 5 == 0) {
             t = System.nanoTime();
@@ -767,18 +827,12 @@ public class ClientRagdoll {
         // stuck (small vy + no real support). Skip when floating in fluid — buoyancy is
         // the legitimate reason there's no ground contact, no phantom cache to fix.
         if (ticksExisted % 10 == 0
-                && !hasAnyPartGroundSupport()
+                && collisionGeometryReadyForContacts()
+                && !collectTerrainGroundContacts()
                 && hasLowVerticalSpeed()
-                && !isInLiquidAtTorso()) {
-            BlockPos torsoBlock = new BlockPos(
-                    (int) Math.floor(cachedTorsoPos.x),
-                    (int) Math.floor(cachedTorsoPos.y),
-                    (int) Math.floor(cachedTorsoPos.z));
-
-            physicsWorld.invalidateCacheNear(torsoBlock, COLLISION_RADIUS);
-
-            currentCachedBodies = null;
-            lastCollisionCenter = BlockPos.ZERO;
+                && !isAnyPartInLiquid()) {
+            physicsWorld.invalidateCollisionGeometry(currentCollisionGeometry);
+            releaseCurrentCollisionGeometry();
 
             for (RigidBody r : ragdollParts) {
                 r.forceActivationState(CollisionObject.DISABLE_DEACTIVATION);
@@ -800,19 +854,15 @@ public class ClientRagdoll {
         return !destroyed && !settled && !bodiesFrozen;
     }
 
-    /**
-     * Permanently retire this ragdoll: mark settled and remove its bodies from the world.
-     * Used by the manager to enforce MAX_ACTIVE_RAGDOLLS — the cheapest way to bound the
-     * solver's worst case is to stop simulating the oldest active ragdolls. They'll still
-     * render at their last position; clicking them or block changes can still wake them.
-     */
-    public void forceSettle() {
-        if (destroyed || settled) return;
-        settled = true;
-        // Only tag as on-liquid when the torso is actually at the surface — a corpse the
-        // active-cap retires while still sinking shouldn't visibly bob mid-water.
-        if (isFloatingAtSurface()) settledOnLiquid = true;
-        if (!bodiesFrozen) freezeBodies();
+    // Returns false while the ragdoll has no confirmed ground or surface support.
+    public boolean forceSettle() {
+        if (destroyed || settled) return false;
+        boolean onGround = collisionGeometryReadyForContacts() && collectTerrainGroundContacts();
+        boolean atSurface = isFloatingAtSurface();
+        if (!atSurface && isSubmergedBelowSurface()) return false;
+        if (!onGround && !atSurface) return false;
+        settleAtCurrentSupport(atSurface);
+        return true;
     }
 
     /**
@@ -823,8 +873,11 @@ public class ClientRagdoll {
      */
     private void unsettleAndDropCache() {
         settled = false;
+        pendingTerrainValidation = false;
         settledOnLiquid = false;
         settledTicks = 0;
+        hasSettledTerrainSignature = false;
+        markSettledPoseDirty();
         if (bodiesFrozen) unfreezeBodies();
         // Nuke the cache near our torso — covers the case where the broken block's
         // event never fired on the client (server-initiated change, etc.).
@@ -832,19 +885,29 @@ public class ClientRagdoll {
                 (int) Math.floor(cachedTorsoPos.x),
                 (int) Math.floor(cachedTorsoPos.y),
                 (int) Math.floor(cachedTorsoPos.z));
-        physicsWorld.invalidateCacheNear(torsoBlock, COLLISION_RADIUS);
-        currentCachedBodies = null;
-        lastCollisionCenter = BlockPos.ZERO;
+        physicsWorld.invalidateCacheRegion(torsoBlock, COLLISION_RADIUS);
+        releaseCurrentCollisionGeometry();
     }
 
     private void freezeBodies() {
         bodiesFrozen = true;
-        // Release cached block geometry — no longer needed while frozen.
-        if (currentCachedBodies != null && !lastCollisionCenter.equals(BlockPos.ZERO)) {
-            physicsWorld.releaseCollisionGeometry(lastCollisionCenter);
-            currentCachedBodies = null;
-            lastCollisionCenter = BlockPos.ZERO;
+        if (settled) {
+            settledTerrainCenter = new BlockPos(
+                    (int) Math.floor(cachedTorsoPos.x),
+                    (int) Math.floor(cachedTorsoPos.y),
+                    (int) Math.floor(cachedTorsoPos.z));
+            if (currentCollisionGeometry != null
+                    && currentCollisionGeometry.isValid()
+                    && settledTerrainCenter.equals(lastCollisionCenter)) {
+                settledTerrainSignature = currentCollisionGeometry.terrainSignature();
+            } else {
+                settledTerrainSignature = computeTerrainSignature(settledTerrainCenter);
+            }
+            hasSettledTerrainSignature = true;
+        } else {
+            hasSettledTerrainSignature = false;
         }
+        releaseCurrentCollisionGeometry();
         // Zero velocities so the bodies start clean when re-added.
         for (RigidBody r : ragdollParts) {
             r.setLinearVelocity(new Vector3f(0, 0, 0));
@@ -860,6 +923,10 @@ public class ClientRagdoll {
 
     private void unfreezeBodies() {
         bodiesFrozen = false;
+        if (!settled) {
+            hasSettledTerrainSignature = false;
+            settledGroundSupportBlocks.clear();
+        }
         // Re-add bodies before constraints (constraint solver expects live bodies).
         for (RigidBody r : ragdollParts) {
             world.addRigidBody(r);
@@ -873,11 +940,12 @@ public class ClientRagdoll {
     }
 
     private void updateSettledState() {
-        // Resolve resting state first so we know which velocity threshold to apply.
-        // Solid ground beats water — a ragdoll touching real terrain settles on the
-        // tighter ground gate (no render bob, faster freeze).
-        boolean onGround = isRestingOnGround();
-        boolean atSurface = !onGround && isFloatingAtSurface();
+        boolean onGround = collisionGeometryReadyForContacts() && collectTerrainGroundContacts();
+        boolean atSurface = isFloatingAtSurface();
+        if (!atSurface && isSubmergedBelowSurface()) {
+            settledTicks = 0;
+            return;
+        }
         boolean canSettle = onGround || atSurface;
 
         // Buoyancy + gravity at the half-submerged equilibrium leaves a ~0.07 m/s residual
@@ -903,9 +971,7 @@ public class ClientRagdoll {
             settledTicks++;
 
             if (settledTicks >= 2) {
-                settled = true;
-                if (atSurface) settledOnLiquid = true;
-                freezeBodies();
+                settleAtCurrentSupport(atSurface);
                 return;
             }
         } else {
@@ -924,9 +990,7 @@ public class ClientRagdoll {
             float dy = cachedTorsoPos.y - settleAnchorPos.y;
             float dz = cachedTorsoPos.z - settleAnchorPos.z;
             if (dx * dx + dy * dy + dz * dz < SETTLE_DISPLACEMENT_THRESHOLD_SQ && canSettle) {
-                settled = true;
-                if (atSurface) settledOnLiquid = true;
-                freezeBodies();
+                settleAtCurrentSupport(atSurface);
                 return;
             }
             settleAnchorPos.set(cachedTorsoPos);
@@ -934,96 +998,226 @@ public class ClientRagdoll {
         }
     }
 
-    /**
-     * Returns true if a solid block exists in the column directly under the torso
-     * center, at one of two Y levels (~0.5 and ~1.0 blocks down). Single column —
-     * no XZ tolerance — because any tolerance let the check pick up adjacent intact
-     * floor blocks when the user broke just the supporting block, returning a false
-     * positive that prevented the floor-loss / phantom-cache wakers from firing.
-     *
-     * Trade-off: ragdolls perched right on a grid edge (torso center exactly between
-     * two blocks) where only one of the supporting blocks is broken will unsettle
-     * unnecessarily. The ragdoll then falls a tiny bit, lands on the remaining
-     * support, and re-settles — visible as a brief drop. Acceptable cost for fixing
-     * the float-mid-air bug.
-     *
-     * The two Y samples cover both lying-flat torsos (~0.15 above support) and
-     * standing torsos (~0.4 above support). dy=0.5 catches the first case; dy=1.0
-     * catches the second.
-     */
-    private boolean isRestingOnGround() {
-        int tx = (int) Math.floor(cachedTorsoPos.x);
-        int tz = (int) Math.floor(cachedTorsoPos.z);
-        int ty1 = (int) Math.floor(cachedTorsoPos.y - 0.5f);
-        if (isSolidBlock(tx, ty1, tz)) return true;
-        int ty2 = (int) Math.floor(cachedTorsoPos.y - 1.0f);
-        if (ty2 != ty1 && isSolidBlock(tx, ty2, tz)) return true;
-        return false;
+    private void settleAtCurrentSupport(boolean atSurface) {
+        settled = true;
+        pendingTerrainValidation = false;
+        settledOnLiquid = atSurface;
+        settledGroundSupportBlocks.clear();
+        if (!atSurface) settledGroundSupportBlocks.addAll(activeGroundSupportBlocks);
+        freezeBodies();
     }
 
-    private boolean isSolidBlock(int x, int y, int z) {
-        BlockPos pos = new BlockPos(x, y, z);
-        BlockState state = level.getBlockState(pos);
-        return !state.isAir() && !state.getCollisionShape(level, pos).isEmpty();
-    }
-
-    private boolean hasAnyPartGroundSupport() {
-        for (int i = 0; i < cachedTransforms.length && i < ragdollParts.size(); i++) {
-            RagdollTransform transform = cachedTransforms[i];
-            if (transform == null) continue;
-
-            Vector3f halfExtents = new Vector3f(0.15f, 0.25f, 0.15f);
-            if (ragdollParts.get(i).getCollisionShape() instanceof BoxShape box) {
-                box.getHalfExtentsWithoutMargin(halfExtents);
+    private boolean hasSettledGroundSupport() {
+        if (!settledGroundSupportBlocks.isEmpty()) {
+            for (BlockPos pos : settledGroundSupportBlocks) {
+                BlockState state = level.getBlockState(pos);
+                if (!state.isAir() && !state.getCollisionShape(level, pos).isEmpty()) {
+                    return true;
+                }
             }
+            return false;
+        }
+        return collectWorldTerrainSupport();
+    }
 
-            Vector3f pos = transform.position;
-            int y = (int) Math.floor(pos.y - halfExtents.y - 0.08f);
-            int x = (int) Math.floor(pos.x);
-            int z = (int) Math.floor(pos.z);
-            if (isSolidBlock(x, y, z)) return true;
+    private boolean collectWorldTerrainSupport() {
+        activeGroundSupportBlocks.clear();
+        for (RigidBody body : ragdollParts) {
+            body.getWorldTransform(tempTransform);
+            body.getCollisionShape().getAabb(tempTransform, supportAabbMin, supportAabbMax);
 
-            if (halfExtents.x > 0.12f || halfExtents.z > 0.12f) {
-                if (isSolidBlock((int) Math.floor(pos.x + halfExtents.x), y, z)) return true;
-                if (isSolidBlock((int) Math.floor(pos.x - halfExtents.x), y, z)) return true;
-                if (isSolidBlock(x, y, (int) Math.floor(pos.z + halfExtents.z))) return true;
-                if (isSolidBlock(x, y, (int) Math.floor(pos.z - halfExtents.z))) return true;
+            double minX = supportAabbMin.x;
+            double maxX = supportAabbMax.x;
+            double minZ = supportAabbMin.z;
+            double maxZ = supportAabbMax.z;
+            double bottom = supportAabbMin.y;
+            if (maxX <= minX || maxZ <= minZ) continue;
+
+            int blockMinX = (int) Math.floor(minX);
+            int blockMaxX = (int) Math.floor(maxX - 1.0e-5);
+            int blockMinY = (int) Math.floor(bottom - SUPPORT_BELOW_TOLERANCE);
+            int blockMaxY = (int) Math.floor(bottom + SUPPORT_ABOVE_TOLERANCE);
+            int blockMinZ = (int) Math.floor(minZ);
+            int blockMaxZ = (int) Math.floor(maxZ - 1.0e-5);
+            BoxShape boxShape = body.getCollisionShape() instanceof BoxShape box ? box : null;
+            if (boxShape != null) boxShape.getHalfExtentsWithMargin(supportHalfExtents);
+
+            for (int x = blockMinX; x <= blockMaxX; x++) {
+                for (int y = blockMinY; y <= blockMaxY; y++) {
+                    for (int z = blockMinZ; z <= blockMaxZ; z++) {
+                        supportBlockPos.set(x, y, z);
+                        VoxelShape shape = level.getBlockState(supportBlockPos)
+                                .getCollisionShape(level, supportBlockPos);
+                        if (shape.isEmpty()) continue;
+                        for (AABB box : shape.toAabbs()) {
+                            double worldMinX = x + box.minX;
+                            double worldMaxX = x + box.maxX;
+                            double worldMinZ = z + box.minZ;
+                            double worldMaxZ = z + box.maxZ;
+                            double worldTop = y + box.maxY;
+                            if (worldTop < bottom - SUPPORT_BELOW_TOLERANCE
+                                    || worldTop > bottom + SUPPORT_ABOVE_TOLERANCE) continue;
+                            boolean intersects = boxShape != null
+                                    ? orientedBoxIntersectsAabb(
+                                            tempTransform, supportHalfExtents,
+                                            worldMinX, y + box.minY, worldMinZ,
+                                            worldMaxX,
+                                            worldTop + SUPPORT_BELOW_TOLERANCE,
+                                            worldMaxZ)
+                                    : worldMaxX > minX && worldMinX < maxX
+                                            && worldMaxZ > minZ && worldMinZ < maxZ;
+                            if (!intersects) continue;
+                            activeGroundSupportBlocks.add(supportBlockPos.immutable());
+                            break;
+                        }
+                    }
+                }
             }
         }
-        return false;
+        return !activeGroundSupportBlocks.isEmpty();
+    }
+
+    private boolean isSupportAreaLoaded() {
+        for (RigidBody body : ragdollParts) {
+            body.getWorldTransform(tempTransform);
+            body.getCollisionShape().getAabb(tempTransform, supportAabbMin, supportAabbMax);
+            int minChunkX = ((int) Math.floor(supportAabbMin.x)) >> 4;
+            int maxChunkX = ((int) Math.floor(supportAabbMax.x)) >> 4;
+            int minChunkZ = ((int) Math.floor(supportAabbMin.z)) >> 4;
+            int maxChunkZ = ((int) Math.floor(supportAabbMax.z)) >> 4;
+            for (int chunkX = minChunkX; chunkX <= maxChunkX; chunkX++) {
+                for (int chunkZ = minChunkZ; chunkZ <= maxChunkZ; chunkZ++) {
+                    if (!level.getChunkSource().hasChunk(chunkX, chunkZ)) return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    private boolean orientedBoxIntersectsAabb(
+            Transform transform, Vector3f halfExtents,
+            double minX, double minY, double minZ,
+            double maxX, double maxY, double maxZ) {
+        supportRotation[0] = transform.basis.m00;
+        supportRotation[1] = transform.basis.m10;
+        supportRotation[2] = transform.basis.m20;
+        supportRotation[3] = transform.basis.m01;
+        supportRotation[4] = transform.basis.m11;
+        supportRotation[5] = transform.basis.m21;
+        supportRotation[6] = transform.basis.m02;
+        supportRotation[7] = transform.basis.m12;
+        supportRotation[8] = transform.basis.m22;
+        for (int i = 0; i < 9; i++) {
+            supportAbsRotation[i] = Math.abs(supportRotation[i]) + 1.0e-5f;
+        }
+
+        supportBoxExtents[0] = halfExtents.x;
+        supportBoxExtents[1] = halfExtents.y;
+        supportBoxExtents[2] = halfExtents.z;
+        supportTerrainExtents[0] = (float) ((maxX - minX) * 0.5);
+        supportTerrainExtents[1] = (float) ((maxY - minY) * 0.5);
+        supportTerrainExtents[2] = (float) ((maxZ - minZ) * 0.5);
+
+        float dx = (float) ((minX + maxX) * 0.5) - transform.origin.x;
+        float dy = (float) ((minY + maxY) * 0.5) - transform.origin.y;
+        float dz = (float) ((minZ + maxZ) * 0.5) - transform.origin.z;
+        supportTranslation[0] = dx * supportRotation[0]
+                + dy * supportRotation[1] + dz * supportRotation[2];
+        supportTranslation[1] = dx * supportRotation[3]
+                + dy * supportRotation[4] + dz * supportRotation[5];
+        supportTranslation[2] = dx * supportRotation[6]
+                + dy * supportRotation[7] + dz * supportRotation[8];
+
+        for (int i = 0; i < 3; i++) {
+            float radius = supportTerrainExtents[0] * supportAbsRotation[i * 3]
+                    + supportTerrainExtents[1] * supportAbsRotation[i * 3 + 1]
+                    + supportTerrainExtents[2] * supportAbsRotation[i * 3 + 2];
+            if (Math.abs(supportTranslation[i]) > supportBoxExtents[i] + radius) return false;
+        }
+
+        supportWorldDelta[0] = dx;
+        supportWorldDelta[1] = dy;
+        supportWorldDelta[2] = dz;
+        for (int j = 0; j < 3; j++) {
+            float radius = supportTerrainExtents[j]
+                    + supportBoxExtents[0] * supportAbsRotation[j]
+                    + supportBoxExtents[1] * supportAbsRotation[3 + j]
+                    + supportBoxExtents[2] * supportAbsRotation[6 + j];
+            if (Math.abs(supportWorldDelta[j]) > radius) return false;
+        }
+
+        for (int i = 0; i < 3; i++) {
+            int i1 = (i + 1) % 3;
+            int i2 = (i + 2) % 3;
+            for (int j = 0; j < 3; j++) {
+                int j1 = (j + 1) % 3;
+                int j2 = (j + 2) % 3;
+                float boxRadius = supportBoxExtents[i1] * supportAbsRotation[i2 * 3 + j]
+                        + supportBoxExtents[i2] * supportAbsRotation[i1 * 3 + j];
+                float terrainRadius =
+                        supportTerrainExtents[j1] * supportAbsRotation[i * 3 + j2]
+                        + supportTerrainExtents[j2] * supportAbsRotation[i * 3 + j1];
+                float distance = Math.abs(
+                        supportTranslation[i2] * supportRotation[i1 * 3 + j]
+                        - supportTranslation[i1] * supportRotation[i2 * 3 + j]);
+                if (distance > boxRadius + terrainRadius) return false;
+            }
+        }
+        return true;
+    }
+
+    private boolean collectTerrainGroundContacts() {
+        activeGroundSupportBlocks.clear();
+        for (PersistentManifold manifold : world.getDispatcher().getInternalManifoldPointer()) {
+            RigidBody bodyA = (RigidBody) manifold.getBody0();
+            RigidBody bodyB = (RigidBody) manifold.getBody1();
+            boolean aIsThis = ragdollPartsSet.contains(bodyA);
+            boolean bIsThis = ragdollPartsSet.contains(bodyB);
+            if (aIsThis == bIsThis) continue;
+
+            RigidBody terrain = aIsThis ? bodyB : bodyA;
+            if (terrain.getInvMass() != 0f || !(terrain.getUserPointer() instanceof BlockPos supportPos)) {
+                continue;
+            }
+
+            for (int i = 0; i < manifold.getNumContacts(); i++) {
+                ManifoldPoint point = manifold.getContactPoint(i);
+                if (point.getDistance() > TERRAIN_CONTACT_DISTANCE) continue;
+                float supportNormalY = aIsThis
+                        ? point.normalWorldOnB.y
+                        : -point.normalWorldOnB.y;
+                if (supportNormalY > GROUND_NORMAL_MIN_Y) {
+                    activeGroundSupportBlocks.add(supportPos);
+                    break;
+                }
+            }
+        }
+        return !activeGroundSupportBlocks.isEmpty();
+    }
+
+    private boolean collisionGeometryReadyForContacts() {
+        return currentCollisionGeometry != null
+                && currentCollisionGeometry.isValid()
+                && physicsWorld.getTickCount() > collisionGeometryAcquiredTick;
     }
 
     private boolean hasLowVerticalSpeed() {
         for (RigidBody body : ragdollParts) {
             body.getLinearVelocity(scratchVel);
-            if (Math.abs(scratchVel.y) > 0.12f) return false;
+            if (Math.abs(scratchVel.y) > PHANTOM_VERTICAL_SPEED) return false;
         }
         return true;
     }
 
-    /**
-     * Handle a nearby block change (break / place / state change). Two effects:
-     *
-     * 1. If our cached static-collision geometry overlaps the changed block, drop the
-     *    reference. The cache entry was already removed by ClientJbulletWorld's
-     *    invalidateCacheNear() (called before this method on the same tick), so the
-     *    static bodies are out of the world. Setting lastCollisionCenter=ZERO forces
-     *    the next updateLocalWorldCollision to re-acquire fresh geometry that
-     *    reflects the current world state.
-     *
-     * 2. If we're settled or distance-frozen and the change is near our torso, wake up.
-     *    Without #1, an awoken ragdoll would just sit on the now-deleted block's
-     *    cached collision geometry.
-     */
+    // Drop affected cache references and wake nearby frozen ragdolls.
     public void onBlockChangedNear(BlockPos changedPos) {
         // Invalidate our cache reference if its region contains the changed block
-        if (!lastCollisionCenter.equals(BlockPos.ZERO)) {
+        if (currentCollisionGeometry != null) {
             int dx = Math.abs(lastCollisionCenter.getX() - changedPos.getX());
             int dy = Math.abs(lastCollisionCenter.getY() - changedPos.getY());
             int dz = Math.abs(lastCollisionCenter.getZ() - changedPos.getZ());
             if (dx <= COLLISION_RADIUS && dy <= COLLISION_RADIUS && dz <= COLLISION_RADIUS) {
-                currentCachedBodies = null;
-                lastCollisionCenter = BlockPos.ZERO;
+                releaseCurrentCollisionGeometry();
             }
         }
 
@@ -1034,8 +1228,11 @@ public class ClientRagdoll {
             double dz = changedPos.getZ() + 0.5 - cachedTorsoPos.z;
             if (dx*dx + dy*dy + dz*dz < (COLLISION_RADIUS+1)*(COLLISION_RADIUS+1)) {
                 settled = false;
+                pendingTerrainValidation = false;
                 settledOnLiquid = false;
                 settledTicks = 0;
+                hasSettledTerrainSignature = false;
+                markSettledPoseDirty();
                 if (bodiesFrozen) unfreezeBodies();
             }
         }
@@ -1069,61 +1266,14 @@ public class ClientRagdoll {
         float dz = otherTorsoPos.z - cachedTorsoPos.z;
         if (dx * dx + dy * dy + dz * dz < 4.0f) { // 2-block radius
             settled = false;
+            pendingTerrainValidation = false;
             settledOnLiquid = false;
             settledTicks = 0;
+            markSettledPoseDirty();
             unfreezeBodies();
             return true;
         }
         return false;
-    }
-
-    // ============================
-    // Collision — mirrors MobRagdollPhysics exactly
-    // ============================
-
-    private void correctInterpenetrations() {
-        for (PersistentManifold manifold : world.getDispatcher().getInternalManifoldPointer()) {
-            int numContacts = manifold.getNumContacts();
-            if (numContacts == 0) continue;
-
-            // Hoist body lookups + part-membership checks out of the contact loop.
-            // The two bodies don't change between contacts within the same manifold.
-            RigidBody a = (RigidBody) manifold.getBody0();
-            RigidBody b = (RigidBody) manifold.getBody1();
-            boolean aIsThis = ragdollPartsSet.contains(a);
-            boolean bIsThis = ragdollPartsSet.contains(b);
-            if (aIsThis == bIsThis) continue; // both ours or neither ours
-
-            boolean bothDynamic = (a.getInvMass() > 0 && b.getInvMass() > 0);
-            float dampFactor = bothDynamic ? 0.92f : 0.5f;
-            boolean aDyn = a.getInvMass() > 0;
-            boolean bDyn = b.getInvMass() > 0;
-
-            for (int i = 0; i < numContacts; i++) {
-                ManifoldPoint point = manifold.getContactPoint(i);
-                if (point.getDistance() >= -0.15f) continue;
-
-                scratchNormal.set(point.normalWorldOnB);
-                float depth = Math.abs(point.getDistance());
-                float actualCorrection = bothDynamic
-                        ? Math.min(depth * 1.5f, 0.2f) * 0.15f
-                        : Math.min(depth * 0.35f, 0.05f);
-
-                scratchNormal.scale(actualCorrection);
-                if (aDyn) a.translate(scratchNormal);
-                scratchNormal.scale(-1f);
-                if (bDyn) b.translate(scratchNormal);
-
-                if (aDyn) {
-                    a.getLinearVelocity(scratchVel);  scratchVel.scale(dampFactor);  a.setLinearVelocity(scratchVel);
-                    a.getAngularVelocity(scratchAng); scratchAng.scale(dampFactor);  a.setAngularVelocity(scratchAng);
-                }
-                if (bDyn) {
-                    b.getLinearVelocity(scratchVel);  scratchVel.scale(dampFactor);  b.setLinearVelocity(scratchVel);
-                    b.getAngularVelocity(scratchAng); scratchAng.scale(dampFactor);  b.setAngularVelocity(scratchAng);
-                }
-            }
-        }
     }
 
     // ============================
@@ -1132,13 +1282,22 @@ public class ClientRagdoll {
 
     private void updateLocalWorldCollision() {
         Vector3f torsoPos = cachedTorsoPos;
-        BlockPos center = new BlockPos((int) torsoPos.x, (int) torsoPos.y, (int) torsoPos.z);
+        BlockPos center = new BlockPos(
+                (int) Math.floor(torsoPos.x),
+                (int) Math.floor(torsoPos.y),
+                (int) Math.floor(torsoPos.z));
 
-        // Only update when ragdoll moves to a new block center.
-        // NO periodic timer — the old 20-tick timer forced release+reacquire every second,
-        // which called wakeUpAndClearContacts() and nuked all floor contact manifolds.
-        // Block changes are handled by the cache TTL expiry in ClientJbulletWorld.
-        if (center.equals(lastCollisionCenter)) return;
+        if (currentCollisionGeometry != null && !currentCollisionGeometry.isValid()) {
+            releaseCurrentCollisionGeometry();
+        }
+
+        if (center.equals(lastCollisionCenter) && currentCollisionGeometry != null) {
+            if (Math.floorMod(ticksExisted + id, 20) != 0) return;
+            long currentSignature = computeTerrainSignature(center);
+            if (currentSignature == currentCollisionGeometry.terrainSignature()) return;
+            physicsWorld.invalidateCollisionGeometry(currentCollisionGeometry);
+            releaseCurrentCollisionGeometry();
+        }
 
         // Try to acquire new geometry first. getOrCreateCollisionGeometry returns null when
         // the per-tick creation budget is exhausted — we keep the old geometry and retry
@@ -1150,72 +1309,114 @@ public class ClientRagdoll {
         // per cache entry was reverted: jbullet's CompoundCollisionAlgorithm iterates
         // all children per pair (no internal BVH), turning broadphase savings into a
         // much larger narrowphase loss.
-        List<RigidBody> newBodies = physicsWorld.getOrCreateCollisionGeometry(center, () -> {
-            List<RigidBody> bodies = new ArrayList<>();
-            for (int dx = -COLLISION_RADIUS; dx <= COLLISION_RADIUS; dx++)
-                for (int dy = -COLLISION_RADIUS; dy <= COLLISION_RADIUS; dy++)
-                    for (int dz = -COLLISION_RADIUS; dz <= COLLISION_RADIUS; dz++) {
-                        BlockPos pos = center.offset(dx, dy, dz);
-                        BlockState state = level.getBlockState(pos);
-                        if (state.isAir() || state.getFluidState().isSource()) continue;
-                        if (isCompletelySurrounded(pos)) continue;
+        ClientJbulletWorld.CollisionGeometryHandle newGeometry =
+                physicsWorld.getOrCreateCollisionGeometry(
+                        center, COLLISION_RADIUS, this::buildBlockCollisionGeometry);
 
-                        VoxelShape shape = state.getCollisionShape(level, pos);
-                        if (shape.isEmpty()) continue;
-
-                        for (AABB box : shape.toAabbs()) {
-                            Vector3f halfExtents = new Vector3f(
-                                    (float)(box.getXsize() / 2),
-                                    (float)(box.getYsize() / 2),
-                                    (float)(box.getZsize() / 2)
-                            );
-                            CollisionShape cs = new BoxShape(halfExtents);
-                            Transform t = new Transform();
-                            t.setIdentity();
-                            t.origin.set(
-                                    (float)(pos.getX() + box.minX + box.getXsize() / 2),
-                                    (float)(pos.getY() + box.minY + box.getYsize() / 2),
-                                    (float)(pos.getZ() + box.minZ + box.getZsize() / 2)
-                            );
-                            RigidBody rb = new RigidBody(new RigidBodyConstructionInfo(
-                                    0f, new DefaultMotionState(t), cs, new Vector3f()));
-                            rb.setCollisionFlags(rb.getCollisionFlags() | CollisionFlags.STATIC_OBJECT);
-                            rb.setFriction((float) RagdollifiedConfig.get(RagdollifiedConfig.FRICTION));
-                            rb.setRestitution(0f);
-                            world.addRigidBody(rb);
-                            bodies.add(rb);
-                        }
-                    }
-            return bodies;
-        });
-
-        if (newBodies == null) {
+        if (newGeometry == null) {
             // Rate-limited this tick — keep old geometry, lastCollisionCenter unchanged so
             // we retry next tick (center != lastCollisionCenter will be true again).
             return;
         }
 
         // Release old AFTER acquiring new, so the ragdoll always has valid floor coverage.
-        if (currentCachedBodies != null && !lastCollisionCenter.equals(BlockPos.ZERO)) {
-            physicsWorld.releaseCollisionGeometry(lastCollisionCenter);
+        if (currentCollisionGeometry != null) {
+            physicsWorld.releaseCollisionGeometry(currentCollisionGeometry);
         }
 
         lastCollisionCenter = center;
-        currentCachedBodies = newBodies;
+        currentCollisionGeometry = newGeometry;
+        collisionGeometryAcquiredTick = physicsWorld.getTickCount();
 
         // No wakeUpAndClearContacts() — clearing manifolds destroys floor contacts
         // and causes the settle-sink-bounce cycle. JBullet builds new contacts for
         // the new geometry within 1-2 substeps naturally.
     }
 
-    private boolean isCompletelySurrounded(BlockPos pos) {
+    private ClientJbulletWorld.BuiltBlockCollisionGeometry buildBlockCollisionGeometry(BlockPos pos) {
+        List<RigidBody> bodies = new ArrayList<>();
+        BlockState state = level.getBlockState(pos);
+        int stateId = Block.getId(state);
+        if (state.isAir()) {
+            return new ClientJbulletWorld.BuiltBlockCollisionGeometry(bodies, stateId);
+        }
+
+        VoxelShape shape = state.getCollisionShape(level, pos);
+        if (shape.isEmpty() || isCompletelySurrounded(pos, shape)) {
+            return new ClientJbulletWorld.BuiltBlockCollisionGeometry(bodies, stateId);
+        }
+
+        for (AABB box : shape.toAabbs()) {
+            Vector3f halfExtents = new Vector3f(
+                    (float)(box.getXsize() / 2),
+                    (float)(box.getYsize() / 2),
+                    (float)(box.getZsize() / 2)
+            );
+            CollisionShape cs = new BoxShape(halfExtents);
+            Transform transform = new Transform();
+            transform.setIdentity();
+            transform.origin.set(
+                    (float)(pos.getX() + box.minX + box.getXsize() / 2),
+                    (float)(pos.getY() + box.minY + box.getYsize() / 2),
+                    (float)(pos.getZ() + box.minZ + box.getZsize() / 2)
+            );
+            RigidBody body = new RigidBody(new RigidBodyConstructionInfo(
+                    0f, new DefaultMotionState(transform), cs, new Vector3f()));
+            body.setCollisionFlags(body.getCollisionFlags() | CollisionFlags.STATIC_OBJECT);
+            body.setFriction((float) RagdollifiedConfig.get(RagdollifiedConfig.FRICTION));
+            body.setRestitution(0f);
+            body.setUserPointer(pos.immutable());
+            world.addRigidBody(body);
+            bodies.add(body);
+        }
+        return new ClientJbulletWorld.BuiltBlockCollisionGeometry(bodies, stateId);
+    }
+
+    private long computeTerrainSignature(BlockPos center) {
+        long signature = terrainSignatureSeed();
+        for (int dx = -COLLISION_RADIUS; dx <= COLLISION_RADIUS; dx++) {
+            for (int dy = -COLLISION_RADIUS; dy <= COLLISION_RADIUS; dy++) {
+                for (int dz = -COLLISION_RADIUS; dz <= COLLISION_RADIUS; dz++) {
+                    terrainScanPos.set(
+                            center.getX() + dx, center.getY() + dy, center.getZ() + dz);
+                    signature = mixTerrainSignature(
+                            signature, level.getBlockState(terrainScanPos));
+                }
+            }
+        }
+        return signature;
+    }
+
+    private static long terrainSignatureSeed() {
+        return 0xcbf29ce484222325L;
+    }
+
+    private static long mixTerrainSignature(long signature, BlockState state) {
+        return (signature ^ Block.getId(state)) * 0x100000001b3L;
+    }
+
+    private void releaseCurrentCollisionGeometry() {
+        if (currentCollisionGeometry != null) {
+            physicsWorld.releaseCollisionGeometry(currentCollisionGeometry);
+            currentCollisionGeometry = null;
+        }
+        collisionGeometryAcquiredTick = Integer.MIN_VALUE;
+        lastCollisionCenter = BlockPos.ZERO;
+    }
+
+    private BlockPos currentTorsoBlock() {
+        return new BlockPos(
+                (int) Math.floor(cachedTorsoPos.x),
+                (int) Math.floor(cachedTorsoPos.y),
+                (int) Math.floor(cachedTorsoPos.z));
+    }
+
+    private boolean isCompletelySurrounded(BlockPos pos, VoxelShape shape) {
         for (Direction dir : Direction.values()) {
             BlockPos neighbor = pos.relative(dir);
             BlockState neighborState = level.getBlockState(neighbor);
-            if (neighborState.isAir()
-                    || neighborState.getFluidState().isSource()
-                    || neighborState.getCollisionShape(level, neighbor).isEmpty()
-                    || neighborState.canBeReplaced()) {
+            VoxelShape neighborShape = neighborState.getCollisionShape(level, neighbor);
+            if (!Shapes.blockOccudes(shape, neighborShape, dir)) {
                 return false;
             }
         }
@@ -1258,17 +1459,13 @@ public class ClientRagdoll {
             spawnYOffset = isBabyChicken() ? 0.27f : 0.54f;
         }
 
-        // Deterministic spawn jitter. Seed from the server entity id — identical on every
-        // client (and across both spawn paths: the local death-event spawn and the
-        // authoritative RagdollSpawnPacket). Math.random() here gave each client a different
-        // starting offset, so their independently-simulated fall paths and settle poses
-        // diverged from frame one — which is exactly the cross-client desync that makes the
-        // owner-authoritative corpse visibly snap into place on other players' screens.
-        java.util.Random jitter = new java.util.Random(data.originalEntityId * 0x9E3779B97F4A7C15L);
+        // Keep X/Z on the entity's exact death origin. The Y offset is not prediction or
+        // random displacement: it converts the feet-level entity origin into this body's
+        // authored torso/root location.
         Vector3f pos = new Vector3f(
-                (float) data.position.x + (jitter.nextFloat() - 0.5f) * 0.3f,
+                (float) data.position.x,
                 (float) data.position.y + spawnYOffset,
-                (float) data.position.z + (jitter.nextFloat() - 0.5f) * 0.3f
+                (float) data.position.z
         );
 
         Quaternionf q = new Quaternionf().rotateXYZ(
@@ -1312,24 +1509,20 @@ public class ClientRagdoll {
      */
     private void applyFluidForces() {
         final float dt = 1f / 20f;
-        final float gravity = 9.81f;
+        final float gravity = (float) RagdollifiedConfig.get(RagdollifiedConfig.GRAVITY);
 
         for (int i = 0; i < ragdollParts.size() && i < 6; i++) {
             if (cachedTransforms[i] == null) continue;
             RigidBody body = ragdollParts.get(i);
             Vector3f partPos = cachedTransforms[i].position;
-            BlockPos blockPos = new BlockPos(
+            fluidSamplePos.set(
                     (int) Math.floor(partPos.x),
                     (int) Math.floor(partPos.y),
                     (int) Math.floor(partPos.z));
-            net.minecraft.world.level.material.FluidState fluid = level.getFluidState(blockPos);
+            FluidState fluid = level.getFluidState(fluidSamplePos);
             if (fluid.isEmpty()) continue;
 
-            // Surface Y of the local column. fluid.getHeight returns 1.0 when the block
-            // above is the same fluid (deeply submerged) and the fill height (0..1)
-            // otherwise — accurate enough for the surface check without scanning upward.
-            float surfaceY = blockPos.getY() + fluid.getHeight(level, blockPos);
-            float depth = surfaceY - partPos.y;
+            float depth = sampleFluidDepth(partPos, fluid);
             if (depth <= 0f) continue; // part center is above the local surface
             float submersion = Math.min(1f, depth);
 
@@ -1343,7 +1536,7 @@ public class ClientRagdoll {
 
             // Flow scaled by submersion so a part barely dipping in doesn't get yanked
             // downstream. y-flow ignored — vertical motion is fully owned by buoyancy.
-            Vec3 flow = fluid.getFlow(level, blockPos);
+            Vec3 flow = fluid.getFlow(level, fluidSamplePos);
             scratchVel.x += (float) flow.x * 0.4f * submersion;
             scratchVel.z += (float) flow.z * 0.4f * submersion;
 
@@ -1355,40 +1548,80 @@ public class ClientRagdoll {
         }
     }
 
-    /**
-     * True if the torso block contains fluid. Used by the periodic floor-loss check
-     * (any fluid contact keeps a settled ragdoll asleep) and to suppress phantom-cache
-     * rebuilds while floating.
-     */
-    private boolean isInLiquidAtTorso() {
-        BlockPos torsoBlock = new BlockPos(
-                (int) Math.floor(cachedTorsoPos.x),
-                (int) Math.floor(cachedTorsoPos.y),
-                (int) Math.floor(cachedTorsoPos.z));
-        return !level.getFluidState(torsoBlock).isEmpty();
+    // Any submerged part suppresses stale-floor recovery while buoyancy is active.
+    private boolean isAnyPartInLiquid() {
+        for (RagdollTransform transform : cachedTransforms) {
+            if (transform == null) continue;
+            fluidSamplePos.set(
+                    (int) Math.floor(transform.position.x),
+                    (int) Math.floor(transform.position.y),
+                    (int) Math.floor(transform.position.z));
+            if (!level.getFluidState(fluidSamplePos).isEmpty()) return true;
+        }
+        return false;
     }
 
-    /**
-     * Stricter check than isInLiquidAtTorso — true only when the torso center is near
-     * the local fluid surface. Used as the *settle* anchor so ragdolls deep underwater
-     * keep simulating (so buoyancy can lift them) and only settle once they've actually
-     * reached the surface. Without this gate, a freshly-spawned underwater ragdoll could
-     * settle on the bottom and never rise.
-     *
-     * Acceptance band: torso center between 1.0 below the surface and 0.2 above.
-     * Half-submerged equilibrium puts the torso center at ~0.5 below surface — the band
-     * is wide enough to cover mild oscillation around that point.
-     */
+    // Require torso support or at least two other parts near a fluid surface.
     private boolean isFloatingAtSurface() {
-        BlockPos torsoBlock = new BlockPos(
-                (int) Math.floor(cachedTorsoPos.x),
-                (int) Math.floor(cachedTorsoPos.y),
-                (int) Math.floor(cachedTorsoPos.z));
-        net.minecraft.world.level.material.FluidState fluid = level.getFluidState(torsoBlock);
-        if (fluid.isEmpty()) return false;
-        float surfaceY = torsoBlock.getY() + fluid.getHeight(level, torsoBlock);
-        float dy = cachedTorsoPos.y - surfaceY;
-        return dy >= -1.0f && dy <= 0.2f;
+        int surfaceSamples = 0;
+        for (int i = 0; i < cachedTransforms.length; i++) {
+            RagdollTransform transform = cachedTransforms[i];
+            if (transform == null) continue;
+            fluidSamplePos.set(
+                    (int) Math.floor(transform.position.x),
+                    (int) Math.floor(transform.position.y),
+                    (int) Math.floor(transform.position.z));
+            FluidState fluid = level.getFluidState(fluidSamplePos);
+            if (fluid.isEmpty()) continue;
+            float depth = sampleFluidDepth(transform.position, fluid);
+            if (depth < -FLUID_SURFACE_ABOVE || depth > FLUID_SURFACE_BELOW) continue;
+            if (i == RagdollPart.TORSO.index) return true;
+            surfaceSamples++;
+        }
+        return surfaceSamples >= 2;
+    }
+
+    private boolean isSubmergedBelowSurface() {
+        int submergedParts = 0;
+        for (int i = 0; i < cachedTransforms.length; i++) {
+            RagdollTransform transform = cachedTransforms[i];
+            if (transform == null) continue;
+            fluidSamplePos.set(
+                    (int) Math.floor(transform.position.x),
+                    (int) Math.floor(transform.position.y),
+                    (int) Math.floor(transform.position.z));
+            FluidState fluid = level.getFluidState(fluidSamplePos);
+            if (fluid.isEmpty()
+                    || sampleFluidDepth(transform.position, fluid) <= FLUID_SURFACE_BELOW) {
+                continue;
+            }
+            if (i == RagdollPart.TORSO.index) return true;
+            submergedParts++;
+        }
+        return submergedParts >= 2;
+    }
+
+    private float sampleFluidDepth(Vector3f partPos, FluidState initialFluid) {
+        int x = (int) Math.floor(partPos.x);
+        int z = (int) Math.floor(partPos.z);
+        int y = (int) Math.floor(partPos.y);
+        fluidSurfacePos.set(x, y, z);
+        float depth = y + initialFluid.getHeight(level, fluidSurfacePos) - partPos.y;
+
+        while (depth <= FLUID_SURFACE_BELOW) {
+            fluidSurfacePos.set(x, ++y, z);
+            FluidState above = level.getFluidState(fluidSurfacePos);
+            if (!isSameFluidFamily(initialFluid, above)) break;
+            depth = y + above.getHeight(level, fluidSurfacePos) - partPos.y;
+        }
+        return depth;
+    }
+
+    private static boolean isSameFluidFamily(FluidState first, FluidState second) {
+        if (second.isEmpty()) return false;
+        if (first.is(FluidTags.WATER)) return second.is(FluidTags.WATER);
+        if (first.is(FluidTags.LAVA)) return second.is(FluidTags.LAVA);
+        return first.getType() == second.getType();
     }
 
     private void applyPlayerCollisions() {
@@ -1428,8 +1661,10 @@ public class ClientRagdoll {
         if (part == null || part.index >= ragdollParts.size()) return;
         if (settled || bodiesFrozen) {
             settled = false;
+            pendingTerrainValidation = false;
             settledOnLiquid = false;
             settledTicks = 0;
+            markSettledPoseDirty();
             unfreezeBodies();
         }
         RigidBody body = ragdollParts.get(part.index);
@@ -1439,7 +1674,73 @@ public class ClientRagdoll {
         body.applyCentralImpulse(scaled);
         // Any previously sent settle pose predates this push and must be reported again after
         // the body comes to rest. The server also rejects reports with an older revision.
-        corpseSettleReported = false;
+        markSettledPoseDirty();
+    }
+
+    /**
+     * Apply a server-retained state on the physics thread. Settled transforms are absolute
+     * world coordinates, allowing a player who enters later to see the already-resting pose.
+     */
+    public void applyAuthoritativeState(RagdollTransform[] transforms, int ageTicks, boolean settledPose) {
+        ticksExisted = Math.max(ticksExisted, Math.max(0, ageTicks));
+        if (!settledPose || transforms == null) return;
+
+        if (bodiesFrozen) unfreezeBodies();
+        for (int i = 0; i < ragdollParts.size() && i < transforms.length; i++) {
+            RagdollTransform authoritative = transforms[i];
+            if (authoritative == null || authoritative.partId != i) continue;
+
+            Transform worldTransform = new Transform();
+            worldTransform.setIdentity();
+            worldTransform.origin.set(authoritative.position);
+            worldTransform.setRotation(authoritative.rotation);
+
+            RigidBody body = ragdollParts.get(i);
+            body.setWorldTransform(worldTransform);
+            if (body.getMotionState() != null) {
+                body.getMotionState().setWorldTransform(worldTransform);
+            }
+            body.setLinearVelocity(new Vector3f());
+            body.setAngularVelocity(new Vector3f());
+        }
+
+        updateCachedTransforms();
+        updateLocalWorldCollision();
+
+        BlockPos torsoBlock = currentTorsoBlock();
+        if (!isSupportAreaLoaded()) {
+            physicsWorld.cacheStats.poseDeferred++;
+            settled = true;
+            settledOnLiquid = false;
+            settledTicks = 2;
+            pendingTerrainValidation = true;
+            settledGroundSupportBlocks.clear();
+            freezeBodies();
+            hasSettledTerrainSignature = false;
+            settledPoseReported = true;
+            return;
+        }
+
+        boolean onGround = collectWorldTerrainSupport();
+        boolean atSurface = isFloatingAtSurface();
+        boolean submergedBelowSurface = !atSurface && isSubmergedBelowSurface();
+        if ((!onGround && !atSurface) || submergedBelowSurface) {
+            physicsWorld.cacheStats.poseRejected++;
+            settled = false;
+            pendingTerrainValidation = false;
+            settledOnLiquid = false;
+            settledTicks = 0;
+            markSettledPoseDirty();
+            for (RigidBody body : ragdollParts) {
+                body.forceActivationState(CollisionObject.DISABLE_DEACTIVATION);
+                body.activate(true);
+            }
+            return;
+        }
+
+        settledTicks = 2;
+        settleAtCurrentSupport(atSurface);
+        settledPoseReported = true;
     }
 
     private int lastImpulseRevision = 0;
@@ -1458,6 +1759,20 @@ public class ClientRagdoll {
             body.activate(true);
             body.applyCentralImpulse(scaledImpulse(impulse,
                     centerScale * RagdollifiedConfig.getDeathPartKnockbackMultiplier(part)));
+        }
+    }
+
+    private void applyGlobalVelocityKick(Vec3 velocityKick) {
+        Vector3f currentVelocity = new Vector3f();
+        Vector3f kick = new Vector3f(
+                (float) velocityKick.x,
+                (float) velocityKick.y,
+                (float) velocityKick.z);
+        for (RigidBody body : ragdollParts) {
+            body.getLinearVelocity(currentVelocity);
+            currentVelocity.add(kick);
+            body.setLinearVelocity(currentVelocity);
+            body.activate(true);
         }
     }
 
@@ -1647,12 +1962,7 @@ public class ClientRagdoll {
                     prev.cachedTorsoPos, prev.prevTorsoPos, prev.hasPrev, true);
         }
 
-        if (currentCachedBodies != null && !lastCollisionCenter.equals(BlockPos.ZERO)) {
-            physicsWorld.releaseCollisionGeometry(lastCollisionCenter);
-            // Static bodies are owned by ClientJbulletWorld's cache and may be shared with
-            // other live ragdolls — do NOT remove them here. The cache's TTL expiry in
-            // step() cleans them up once all references are released.
-        }
+        releaseCurrentCollisionGeometry();
 
         // Bodies were already removed from the world in freezeBodies() — don't double-remove.
         if (!bodiesFrozen) {
@@ -1670,6 +1980,38 @@ public class ClientRagdoll {
     }
 
     public boolean hasBody(CollisionObject obj) { return ragdollPartsSet.contains(obj); }
+
+    void addGroupPenetrationCorrection(Vector3f normal, float scale) {
+        groupPenetrationCorrection.x += normal.x * scale;
+        groupPenetrationCorrection.y += normal.y * scale;
+        groupPenetrationCorrection.z += normal.z * scale;
+    }
+
+    void applyGroupPenetrationCorrection(float maxDistance, float damping) {
+        float lengthSq = groupPenetrationCorrection.lengthSquared();
+        if (lengthSq <= 1.0e-8f) {
+            groupPenetrationCorrection.set(0f, 0f, 0f);
+            return;
+        }
+        if (lengthSq > maxDistance * maxDistance) {
+            groupPenetrationCorrection.scale(maxDistance / (float) Math.sqrt(lengthSq));
+        }
+        for (RigidBody body : ragdollParts) {
+            body.translate(groupPenetrationCorrection);
+            body.getWorldTransform(tempTransform);
+            if (body.getMotionState() != null) {
+                body.getMotionState().setWorldTransform(tempTransform);
+            }
+            body.getLinearVelocity(scratchVel);
+            scratchVel.scale(damping);
+            body.setLinearVelocity(scratchVel);
+            body.getAngularVelocity(scratchAng);
+            scratchAng.scale(damping);
+            body.setAngularVelocity(scratchAng);
+        }
+        groupPenetrationCorrection.set(0f, 0f, 0f);
+    }
+
     public RagdollTransform getTransform(RagdollPart part) {
         if (part.index >= ragdollParts.size() || part.index >= 6) return null;
         return cachedTransforms[part.index];
@@ -1760,6 +2102,16 @@ public class ClientRagdoll {
     private boolean corpseSettleReported = false;
     public boolean isCorpseSettleReported() { return corpseSettleReported; }
     public void markCorpseSettleReported() { corpseSettleReported = true; }
+
+    // Generic server-retained pose report used for late area entrants.
+    private boolean settledPoseReported = false;
+    public boolean isSettledPoseReported() { return settledPoseReported; }
+    public void markSettledPoseReported() { settledPoseReported = true; }
+
+    private void markSettledPoseDirty() {
+        corpseSettleReported = false;
+        settledPoseReported = false;
+    }
 
     // ============================
     // Math helpers (kept locally for interpolation — body/joint creation delegated to RagdollBodyFactory)

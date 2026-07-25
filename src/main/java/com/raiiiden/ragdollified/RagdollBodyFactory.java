@@ -47,7 +47,7 @@ public final class RagdollBodyFactory {
      * @param parts        output list that receives the 6 rigid bodies
      * @param joints       output list that receives the 5 joint constraints
      * @param modelType    shape layout (HUMANOID, CREEPER, QUADRUPED, CHICKEN)
-     * @param pos          spawn centre (already Y-offset and jitter applied by caller)
+     * @param pos          spawn centre (entity X/Z plus the model's authored root Y offset)
      * @param baseQuat     spawn orientation
      * @param scale        body-size multiplier
      * @param initialVel   initial linear velocity for every part
@@ -514,11 +514,14 @@ public final class RagdollBodyFactory {
         // Our manual settle detection (freezeBodies) is the authoritative way to
         // deactivate ragdolls; we don't need or want Bullet's version on top of it.
         body.setActivationState(CollisionObject.DISABLE_DEACTIVATION);
-        // CCD disabled: at our worst-case substep (1/40s) and velocity-clamped speed
-        // (~8 m/s = 0.2 blocks/substep), bodies move less than the thinnest block
-        // collision face — they can't tunnel. CCD's per-substep swept-sphere test
-        // against world geometry was adding 1-3ms to physics time when many bodies
-        // were active. Re-enable if you see ragdolls phasing through thin floors.
+        if (shape instanceof BoxShape box) {
+            Vector3f halfExtents = new Vector3f();
+            box.getHalfExtentsWithoutMargin(halfExtents);
+            float smallestHalfExtent = Math.min(
+                    halfExtents.x, Math.min(halfExtents.y, halfExtents.z));
+            body.setCcdSweptSphereRadius(Math.max(0.005f, smallestHalfExtent * 0.8f));
+            body.setCcdMotionThreshold(0.15f);
+        }
 
         world.addRigidBody(body);
         return body;

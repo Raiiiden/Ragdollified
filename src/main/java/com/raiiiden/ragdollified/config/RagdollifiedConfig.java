@@ -139,7 +139,7 @@ public class RagdollifiedConfig {
 
         HIT_IMPULSE_HEADSHOT = SERVER_BUILDER
                 .comment("Base impulse magnitude for a TACZ headshot.")
-                .defineInRange("headshot", 8.0, 0.0, 200.0);
+                .defineInRange("headshot", 10.0, 0.0, 200.0);
 
         HIT_IMPULSE_BODY = SERVER_BUILDER
                 .comment("Base impulse magnitude for a TACZ body shot.")
@@ -165,7 +165,7 @@ public class RagdollifiedConfig {
 
         HIT_IMPULSE_DAMAGE_SCALING = SERVER_BUILDER
                 .comment("Scale the impulse by sqrt(damage / damageReference).")
-                .define("damageScaling", true);
+                .define("damageScaling", false);
 
         HIT_IMPULSE_DAMAGE_REFERENCE = SERVER_BUILDER
                 .comment("Damage value at which the impulse equals the base magnitude.")
@@ -209,11 +209,13 @@ public class RagdollifiedConfig {
         SERVER_BUILDER.comment("Physics Settings").push("physics");
 
         GRAVITY = SERVER_BUILDER.comment("World gravity used by ragdoll physics.")
-                .defineInRange("gravity", 9.81, 0.0, 50.0);
+                .defineInRange("gravity", 20.00, 0.0, 50.0);
         MASS_SCALE = SERVER_BUILDER.comment("Multiplier for rigid body mass.")
                 .defineInRange("massScale", 1.0, 0.05, 20.0);
-        INITIAL_VELOCITY_SCALE = SERVER_BUILDER.comment("Scale applied to inherited entity velocity.")
-                .defineInRange("initialVelocityScale", 0.35, 0.0, 5.0);
+        INITIAL_VELOCITY_SCALE = SERVER_BUILDER
+                .comment("Scale applied after inheriting the entity's exact death-time velocity.",
+                        "1.0 preserves its movement; lower values intentionally reduce momentum.")
+                .defineInRange("initialVelocityScale", 1.0, 0.0, 5.0);
         LINEAR_DAMPING = SERVER_BUILDER
                 .comment("Per-tick linear (movement) velocity damping. 0 = none, 1 = bodies stop almost instantly.",
                         "Higher makes ragdolls bleed off momentum faster so they don't slide as far.")
@@ -224,7 +226,7 @@ public class RagdollifiedConfig {
                 .defineInRange("angularDamping", 0.90, 0.0, 1.0);
         FRICTION = SERVER_BUILDER
                 .comment("Surface friction between ragdoll bodies and the world. Higher = less sliding on the ground.")
-                .defineInRange("friction", 0.90, 0.0, 5.0);
+                .defineInRange("friction", 2.0, 0.0, 5.0);
         RESTITUTION = SERVER_BUILDER
                 .comment("Bounciness on impact. 0 = no bounce, 1 = fully elastic. Keep low to avoid jittery bodies.")
                 .defineInRange("restitution", 0.0, 0.0, 2.0);
@@ -243,7 +245,7 @@ public class RagdollifiedConfig {
                 .defineInRange("maxActiveRagdolls", 25, 1, 100);
         MAX_SPAWNS_PER_TICK = SERVER_BUILDER
                 .comment("Max ragdoll bodies constructed per tick, so a mass kill (e.g. an explosion) doesn't spike one frame.")
-                .defineInRange("maxSpawnsPerTick", 3, 1, 20);
+                .defineInRange("maxSpawnsPerTick", 15, 1, 20);
         MAX_SPAWN_QUEUE_SIZE = SERVER_BUILDER
                 .comment("Max ragdoll spawns waiting to be constructed. Deaths beyond this while the queue is full are skipped.")
                 .defineInRange("maxSpawnQueueSize", 60, 1, 300);
