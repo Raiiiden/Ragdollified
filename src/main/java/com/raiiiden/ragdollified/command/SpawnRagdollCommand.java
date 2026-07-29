@@ -34,7 +34,7 @@ public class SpawnRagdollCommand {
                     player.getUUID().toString(),
                     player.getName().getString(),
                     player.getX(), player.getY(), player.getZ(),
-                    player.getYRot(), player.getXRot(),
+                    player.getVisualRotationYInDegrees(), player.getXRot(),
                     0, 2.0, 0, // Small upward velocity
                     player.getPose() == Pose.SWIMMING,
                     player.getItemBySlot(EquipmentSlot.HEAD).copy(),

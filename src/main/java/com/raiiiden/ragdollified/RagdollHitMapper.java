@@ -77,7 +77,7 @@ public final class RagdollHitMapper {
         if (part != RagdollPart.TORSO) return false;
         double localX = hitPos.x - entity.getX();
         double localZ = hitPos.z - entity.getZ();
-        float yawRad = (float) Math.toRadians(entity.getYRot());
+        float yawRad = (float) Math.toRadians(entity.getVisualRotationYInDegrees());
         double cos = Math.cos(yawRad);
         double sin = Math.sin(yawRad);
         double rotX = localX * cos + localZ * sin;
@@ -187,7 +187,7 @@ public final class RagdollHitMapper {
         double dx = hitPos.x - entity.getX();
         double dy = hitPos.y - entity.getY();
         double dz = hitPos.z - entity.getZ();
-        float yawRad = (float) Math.toRadians(entity.getYRot());
+        float yawRad = (float) Math.toRadians(entity.getVisualRotationYInDegrees());
         double cos = Math.cos(yawRad);
         double sin = Math.sin(yawRad);
         double oxLocal = dx * cos + dz * sin;
@@ -264,9 +264,9 @@ public final class RagdollHitMapper {
         double localZ = hitPos.z - entity.getZ();
 
         // Rotate the XZ plane so +Z_local aligns with the entity's facing direction.
-        // MC convention: yRot=0 → look dir (0,0,1) = south. For an arbitrary yRot, the look
-        // dir is (-sin(yaw), 0, cos(yaw)). The matrix below sends that look dir to (0,0,1).
-        float yawRad = (float) Math.toRadians(entity.getYRot());
+        // MC convention: body yaw 0 → forward (0,0,1) = south. Limb positions are in
+        // body space, so use yBodyRot's public accessor rather than the entity's look yaw.
+        float yawRad = (float) Math.toRadians(entity.getVisualRotationYInDegrees());
         double cos = Math.cos(yawRad);
         double sin = Math.sin(yawRad);
         double rotX = localX * cos + localZ * sin;

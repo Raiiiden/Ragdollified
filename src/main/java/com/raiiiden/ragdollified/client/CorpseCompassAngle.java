@@ -1,5 +1,6 @@
 package com.raiiiden.ragdollified.client;
 
+import com.raiiiden.ragdollified.entity.CorpseEntity;
 import com.raiiiden.ragdollified.item.CorpseCompassItem;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.renderer.item.ClampedItemPropertyFunction;
@@ -13,6 +14,8 @@ import net.minecraft.world.level.Level;
 import net.minecraft.world.phys.Vec3;
 
 import javax.annotation.Nullable;
+import javax.vecmath.Vector3f;
+import java.util.UUID;
 
 /**
  * Item-model "angle" property for the Corpse Compass, so the needle points at the bound corpse.
@@ -38,7 +41,35 @@ public class CorpseCompassAngle implements ClampedItemPropertyFunction {
         if (!CorpseCompassItem.hasTarget(stack) || !dimensionMatches(stack, holder)) {
             return spinning(seed, ticks);
         }
-        return towards(holder, ticks, CorpseCompassItem.getTargetPos(stack));
+        return towards(holder, ticks, resolveTarget(level, stack));
+    }
+
+    private static Vec3 resolveTarget(ClientLevel level, ItemStack stack) {
+        UUID corpseId = CorpseCompassItem.getCorpseId(stack);
+        if (corpseId != null) {
+            for (Entity candidate : level.entitiesForRendering()) {
+                if (candidate instanceof CorpseEntity corpse
+                        && corpseId.equals(corpse.getCorpseId())) {
+                    return corpse.position();
+                }
+            }
+        }
+
+        int ragdollId = CorpseCompassItem.getRagdollEntityId(stack);
+        UUID ownerId = CorpseCompassItem.getOwnerId(stack);
+        if (ragdollId >= 0) {
+            ClientRagdoll ragdoll = ClientRagdollManager.get(ragdollId);
+            if (ragdoll != null && !ragdoll.isDestroyed()
+                    && (ownerId == null || ownerId.equals(ragdoll.getPlayerUUID()))) {
+                ClientRagdoll.TransformSnapshot snapshot = ragdoll.getSnapshot();
+                if (snapshot != null && !snapshot.destroyed) {
+                    Vector3f torso = snapshot.cachedTorsoPos;
+                    return new Vec3(torso.x, torso.y, torso.z);
+                }
+            }
+        }
+
+        return CorpseCompassItem.getTargetPos(stack);
     }
 
     private static boolean dimensionMatches(ItemStack stack, Entity holder) {

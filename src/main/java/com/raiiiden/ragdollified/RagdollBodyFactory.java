@@ -113,7 +113,36 @@ public final class RagdollBodyFactory {
                 break;
         }
 
+        applyPartWeights(parts);
+
         buildJoints(world, parts, joints, modelType, bodyScale, bodyProfile, isBaby, babyBigHead);
+    }
+
+    /**
+     * Scale each body's authored mass by its configured per-part weight. Applied here rather
+     * than at the ~40 makePart call sites so every skeleton picks it up from one place, and
+     * so each builder's mass values stay readable as the authored proportions they are.
+     *
+     * Inertia has to be recomputed: makePart derived it from the pre-scale mass, and leaving
+     * a stale tensor behind would make a heavier part spin as if it were still light.
+     */
+    private static void applyPartWeights(List<RigidBody> parts) {
+        Vector3f inertia = new Vector3f();
+        for (int i = 0; i < parts.size(); i++) {
+            RagdollPart part = RagdollPart.byIndex(i);
+            if (part == null) continue;
+            float multiplier = RagdollifiedConfig.getPartWeightMultiplier(part);
+            if (multiplier == 1f) continue;
+            RigidBody body = parts.get(i);
+            float invMass = body.getInvMass();
+            if (invMass <= 0f) continue; // static/kinematic — no mass to scale
+            float mass = (1f / invMass) * multiplier;
+            body.getCollisionShape().calculateLocalInertia(mass, inertia);
+            body.setMassProps(mass, inertia);
+            // setMassProps only updates the inverse-mass/inertia scalars; the cached world
+            // inertia tensor the solver actually reads is rebuilt here.
+            body.updateInertiaTensor();
+        }
     }
 
     // ===========================
@@ -384,16 +413,16 @@ public final class RagdollBodyFactory {
         joints.add(joint(world, torso, head, mid(torsoTop,headBot), v(0,0,0), v(0,0,0), v(-30,-20,-30), v(30,50,30)));
         Vector3f lHip = tw.apply(new Vector3f(-0.1f*bs,-0.40f*bs,0f));
         Vector3f lLegTop = rotQ(tLLeg.getRotation(new Quat4f()), new Vector3f(0f,0.45f*bs,0f)); lLegTop.add(tLLeg.origin);
-        joints.add(joint(world, torso, lLeg, mid(lHip,lLegTop), v(-0.05f*bs,0f,-0.05f*bs), v(0.05f*bs,0f,0.05f*bs), v(-10,0,-10), v(40,0,10)));
+        joints.add(joint(world, torso, lLeg, mid(lHip,lLegTop), v(-0.05f*bs,0f,-0.05f*bs), v(0.05f*bs,0f,0.05f*bs), v(-35,-25,-30), v(75,25,30)));
         Vector3f rHip = tw.apply(new Vector3f(0.1f*bs,-0.40f*bs,0f));
         Vector3f rLegTop = rotQ(tRLeg.getRotation(new Quat4f()), new Vector3f(0f,0.45f*bs,0f)); rLegTop.add(tRLeg.origin);
-        joints.add(joint(world, torso, rLeg, mid(rHip,rLegTop), v(-0.05f*bs,0f,-0.05f*bs), v(0.05f*bs,0f,0.05f*bs), v(-10,0,-10), v(40,0,10)));
+        joints.add(joint(world, torso, rLeg, mid(rHip,rLegTop), v(-0.05f*bs,0f,-0.05f*bs), v(0.05f*bs,0f,0.05f*bs), v(-35,-25,-30), v(75,25,30)));
         Vector3f lSh = tw.apply(new Vector3f(-0.35f*bs,0.22f*bs,0f));
         Vector3f lAT = rotQ(tLArm.getRotation(new Quat4f()), new Vector3f(0f,0.35f*bs,0f)); lAT.add(tLArm.origin);
-        joints.add(joint(world, torso, lArm, mid(lSh,lAT), v(-0.02f*bs,-0.02f*bs,-0.02f*bs), v(0.02f*bs,0.02f*bs,0.02f*bs), v(-80,-30,-40), v(80,30,40)));
+        joints.add(joint(world, torso, lArm, mid(lSh,lAT), v(-0.02f*bs,-0.02f*bs,-0.02f*bs), v(0.02f*bs,0.02f*bs,0.02f*bs), v(-110,-45,-85), v(110,45,85)));
         Vector3f rSh = tw.apply(new Vector3f(0.35f*bs,0.22f*bs,0f));
         Vector3f rAT = rotQ(tRArm.getRotation(new Quat4f()), new Vector3f(0f,0.35f*bs,0f)); rAT.add(tRArm.origin);
-        joints.add(joint(world, torso, rArm, mid(rSh,rAT), v(-0.02f*bs,-0.02f*bs,-0.02f*bs), v(0.02f*bs,0.02f*bs,0.02f*bs), v(-80,-30,-40), v(80,30,40)));
+        joints.add(joint(world, torso, rArm, mid(rSh,rAT), v(-0.02f*bs,-0.02f*bs,-0.02f*bs), v(0.02f*bs,0.02f*bs,0.02f*bs), v(-110,-45,-85), v(110,45,85)));
     }
 
     private static void buildCreeperJoints(DiscreteDynamicsWorld world, List<TypedConstraint> joints,

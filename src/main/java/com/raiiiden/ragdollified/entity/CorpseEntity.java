@@ -184,7 +184,10 @@ public class CorpseEntity extends Entity {
 
     /** Stable death handle shared with the Corpse Compass and the retrieve command. */
     @Nullable
-    public UUID getCorpseId() { return corpseId; }
+    public UUID getCorpseId() {
+        CompoundTag d = getRenderData();
+        return d.hasUUID("CorpseId") ? d.getUUID("CorpseId") : corpseId;
+    }
 
     /** The physics-ragdoll entity id this corpse replaces, or -1 if unknown. */
     public int getRagdollEntityId() {

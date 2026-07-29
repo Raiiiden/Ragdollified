@@ -34,6 +34,8 @@ public class CorpseCompassItem extends Item {
 
     // NBT contract shared by the server (who bakes the target) and the client (needle + screen).
     public static final String TAG_CORPSE_ID = "CorpseId";
+    public static final String TAG_OWNER_ID = "OwnerId";
+    public static final String TAG_RAGDOLL_ENTITY_ID = "RagdollEntityId";
     public static final String TAG_X = "CorpseX";
     public static final String TAG_Y = "CorpseY";
     public static final String TAG_Z = "CorpseZ";
@@ -80,9 +82,19 @@ public class CorpseCompassItem extends Item {
     public static ItemStack create(@Nullable UUID corpseId, Vec3 pos,
                                    @Nullable ResourceKey<Level> dim, String ownerName,
                                    ItemStack helmet, ItemStack chest, ItemStack legs, ItemStack boots) {
+        return create(corpseId, null, -1, pos, dim, ownerName,
+                helmet, chest, legs, boots);
+    }
+
+    /** Build a bound compass that can follow the matching loaded ragdoll before corpse handoff. */
+    public static ItemStack create(@Nullable UUID corpseId, @Nullable UUID ownerId, int ragdollEntityId,
+                                   Vec3 pos, @Nullable ResourceKey<Level> dim, String ownerName,
+                                   ItemStack helmet, ItemStack chest, ItemStack legs, ItemStack boots) {
         ItemStack stack = new ItemStack(ModItems.CORPSE_COMPASS.get());
         CompoundTag tag = stack.getOrCreateTag();
         if (corpseId != null) tag.putUUID(TAG_CORPSE_ID, corpseId);
+        if (ownerId != null) tag.putUUID(TAG_OWNER_ID, ownerId);
+        if (ragdollEntityId >= 0) tag.putInt(TAG_RAGDOLL_ENTITY_ID, ragdollEntityId);
         tag.putDouble(TAG_X, pos.x);
         tag.putDouble(TAG_Y, pos.y);
         tag.putDouble(TAG_Z, pos.z);
@@ -114,6 +126,18 @@ public class CorpseCompassItem extends Item {
     public static UUID getCorpseId(ItemStack stack) {
         CompoundTag tag = stack.getTag();
         return (tag != null && tag.hasUUID(TAG_CORPSE_ID)) ? tag.getUUID(TAG_CORPSE_ID) : null;
+    }
+
+    @Nullable
+    public static UUID getOwnerId(ItemStack stack) {
+        CompoundTag tag = stack.getTag();
+        return (tag != null && tag.hasUUID(TAG_OWNER_ID)) ? tag.getUUID(TAG_OWNER_ID) : null;
+    }
+
+    public static int getRagdollEntityId(ItemStack stack) {
+        CompoundTag tag = stack.getTag();
+        return (tag != null && tag.contains(TAG_RAGDOLL_ENTITY_ID))
+                ? tag.getInt(TAG_RAGDOLL_ENTITY_ID) : -1;
     }
 
     public static Vec3 getTargetPos(ItemStack stack) {

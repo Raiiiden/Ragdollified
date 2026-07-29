@@ -122,7 +122,12 @@ public class PhysicsHooks {
                 isPlayer ? entity.getUUID().toString() : "",
                 isPlayer ? entity.getName().getString() : "",
                 entity.getX(), entity.getY(), entity.getZ(),
-                entity.getYRot(), entity.getXRot(),
+                // Body yaw, not getYRot(). getYRot() is where the entity was *looking*; the
+                // model is rendered on yBodyRot (LivingEntityRenderer uses 180 - yBodyRot,
+                // which is the formula ClientRagdoll mirrors). The two diverge by up to 50°
+                // normally, and by ~180° for anything that died while backpedaling — aiStep
+                // flips body yaw when movement and look direction disagree by more than 95°.
+                entity.getVisualRotationYInDegrees(), entity.getXRot(),
                 vel.x, vel.y, vel.z,
                 entity.getPose() == Pose.SWIMMING,
                 isBaby,

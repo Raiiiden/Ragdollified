@@ -52,6 +52,24 @@ public class RagdollifiedConfig {
     public static final ForgeConfigSpec.DoubleValue DEATH_PART_KNOCKBACK_LEFT_ARM;
     public static final ForgeConfigSpec.DoubleValue DEATH_PART_KNOCKBACK_RIGHT_ARM;
 
+    public static final ForgeConfigSpec.DoubleValue PART_WEIGHT_TORSO;
+    public static final ForgeConfigSpec.DoubleValue PART_WEIGHT_HEAD;
+    public static final ForgeConfigSpec.DoubleValue PART_WEIGHT_LEFT_ARM;
+    public static final ForgeConfigSpec.DoubleValue PART_WEIGHT_RIGHT_ARM;
+    public static final ForgeConfigSpec.DoubleValue PART_WEIGHT_LEFT_LEG;
+    public static final ForgeConfigSpec.DoubleValue PART_WEIGHT_RIGHT_LEG;
+
+    // Reference weights of the humanoid skeleton as authored in RagdollBodyFactory. The
+    // configured weight is divided by these to get a per-part multiplier, which is what
+    // actually gets applied — so a humanoid ends up at exactly the configured weight while
+    // non-humanoid skeletons (quadrupeds, creeper, bat, bee) keep their own authored
+    // proportions and are scaled by the same ratio. At the defaults every ratio is 1.0 and
+    // nothing changes.
+    public static final float REFERENCE_WEIGHT_TORSO = 8f;
+    public static final float REFERENCE_WEIGHT_HEAD = 4f;
+    public static final float REFERENCE_WEIGHT_ARM = 4f;
+    public static final float REFERENCE_WEIGHT_LEG = 6f;
+
     public static final ForgeConfigSpec.DoubleValue GRAVITY;
     public static final ForgeConfigSpec.DoubleValue MASS_SCALE;
     public static final ForgeConfigSpec.DoubleValue INITIAL_VELOCITY_SCALE;
@@ -131,8 +149,18 @@ public class RagdollifiedConfig {
                 .define("enablePlayerRagdolls", true);
 
         ENTITY_DENYLIST = SERVER_BUILDER
-                .comment("Entity registry ids that should never ragdoll. Use minecraft:player for players.")
-                .defineListAllowEmpty(List.of("entityDenylist"), List.of(), value -> value instanceof String);
+                .comment("Entity registry ids that should never ragdoll. Use minecraft:player for players.",
+                        "The defaults are mobs that have no authored ragdoll body but would otherwise",
+                        "borrow one: client-side model detection falls back on any model extending",
+                        "QuadrupedModel or HumanoidModel, which silently catches these. Remove an entry",
+                        "once a real body profile exists for it.")
+                .defineListAllowEmpty(List.of("entityDenylist"),
+                        List.of("minecraft:goat",
+                                "minecraft:panda",
+                                "minecraft:polar_bear",
+                                "minecraft:turtle",
+                                "minecraft:enderman"),
+                        value -> value instanceof String);
 
         SERVER_BUILDER.pop();
         SERVER_BUILDER.comment("Hit Impulse Settings").push("hitImpulse");
@@ -206,6 +234,30 @@ public class RagdollifiedConfig {
                 .defineInRange("deathPartMultiplierRightArm", 4.0, 0.0, 10.0);
 
         SERVER_BUILDER.pop();
+        SERVER_BUILDER.comment("Per-Body-Part Weight Settings",
+                        "Mass of each ragdoll body part. Heavier parts resist knockback and pull the",
+                        "body toward them as it falls; lighter parts flail more. The defaults are the",
+                        "humanoid skeleton's authored weights, so leaving them alone changes nothing.",
+                        "Non-humanoid skeletons (quadrupeds, creeper, bat, bee) have their own authored",
+                        "weights and are scaled by the same ratio you set here rather than being",
+                        "overwritten, so a cow stays cow-shaped in mass distribution.",
+                        "These are multiplied by physics.massScale, which remains a global scalar.")
+                .push("partWeights");
+
+        PART_WEIGHT_TORSO = SERVER_BUILDER.comment("Weight of the torso.")
+                .defineInRange("torso", 10.0, 0.1, 200.0);
+        PART_WEIGHT_HEAD = SERVER_BUILDER.comment("Weight of the head.")
+                .defineInRange("head", 8.0, 0.1, 200.0);
+        PART_WEIGHT_LEFT_ARM = SERVER_BUILDER.comment("Weight of the left arm.")
+                .defineInRange("leftArm", 4.0, 0.1, 200.0);
+        PART_WEIGHT_RIGHT_ARM = SERVER_BUILDER.comment("Weight of the right arm.")
+                .defineInRange("rightArm", 4.0, 0.1, 200.0);
+        PART_WEIGHT_LEFT_LEG = SERVER_BUILDER.comment("Weight of the left leg.")
+                .defineInRange("leftLeg", 6.0, 0.1, 200.0);
+        PART_WEIGHT_RIGHT_LEG = SERVER_BUILDER.comment("Weight of the right leg.")
+                .defineInRange("rightLeg", 6.0, 0.1, 200.0);
+
+        SERVER_BUILDER.pop();
         SERVER_BUILDER.comment("Physics Settings").push("physics");
 
         GRAVITY = SERVER_BUILDER.comment("World gravity used by ragdoll physics.")
@@ -242,7 +294,7 @@ public class RagdollifiedConfig {
         MAX_ACTIVE_RAGDOLLS = SERVER_BUILDER
                 .comment("Max ragdolls actively simulated at once. Past this the oldest active bodies are force-settled",
                         "(they keep rendering and can be woken again) to protect tick time during pile-ups.")
-                .defineInRange("maxActiveRagdolls", 25, 1, 100);
+                .defineInRange("maxActiveRagdolls", 40, 1, 100);
         MAX_SPAWNS_PER_TICK = SERVER_BUILDER
                 .comment("Max ragdoll bodies constructed per tick, so a mass kill (e.g. an explosion) doesn't spike one frame.")
                 .defineInRange("maxSpawnsPerTick", 15, 1, 20);
@@ -375,6 +427,12 @@ public class RagdollifiedConfig {
         register("corpseSettleTimeoutTicks", CORPSE_SETTLE_TIMEOUT_TICKS);
         register("corpseStoreXp", CORPSE_STORE_XP);
         register("enableCorpseCompass", ENABLE_CORPSE_COMPASS);
+        register("partWeightTorso", PART_WEIGHT_TORSO);
+        register("partWeightHead", PART_WEIGHT_HEAD);
+        register("partWeightLeftArm", PART_WEIGHT_LEFT_ARM);
+        register("partWeightRightArm", PART_WEIGHT_RIGHT_ARM);
+        register("partWeightLeftLeg", PART_WEIGHT_LEFT_LEG);
+        register("partWeightRightLeg", PART_WEIGHT_RIGHT_LEG);
     }
 
     private static void register(String key, ForgeConfigSpec.ConfigValue<?> value) {
@@ -459,6 +517,19 @@ public class RagdollifiedConfig {
             if (denied != null && denied.trim().equalsIgnoreCase(id)) return false;
         }
         return true;
+    }
+
+    //Per-part weight as a multiplier against the skeleton's authored mass, so every model
+
+    public static float getPartWeightMultiplier(RagdollPart part) {
+        return switch (part) {
+            case TORSO -> (float) (get(PART_WEIGHT_TORSO) / REFERENCE_WEIGHT_TORSO);
+            case HEAD -> (float) (get(PART_WEIGHT_HEAD) / REFERENCE_WEIGHT_HEAD);
+            case LEFT_LEG -> (float) (get(PART_WEIGHT_LEFT_LEG) / REFERENCE_WEIGHT_LEG);
+            case RIGHT_LEG -> (float) (get(PART_WEIGHT_RIGHT_LEG) / REFERENCE_WEIGHT_LEG);
+            case LEFT_ARM -> (float) (get(PART_WEIGHT_LEFT_ARM) / REFERENCE_WEIGHT_ARM);
+            case RIGHT_ARM -> (float) (get(PART_WEIGHT_RIGHT_ARM) / REFERENCE_WEIGHT_ARM);
+        };
     }
 
     public static float getPartKnockbackMultiplier(RagdollPart part) {

@@ -64,6 +64,9 @@ public class ClientRagdollManager {
     private static int lastManifoldCount = 0;
     private static int lastContactPointCount = 0;
     private static int lastDynamicBodyCount = 0;
+    // Previous tick's active count, used to size the collision-geometry budget at the
+    // start of this tick (before the state pass has recounted).
+    private static int lastActiveRagdollCount = 0;
     // Worst-tick tracker — captures the slowest tickAll inside the 100-tick window so
     // periodic spikes that happen between log intervals are still visible.
     private static long worstTickAllNanos = 0;
@@ -384,7 +387,7 @@ public class ClientRagdollManager {
         }
 
         ClientJbulletWorld physicsWorld = ClientJbulletWorld.get(level);
-        physicsWorld.beginTick();
+        physicsWorld.beginTick(lastActiveRagdollCount);
 
         // Phase 1 — drain cross-thread input queues, then spawn queue. Inputs (impulses,
         // block changes) come from the render thread; spawns come from death events.
@@ -399,6 +402,7 @@ public class ClientRagdollManager {
         lastSpawnQueueNanos = System.nanoTime() - t0;
 
         if (ragdolls.isEmpty()) {
+            lastActiveRagdollCount = 0;
             lastTickAllNanos = System.nanoTime() - tickStart;
             recordTickWorstCase(0, 0);
             maybeLogPerf(0, 0, 0, physicsWorld);
@@ -486,6 +490,7 @@ public class ClientRagdollManager {
         }
         lastPhysicsStepNanos = System.nanoTime() - t0;
         lastDynamicBodyCount = activeCount * 6; // 6 parts per ragdoll
+        lastActiveRagdollCount = activeCount;
 
         // Capture Bullet world contact stats AFTER the step so they reflect the contact
         // density the solver actually had to resolve. Cheap — the dispatcher already
@@ -706,12 +711,14 @@ public class ClientRagdollManager {
         );
         com.raiiiden.ragdollified.Ragdollified.LOGGER.info(
                 "[Ragdoll Perf]   bullet: dynBodies={} manifolds={} contacts={} | "
-                + "cache: live={} bodies={} hits={} miss={} rateLim={} unloaded={} created={} | "
+                + "cache: live={} bodies={} hits={} miss={} rateLim={}(prio={} of budget={}) "
+                + "unloaded={} created={} | "
                 + "poses: deferred={} rejected={} | "
                 + "spawnQ: depth={} processed={} wakes={} forceSettled={} blockChanges={}",
                 lastDynamicBodyCount, lastManifoldCount, lastContactPointCount,
                 cs.liveCacheEntries, cs.liveStaticBodies,
-                cs.hits, cs.misses, cs.rateLimited, cs.unloadedSkipped,
+                cs.hits, cs.misses, cs.rateLimited, cs.rateLimitedPriority, cs.budgetThisTick,
+                cs.unloadedSkipped,
                 cs.staticBodiesCreatedThisTick, cs.poseDeferred, cs.poseRejected,
                 lastSpawnQueueDepth, lastSpawnsThisTick, lastWakesThisTick,
                 lastForceSettledThisTick, lastBlockChangesProcessed
@@ -816,7 +823,9 @@ public class ClientRagdollManager {
                 entity.getItemBySlot(EquipmentSlot.CHEST).copy(),
                 entity.getItemBySlot(EquipmentSlot.LEGS).copy(),
                 entity.getItemBySlot(EquipmentSlot.FEET).copy(),
-                entity.position(), entity.getYRot(), entity.getXRot(),
+                // Body yaw — must match what PhysicsHooks sends, or the authoritative
+                // server spawn would visibly snap the locally-spawned ragdoll around.
+                entity.position(), entity.getVisualRotationYInDegrees(), entity.getXRot(),
                 vel, capturedPose,
                 entity.getPose() == Pose.SWIMMING,
                 isBaby,
@@ -834,13 +843,20 @@ public class ClientRagdollManager {
     private static int processSpawnQueue(ClientJbulletWorld physicsWorld) {
         int budget = RagdollifiedConfig.get(RagdollifiedConfig.MAX_SPAWNS_PER_TICK);
         int spawned = 0;
+        // Stale and unsupported entries used to consume budget, so a queue full of them
+        // starved real spawns well below maxSpawnsPerTick. Only actual construction costs
+        // anything, so only that decrements. scanGuard bounds the skip loop — spawnOrder is
+        // already capped at maxSpawnQueueSize, this just keeps the drain from being unbounded
+        // if that ever changes.
+        int scanGuard = budget + RagdollifiedConfig.get(RagdollifiedConfig.MAX_SPAWN_QUEUE_SIZE);
         Integer entityId;
-        while (budget-- > 0 && (entityId = spawnOrder.poll()) != null) {
+        while (budget > 0 && scanGuard-- > 0 && (entityId = spawnOrder.poll()) != null) {
             ClientRagdoll.SpawnData data = pendingSpawns.remove(entityId);
             if (data == null) continue; // stale order entry after replacement/drop
             if (!isSupportedSpawn(data)) {
                 continue;
             }
+            budget--;
             // If a ragdoll already exists for this entity (e.g. local spawn from death
             // event got replaced by an authoritative server packet), destroy it FIRST
             // — on this thread — so the body removal doesn't race with stepSimulation.

@@ -57,6 +57,8 @@ public class ClientRagdoll {
     private final Set<BlockPos> activeGroundSupportBlocks = new HashSet<>(8);
     private final Set<BlockPos> settledGroundSupportBlocks = new HashSet<>(8);
     public static final int COLLISION_RADIUS = 3;
+    // (10 blocks/s)² — above this the torso gets priority on the geometry budget.
+    private static final float GEOMETRY_PRIORITY_SPEED_SQ = 100f;
 
     // Scratch vectors reused across per-tick physics calls. Each ragdoll has its own
     // (single client thread, no contention) — purely to avoid GC pressure from the
@@ -1311,7 +1313,8 @@ public class ClientRagdoll {
         // much larger narrowphase loss.
         ClientJbulletWorld.CollisionGeometryHandle newGeometry =
                 physicsWorld.getOrCreateCollisionGeometry(
-                        center, COLLISION_RADIUS, this::buildBlockCollisionGeometry);
+                        center, COLLISION_RADIUS, isOutrunningCollisionGeometry(),
+                        this::buildBlockCollisionGeometry);
 
         if (newGeometry == null) {
             // Rate-limited this tick — keep old geometry, lastCollisionCenter unchanged so
@@ -1331,6 +1334,23 @@ public class ClientRagdoll {
         // No wakeUpAndClearContacts() — clearing manifolds destroys floor contacts
         // and causes the settle-sink-bounce cycle. JBullet builds new contacts for
         // the new geometry within 1-2 substeps naturally.
+    }
+
+    /**
+     * True when the torso is moving fast enough that keeping stale geometry for a tick
+     * risks it leaving its own COLLISION_RADIUS bubble and tunnelling. At the threshold
+     * the torso covers 0.5 blocks/tick, so it still has ~6 ticks of margin — enough that
+     * losing one or two rebuilds to the budget is survivable, but not many more.
+     */
+    private boolean isOutrunningCollisionGeometry() {
+        if (ragdollParts.isEmpty()) return false;
+        // Torso only: parts are jointed so it tracks the body as a whole, and the
+        // geometry bubble is centred on the torso anyway.
+        ragdollParts.get(0).getLinearVelocity(scratchVel);
+        float lsq = scratchVel.x * scratchVel.x
+                + scratchVel.y * scratchVel.y
+                + scratchVel.z * scratchVel.z;
+        return lsq > GEOMETRY_PRIORITY_SPEED_SQ;
     }
 
     private ClientJbulletWorld.BuiltBlockCollisionGeometry buildBlockCollisionGeometry(BlockPos pos) {

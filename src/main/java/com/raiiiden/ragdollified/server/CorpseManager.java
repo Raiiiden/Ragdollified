@@ -144,7 +144,10 @@ public class CorpseManager {
             ResourceLocation loc = ResourceLocation.tryParse(target.getString("Dim"));
             if (loc != null) dim = ResourceKey.create(Registries.DIMENSION, loc);
         }
-        ItemStack compass = CorpseCompassItem.create(corpseId, pos, dim, target.getString("Name"),
+        UUID ownerId = target.hasUUID("Owner") ? target.getUUID("Owner") : player.getUUID();
+        int ragdollEntityId = target.contains("DeathEntityId") ? target.getInt("DeathEntityId") : -1;
+        ItemStack compass = CorpseCompassItem.create(
+                corpseId, ownerId, ragdollEntityId, pos, dim, target.getString("Name"),
                 readArmor(target, "Helmet"), readArmor(target, "Chest"),
                 readArmor(target, "Legs"), readArmor(target, "Boots"));
         if (!player.getInventory().add(compass)) {
@@ -155,6 +158,8 @@ public class CorpseManager {
     private static CompoundTag buildTarget(PendingCorpse p, Vec3 pos) {
         CompoundTag t = new CompoundTag();
         if (p.corpseId != null) t.putUUID("CorpseId", p.corpseId);
+        if (p.owner != null) t.putUUID("Owner", p.owner);
+        if (p.deathEntityId >= 0) t.putInt("DeathEntityId", p.deathEntityId);
         t.putDouble("X", pos.x);
         t.putDouble("Y", pos.y);
         t.putDouble("Z", pos.z);

@@ -51,15 +51,34 @@ public class ClientJbulletWorld {
     }
 
     // Limit expensive region acquisitions when many ragdolls spawn together.
-    private static final int MAX_NEW_CACHE_ENTRIES_PER_TICK = 3;
+    //
+    // A flat budget starves mass-death scenarios: an explosion both invalidates a large
+    // number of cached regions (destroyed blocks) and puts every ragdoll in motion at
+    // once, so demand spikes by an order of magnitude while supply stays fixed. Ragdolls
+    // that lose the race keep their previous geometry (see ClientRagdoll.updateLocal-
+    // WorldCollision) and end up colliding against terrain that no longer exists, which
+    // reads as phasing through walls and floors. So the budget scales with the number of
+    // active ragdolls instead.
+    private static final int BASE_CACHE_ENTRIES_PER_TICK = 3;
+    private static final int MAX_CACHE_ENTRIES_PER_TICK = 24;
+    // Share of the budget only fast-moving ragdolls may spend. A settled ragdoll
+    // re-acquiring geometry can wait a tick without visible consequence; one crossing
+    // several blocks per tick cannot. Slow requesters are cut off at
+    // (budget - reserve) so this slice is still available late in the tick, regardless
+    // of the order ragdolls happen to be iterated in.
+    private static final float PRIORITY_RESERVE_FRACTION = 0.4f;
     private static final int UNLOADED_STATE_ID = Block.getId(Blocks.AIR.defaultBlockState());
     private int newCacheEntriesThisTick = 0;
+    private int cacheEntryBudgetThisTick = BASE_CACHE_ENTRIES_PER_TICK;
+    private int normalPriorityBudgetThisTick = BASE_CACHE_ENTRIES_PER_TICK;
 
     /** Per-tick stats. Reset once at the start of ClientRagdollManager.tickAll(). */
     public static final class CacheStats {
         public int hits;            // cache hit, no work done
         public int misses;          // region needed one or more block entries
         public int rateLimited;     // miss but creation budget exhausted, returned null
+        public int rateLimitedPriority; // subset of rateLimited that were fast movers — these tunnel
+        public int budgetThisTick;  // region-creation budget this tick (scales with active count)
         public int unloadedSkipped; // region was not fully available yet
         public int poseDeferred;
         public int poseRejected;
@@ -71,6 +90,7 @@ public class ClientJbulletWorld {
             hits = 0;
             misses = 0;
             rateLimited = 0;
+            rateLimitedPriority = 0;
             unloadedSkipped = 0;
             poseDeferred = 0;
             poseRejected = 0;
@@ -160,8 +180,23 @@ public class ClientJbulletWorld {
         dynamicsWorld.getSolverInfo().numIterations = 20;
     }
 
-    public void beginTick() {
+    /**
+     * @param activeRagdollCount active ragdolls as of the previous tick. Used to size this
+     *                           tick's region-creation budget — see BASE/MAX_CACHE_ENTRIES_PER_TICK.
+     *                           Last tick's count is a good enough proxy: the active set moves by
+     *                           a few per tick outside of a mass spawn, and a mass spawn ramps the
+     *                           budget one tick later, which the priority reserve covers.
+     */
+    public void beginTick(int activeRagdollCount) {
         newCacheEntriesThisTick = 0;
+        // One region per active ragdoll is the ideal (each can cross a block boundary per
+        // tick); half that in practice, since only ragdolls that actually moved to a new
+        // block request one.
+        int budget = BASE_CACHE_ENTRIES_PER_TICK + (activeRagdollCount / 2);
+        cacheEntryBudgetThisTick = Math.min(MAX_CACHE_ENTRIES_PER_TICK, budget);
+        int reserve = Math.max(1, Math.round(cacheEntryBudgetThisTick * PRIORITY_RESERVE_FRACTION));
+        normalPriorityBudgetThisTick = Math.max(1, cacheEntryBudgetThisTick - reserve);
+        cacheStats.budgetThisTick = cacheEntryBudgetThisTick;
         cacheStats.resetCounters();
     }
 
@@ -226,9 +261,15 @@ public class ClientJbulletWorld {
         tickCount++;
     }
 
-    // Returns null when the per-tick creation budget is full.
+    /**
+     * Returns null when the per-tick creation budget is full.
+     *
+     * @param highPriority requester is moving fast enough that stale geometry would let it
+     *                     tunnel. Grants access to the reserved slice of the budget.
+     */
     public CollisionGeometryHandle getOrCreateCollisionGeometry(
-            BlockPos center, int radius, Function<BlockPos, BuiltBlockCollisionGeometry> creator) {
+            BlockPos center, int radius, boolean highPriority,
+            Function<BlockPos, BuiltBlockCollisionGeometry> creator) {
         boolean needsCreation = false;
         for (int dx = -radius; dx <= radius && !needsCreation; dx++) {
             for (int dy = -radius; dy <= radius && !needsCreation; dy++) {
@@ -249,8 +290,10 @@ public class ClientJbulletWorld {
             }
         }
 
-        if (needsCreation && newCacheEntriesThisTick >= MAX_NEW_CACHE_ENTRIES_PER_TICK) {
+        int budget = highPriority ? cacheEntryBudgetThisTick : normalPriorityBudgetThisTick;
+        if (needsCreation && newCacheEntriesThisTick >= budget) {
             cacheStats.rateLimited++;
+            if (highPriority) cacheStats.rateLimitedPriority++;
             return null;
         }
         if (needsCreation) newCacheEntriesThisTick++;
