@@ -39,7 +39,42 @@ public final class ClientMobModelHelper {
 
             EntityModel<?> model = ((LivingEntityRenderer<?, ?>) renderer).getModel();
 
+            if (model instanceof net.minecraft.client.model.WitchModel) return MobModelHelper.ModelType.WITCH;
+            if (model instanceof net.minecraft.client.model.HorseModel) return MobModelHelper.ModelType.EQUINE;
+            if (model instanceof net.minecraft.client.model.WolfModel) return MobModelHelper.ModelType.WOLF;
+            if (model instanceof net.minecraft.client.model.FoxModel) return MobModelHelper.ModelType.FOX;
+            if (model instanceof net.minecraft.client.model.PandaModel) return MobModelHelper.ModelType.PANDA;
+            if (model instanceof net.minecraft.client.model.IronGolemModel) return MobModelHelper.ModelType.IRON_GOLEM;
+            if (model instanceof net.minecraft.client.model.GoatModel) return MobModelHelper.ModelType.GOAT;
+            if (model instanceof net.minecraft.client.model.PolarBearModel) return MobModelHelper.ModelType.POLAR_BEAR;
+            if (model instanceof net.minecraft.client.model.TurtleModel) return MobModelHelper.ModelType.TURTLE;
+            if (model instanceof net.minecraft.client.model.EndermanModel) return MobModelHelper.ModelType.ENDERMAN;
+            if (model instanceof net.minecraft.client.model.CamelModel) return MobModelHelper.ModelType.CAMEL;
+            if (model instanceof net.minecraft.client.model.LlamaModel) return MobModelHelper.ModelType.LLAMA;
+            if (model instanceof net.minecraft.client.model.RabbitModel) return MobModelHelper.ModelType.RABBIT;
+            if (model instanceof net.minecraft.client.model.FrogModel) return MobModelHelper.ModelType.FROG;
+            if (model instanceof net.minecraft.client.model.HoglinModel) return MobModelHelper.ModelType.HOGLIN;
+            if (model instanceof net.minecraft.client.model.SnifferModel) return MobModelHelper.ModelType.SNIFFER;
+            if (model instanceof net.minecraft.client.model.RavagerModel) return MobModelHelper.ModelType.RAVAGER;
+            if (model instanceof net.minecraft.client.model.PhantomModel) return MobModelHelper.ModelType.PHANTOM;
+            if (model instanceof net.minecraft.client.model.ParrotModel) return MobModelHelper.ModelType.PARROT;
+            if (model instanceof net.minecraft.client.model.LavaSlimeModel) return MobModelHelper.ModelType.MAGMA_CUBE;
+            if (model instanceof net.minecraft.client.model.SlimeModel) return MobModelHelper.ModelType.SLIME;
+            if (model instanceof net.minecraft.client.model.SilverfishModel) return MobModelHelper.ModelType.SILVERFISH;
+            if (model instanceof net.minecraft.client.model.EndermiteModel) return MobModelHelper.ModelType.ENDERMITE;
+            if (model instanceof net.minecraft.client.model.AllayModel) return MobModelHelper.ModelType.ALLAY;
+            if (model instanceof net.minecraft.client.model.StriderModel) return MobModelHelper.ModelType.STRIDER;
+            if (model instanceof net.minecraft.client.model.SnowGolemModel) return MobModelHelper.ModelType.SNOW_GOLEM;
+            if (model instanceof net.minecraft.client.model.BlazeModel) return MobModelHelper.ModelType.BLAZE;
+            if (model instanceof net.minecraft.client.model.SpiderModel) return MobModelHelper.ModelType.SPIDER;
+            if (model instanceof net.minecraft.client.model.ShulkerModel) return MobModelHelper.ModelType.SHULKER;
+            if (model instanceof net.minecraft.client.model.GhastModel) return MobModelHelper.ModelType.GHAST;
+            if (model instanceof net.minecraft.client.model.VexModel) return MobModelHelper.ModelType.VEX;
+            if (model instanceof net.minecraft.client.model.WardenModel) return MobModelHelper.ModelType.WARDEN;
             if (model instanceof IllagerModel) return MobModelHelper.ModelType.ILLAGER;
+            // ZombieVillagerModel is a HumanoidModel, so it has to be claimed before the generic
+            // humanoid fallback below or it would lose the zombie-villager UVs its texture needs.
+            if (model instanceof net.minecraft.client.model.ZombieVillagerModel) return MobModelHelper.ModelType.ILLAGER;
             if (model instanceof net.minecraft.client.model.CreeperModel) return MobModelHelper.ModelType.CREEPER;
             if (model instanceof net.minecraft.client.model.SkeletonModel) return MobModelHelper.ModelType.HUMANOID_SKELETON;
             if (model instanceof net.minecraft.client.model.DrownedModel) return MobModelHelper.ModelType.HUMANOID_DROWNED;

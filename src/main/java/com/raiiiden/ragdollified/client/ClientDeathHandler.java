@@ -10,11 +10,8 @@ import net.minecraftforge.event.entity.living.LivingDeathEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
 
-/**
- * Client-side death detection. Listens for LivingDeathEvent on the client
- * and creates ragdolls via ClientRagdollManager.
- * This enables ragdolls to work on vanilla servers without the mod installed.
- */
+// Client-side death detection: watches LivingDeathEvent and builds ragdolls through
+// ClientRagdollManager, which is what makes them work on vanilla servers.
 @Mod.EventBusSubscriber(modid = Ragdollified.MODID, value = Dist.CLIENT)
 public class ClientDeathHandler {
 
@@ -25,13 +22,18 @@ public class ClientDeathHandler {
         // Only handle on client side
         if (!entity.level().isClientSide) return;
 
-        // Skip if either spawn path has already queued or constructed this entity.
-        if (ClientRagdollManager.hasPendingOrActiveRagdoll(entity.getId())) return;
-
         // Check if this entity should have a ragdoll
         boolean isPlayer = entity instanceof Player;
         String mobType = net.minecraft.world.entity.EntityType.getKey(entity.getType()).toString();
         if (!RagdollifiedConfig.isRagdollEnabledFor(mobType, isPlayer)) return;
+
+        // Snapshot the compat visuals before the pending/active early-out below. A server-driven
+        // RagdollSpawnPacket often lands before this event, and this is the last moment the entity
+        // is guaranteed to still carry its wounds — bailing first would leave a bare ragdoll.
+        ClientRagdollManager.captureCompatVisuals(entity);
+
+        // Skip if either spawn path has already queued or constructed this entity.
+        if (ClientRagdollManager.hasPendingOrActiveRagdoll(entity.getId())) return;
 
         MobModelHelper.ModelType modelType = isPlayer
                 ? MobModelHelper.ModelType.HUMANOID_STANDARD
@@ -39,13 +41,6 @@ public class ClientDeathHandler {
         if (!isPlayer && !MobModelHelper.isSupportedModelType(modelType)) {
             Ragdollified.LOGGER.info("Skipping ragdoll for unsupported mob {} - no matching ragdoll body/render", mobType);
             return;
-        }
-
-        // Snapshot procedural blood (Better Blood Overlay) so the ragdoll reproduces it. Mobs
-        // are captured every frame by EntityRenderCaptureHandler, but that path skips players,
-        // so capture them here — the player is still alive and its wounds are still present.
-        if (isPlayer) {
-            com.raiiiden.ragdollified.client.compat.BetterBloodOverlayCompat.capture(entity.getId(), entity);
         }
 
         // Create the ragdoll

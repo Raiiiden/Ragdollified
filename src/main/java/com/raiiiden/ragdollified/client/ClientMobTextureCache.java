@@ -12,19 +12,14 @@ public class ClientMobTextureCache {
         TEXTURE_CACHE.put(entityId, texture);
     }
 
-    /**
-     * Get cached texture for a mob. Does NOT remove — the ragdoll holds a reference
-     * to this and will read it on every getMobTexture call until it stores it locally.
-     * Call evict() when the ragdoll is destroyed.
-     */
+    // Cached texture for a mob. Does not remove: the ragdoll reads this on every
+    // getMobTexture call until it stores its own copy. Use evict() when it is destroyed.
     public static ResourceLocation getTextureForDeadMob(int mobEntityId) {
         return TEXTURE_CACHE.get(mobEntityId);
     }
 
-    /**
-     * Evict a mob's texture entry. Call this from ClientRagdoll.destroy() so the
-     * cache doesn't hold entries for ragdolls that are gone.
-     */
+    // Drop a mob's entry. Called from ClientRagdoll.destroy() so the cache never holds
+    // textures for ragdolls that are gone.
     public static void evict(int mobEntityId) {
         TEXTURE_CACHE.remove(mobEntityId);
     }
@@ -34,4 +29,5 @@ public class ClientMobTextureCache {
             TEXTURE_CACHE.clear();
         }
     }
+
 }

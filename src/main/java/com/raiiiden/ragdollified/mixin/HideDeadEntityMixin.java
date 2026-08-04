@@ -11,10 +11,7 @@ import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
-/**
- * Prevents the original dead entity, including dispatcher-owned fire and shadow passes,
- * from rendering once its replacement ragdoll exists.
- */
+// Stops the original dead entity rendering once its ragdoll exists, fire and shadow included.
 @Mixin(EntityRenderDispatcher.class)
 public class HideDeadEntityMixin {
 
@@ -29,9 +26,10 @@ public class HideDeadEntityMixin {
         // Only hide once a physics ragdoll actually exists. Pending queue entries are not
         // enough: they can be dropped or fail construction, in which case vanilla's death
         // render is the safe fallback rather than an invisible body.
-        if (entity instanceof LivingEntity living
+        if (ClientRagdollManager.isEntityExplicitlyHidden(entity.getId())
+                || (entity instanceof LivingEntity living
                 && living.isDeadOrDying()
-                && ClientRagdollManager.hasRagdollFor(entity.getId())) {
+                && ClientRagdollManager.hasRagdollFor(entity.getId()))) {
             ci.cancel();
         }
     }

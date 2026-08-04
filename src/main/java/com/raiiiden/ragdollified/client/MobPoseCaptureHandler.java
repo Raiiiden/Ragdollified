@@ -12,10 +12,8 @@ import net.minecraftforge.client.event.RenderLivingEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
 
-/**
- * Captures mob poses locally on the client during rendering.
- * No server sync needed — poses are used client-side when creating ragdolls.
- */
+// Captures mob poses on the client during rendering. No server sync: the poses are only read
+// client-side when building ragdolls.
 @Mod.EventBusSubscriber(modid = Ragdollified.MODID, bus = Mod.EventBusSubscriber.Bus.FORGE, value = Dist.CLIENT)
 public class MobPoseCaptureHandler {
 

@@ -47,6 +47,8 @@ public class Ragdollified {
         event.enqueueWork(() -> {
             ETFCompatibilityHelper.initialize();
             com.raiiiden.ragdollified.client.compat.BetterBloodOverlayCompat.initialize();
+            com.raiiiden.ragdollified.client.compat.VisualHealthCompat.initialize();
+            com.raiiiden.ragdollified.client.compat.CuriosRenderCompat.initialize();
         });
     }
 

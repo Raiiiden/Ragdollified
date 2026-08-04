@@ -8,10 +8,7 @@ import org.apache.logging.log4j.Logger;
 
 import java.lang.reflect.Method;
 
-/**
- * Compatibility helper for Entity Texture Features (ETF) mod
- * Uses reflection to avoid hard dependency
- */
+// Entity Texture Features compat, via reflection so there is no hard dependency.
 public class ETFCompatibilityHelper {
     private static final Logger LOGGER = LogManager.getLogger();
 
@@ -45,9 +42,7 @@ public class ETFCompatibilityHelper {
         }
     }
 
-    /**
-     * Get the ETF variant texture for an entity, or return the default if ETF is not available
-     */
+    // ETF variant texture for an entity, or the default when ETF is not present.
     public static ResourceLocation getVariantTexture(Entity entity, ResourceLocation defaultTexture) {
         if (!isETFLoaded || getCurrentVariantMethod == null) {
             return defaultTexture;

@@ -16,31 +16,22 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 
-/**
- * Loot captured at a player's death, held until that player's ragdoll settles (at which
- * point a {@link CorpseEntity} is spawned at the rest position). Persisted to disk via
- * {@link PendingCorpseStore} so a crash or shutdown during the pre-settle window never
- * loses the inventory — on the next start any leftover pending is spawned flat at the
- * recorded death position.
- */
+// Loot captured at a player's death, held until their ragdoll settles and a CorpseEntity spawns
+// at the rest position. Persisted through PendingCorpseStore so a crash in the pre-settle window
+// cannot lose the inventory: on the next start any leftover is spawned flat at the death spot.
 public class PendingCorpse {
 
     public UUID owner;
     public String name = "";
-    /**
-     * Stable handle for this death, generated at capture time and threaded through to the
-     * {@link CorpseEntity} and the Corpse Compass. Lets the compass and the retrieve command
-     * refer to exactly this corpse independently of the entity's own (later-assigned) UUID.
-     */
+    // Stable handle for this death, generated at capture and threaded through to the CorpseEntity
+    // and the Corpse Compass, so the compass and retrieve command can name exactly this corpse
+    // without depending on the entity's later-assigned UUID.
     public UUID corpseId;
     public ResourceKey<Level> dimension;
     public Vec3 deathPos = Vec3.ZERO;
-    /**
-     * The dying player's entity id at the moment of death. This equals the client-side
-     * ragdoll's {@code originalEntityId} (the ragdoll spawn packet keys off {@code entity.getId()}),
-     * so the corpse carries it to clients and each corpse hands off from exactly the ragdoll it
-     * replaced — a lingering older corpse can never cull a newer death's ragdoll.
-     */
+    // The dying player's entity id at death, which equals the client ragdoll's originalEntityId
+    // because the spawn packet keys off entity.getId(). Carrying it to clients makes each corpse
+    // hand off from exactly the ragdoll it replaced, so a stale corpse cannot cull a newer one.
     public int deathEntityId = -1;
     public final List<ItemStack> items = new ArrayList<>();       // 41 vanilla slots (index-aligned)
     public final List<ItemStack> curioStacks = new ArrayList<>(); // parallel with curioIds
@@ -50,12 +41,12 @@ public class PendingCorpse {
     public ItemStack legs = ItemStack.EMPTY;
     public ItemStack boots = ItemStack.EMPTY;
     public int storedXp = 0;
-    /** Latest server-issued impulse sequence incorporated by an acceptable settle report. */
+    // Latest server-issued impulse sequence incorporated by an acceptable settle report.
     public int impulseRevision = 0;
 
-    /** Server tick by which, if no settle has arrived, the corpse is spawned flat. In-memory only. */
+    // Server tick by which, if no settle has arrived, the corpse is spawned flat. In-memory only.
     public transient long deadlineTick;
-    /** Validated settle candidate, briefly delayed so in-flight pushes can invalidate it. */
+    // Validated settle candidate, briefly delayed so in-flight pushes can invalidate it.
     public transient Vec3 settleOrigin;
     public transient RagdollTransform[] settleTransforms;
     public transient int settleRevision = -1;

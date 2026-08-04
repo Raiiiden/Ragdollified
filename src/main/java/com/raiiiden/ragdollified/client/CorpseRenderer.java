@@ -17,12 +17,9 @@ import javax.vecmath.Quat4f;
 import javax.vecmath.Vector3f;
 import java.util.UUID;
 
-/**
- * Renders a {@link CorpseEntity} as the frozen ragdoll pose. Reuses
- * {@link ClientRagdollRenderer#renderPlayerBody} so the body + armor look identical to a
- * live ragdoll (including the leather/modded-armor fixes). Nothing is drawn until the
- * corpse is posed (until then the client physics ragdoll is the visual).
- */
+// Draws a CorpseEntity in its frozen ragdoll pose, reusing ClientRagdollRenderer.renderPlayerBody
+// so body and armor match a live ragdoll exactly, leather and modded-armor fixes included.
+// Nothing renders until the corpse is posed; the physics ragdoll is the visual until then.
 public class CorpseRenderer extends EntityRenderer<CorpseEntity> {
 
     // The synthetic flat fallback is drawn from the torso pivot at the grounded entity origin.
@@ -66,11 +63,15 @@ public class CorpseRenderer extends EntityRenderer<CorpseEntity> {
         // visible upward snap during the ragdoll-to-corpse handoff.
         poseStack.pushPose();
         if (usesFallbackPose) poseStack.translate(0.0, GROUND_LIFT, 0.0);
+        // The corpse entity's own UUID keys the blood and damage captured from the ragdoll it
+        // replaced (see ClientRagdollManager#tickCorpseClient), so the body keeps the wounds it
+        // died with instead of going clean at the handoff.
         ClientRagdollRenderer.renderPlayerBody(poseStack, buffer, packedLight, 0.0,
                 pose[RagdollPart.TORSO.index], pose[RagdollPart.HEAD.index],
                 pose[RagdollPart.LEFT_ARM.index], pose[RagdollPart.RIGHT_ARM.index],
                 pose[RagdollPart.LEFT_LEG.index], pose[RagdollPart.RIGHT_LEG.index],
-                skin, isSlim, helmet, chest, legs, boots, pe, 0f, -1);
+                skin, isSlim, helmet, chest, legs, boots, pe, 0f, corpse.getUUID(),
+                corpse.getWornCurios());
         poseStack.popPose();
 
         super.render(corpse, entityYaw, partialTick, poseStack, buffer, packedLight);
@@ -86,17 +87,14 @@ public class CorpseRenderer extends EntityRenderer<CorpseEntity> {
         return null;
     }
 
-    /**
-     * Fallback pose, entity-relative — used when no settle pose was reported. The standing
-     * humanoid layout (torso-relative offsets mirroring {@code RagdollBodyFactory.buildHumanoid})
-     * is pitched back 90° about X so the body lies flat on its back instead of standing straight
-     * up. If it ever reads as face-down, flip the sign of the pitch angle below.
-     */
+    // Entity-relative fallback pose for when no settle pose was reported: the standing humanoid
+    // layout from RagdollBodyFactory.buildHumanoid, pitched back 90 degrees about X so the body
+    // lies on its back rather than standing. Flip the pitch sign if it ever reads as face-down.
     private static RagdollTransform[] buildDefaultPose() {
         Quat4f lie = new Quat4f();
         lie.set(new javax.vecmath.AxisAngle4f(1f, 0f, 0f, -(float) (Math.PI / 2.0)));
 
-        RagdollTransform[] p = new RagdollTransform[6];
+        RagdollTransform[] p = new RagdollTransform[RagdollTransform.MAX_PARTS];
         p[RagdollPart.TORSO.index]     = lyingPart(RagdollPart.TORSO.index,      0f,     0f,    0f, lie);
         p[RagdollPart.HEAD.index]      = lyingPart(RagdollPart.HEAD.index,       0f,     0.55f, 0f, lie);
         p[RagdollPart.LEFT_ARM.index]  = lyingPart(RagdollPart.LEFT_ARM.index,  -0.35f, -0.13f, 0f, lie);
@@ -106,18 +104,15 @@ public class CorpseRenderer extends EntityRenderer<CorpseEntity> {
         return p;
     }
 
-    /** Standing offset (x,y,z) rotated by {@code lie}, carrying the lie rotation onto the part. */
+    // Standing offset (x,y,z) rotated by lie, carrying the lie rotation onto the part.
     private static RagdollTransform lyingPart(int index, float x, float y, float z, Quat4f lie) {
         return new RagdollTransform(index, rotate(lie, x, y, z), new Quat4f(lie));
     }
 
-    /**
-     * Rotate a vector by a unit quaternion via {@code v' = v + 2w(u×v) + 2u×(u×v)}, u = q.xyz.
-     * Done with plain floats on purpose: routing this through a {@code Quat4f(x,y,z,0)} makes the
-     * torso's (0,0,0) offset a zero-length quaternion, which vecmath normalizes → divide-by-zero →
-     * NaN, collapsing the whole model matrix and rendering the body invisible. This form never
-     * normalizes, so a zero vector maps cleanly to (0,0,0).
-     */
+    // Rotate a vector by a unit quaternion: v' = v + 2w(u x v) + 2u x (u x v), u = q.xyz. Plain
+    // floats on purpose — going through Quat4f(x,y,z,0) turns the torso's (0,0,0) offset into a
+    // zero-length quaternion, which vecmath normalizes into a divide-by-zero NaN that collapses
+    // the model matrix and makes the body invisible. This form never normalizes.
     private static Vector3f rotate(Quat4f q, float x, float y, float z) {
         float ux = q.x, uy = q.y, uz = q.z, w = q.w;
         float tx = 2f * (uy * z - uz * y);

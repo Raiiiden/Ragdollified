@@ -6,6 +6,9 @@ import javax.vecmath.Quat4f;
 import javax.vecmath.Vector3f;
 
 public class RagdollTransform {
+    // Largest native anatomy currently supported: torso + nine Ghast tentacles, or
+    // spider torso/head + eight legs. Kept fixed on the wire so retained poses stay simple.
+    public static final int MAX_PARTS = 10;
     public final int partId;         // index or identifier for which body part this transform belongs to
     public final Vector3f position;  // world-space position
     public final Quat4f rotation;    // world-space orientation (quaternion)
@@ -23,7 +26,7 @@ public class RagdollTransform {
         this.rotation = new Quat4f(rot);
     }
 
-    /** Write to network buffer */
+    // Write to network buffer
     public void writeTo(FriendlyByteBuf buf) {
         buf.writeInt(partId);
         buf.writeFloat(position.x);
@@ -35,7 +38,7 @@ public class RagdollTransform {
         buf.writeFloat(rotation.w);
     }
 
-    /** Read from network buffer */
+    // Read from network buffer
     public static RagdollTransform readFrom(FriendlyByteBuf buf) {
         int id = buf.readInt();
         float x = buf.readFloat();

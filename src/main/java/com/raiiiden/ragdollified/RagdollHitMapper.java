@@ -100,14 +100,10 @@ public final class RagdollHitMapper {
         return new PartAABB(part, cx - hx, cy - hy, cz - hz, cx + hx, cy + hy, cz + hz);
     }
 
-    /**
-     * AABB layout in entity-facing-local coords (entity X/Z position at origin, +Z =
-     * entity's forward direction, Y in WORLD-Y minus entity.getY() i.e. relative to feet).
-     * Numbers mirror {@link RagdollBodyFactory#buildHumanoid} / buildQuadruped /
-     * buildChicken / buildCreeper layouts plus the spawnYOffset applied in
-     * {@link com.raiiiden.ragdollified.client.ClientRagdoll#createRagdollBodies} so the
-     * raytrace tests against where the body parts actually are.
-     */
+    // AABB layout in entity-facing-local coords: X/Z origin at the entity, +Z forward, Y
+    // relative to the feet. Mirrors RagdollBodyFactory's buildHumanoid/buildQuadruped/
+    // buildChicken/buildCreeper layouts plus ClientRagdoll's spawnYOffset, so the raytrace
+    // tests against where the parts actually are.
     private static PartAABB[] aabbsFor(MobModelHelper.ModelType modelType, LivingEntity entity) {
         float scale = Math.max(0.001f, entity.getBbHeight() / 1.8f);
         switch (modelType) {
@@ -154,6 +150,177 @@ public final class RagdollHitMapper {
                         box(RagdollPart.RIGHT_LEG,  0.20 * s, cy - 0.55 * s,      -0.35 * s,   0.10 * s, 0.28 * s, 0.10 * s),
                 };
             }
+            case WOLF: {
+                double cy = 0.625;
+                return new PartAABB[]{
+                        box(RagdollPart.TORSO,      0,        cy,          0,        .25,   .21875, .47),
+                        box(RagdollPart.HEAD,       0,        cy + .09375, .8125,    .1875, .25,    .21875),
+                        box(RagdollPart.LEFT_ARM,  -.09375,  cy - .375,   .53125,   .0625, .25,    .0625),
+                        box(RagdollPart.RIGHT_ARM,  .09375,  cy - .375,   .53125,   .0625, .25,    .0625),
+                        box(RagdollPart.LEFT_LEG,  -.09375,  cy - .375,  -.15625,   .0625, .25,    .0625),
+                        box(RagdollPart.RIGHT_LEG,  .09375,  cy - .375,  -.15625,   .0625, .25,    .0625),
+                };
+            }
+            case FOX: {
+                double cy = 0.469;
+                return new PartAABB[]{
+                        box(RagdollPart.TORSO,      0,       cy,          0,        .1875, .1875, .34375),
+                        box(RagdollPart.HEAD,       0,       cy,          .625,     .25,   .25,   .28125),
+                        box(RagdollPart.LEFT_ARM,  -.125,   cy - .28125, .21875,   .0625, .1875, .0625),
+                        box(RagdollPart.RIGHT_ARM,  .125,   cy - .28125, .21875,   .0625, .1875, .0625),
+                        box(RagdollPart.LEFT_LEG,  -.125,   cy - .28125,-.21875,   .0625, .1875, .0625),
+                        box(RagdollPart.RIGHT_LEG,  .125,   cy - .28125,-.21875,   .0625, .1875, .0625),
+                };
+            }
+            case PANDA: {
+                boolean baby = entity.isBaby();
+                double cy = baby ? 0.270833 : 0.875;
+                double bs = baby ? 1.0 / 3.0 : 1.0;
+                double hs = baby ? 1.5 / 2.7 : 1.0;
+                return new PartAABB[]{
+                        box(RagdollPart.TORSO,      0,             cy,                         0,              .59375*bs, .40625*bs, .8125*bs),
+                        box(RagdollPart.HEAD,       0,             cy+(baby?.083333:0),         baby?.440972:1.09375, .53125*hs, .40625*hs, .34375*hs),
+                        box(RagdollPart.LEFT_ARM,  -.34375*bs,    cy-.59375*bs,                .5625*bs,      .1875*bs,  .28125*bs, .1875*bs),
+                        box(RagdollPart.RIGHT_ARM,  .34375*bs,    cy-.59375*bs,                .5625*bs,      .1875*bs,  .28125*bs, .1875*bs),
+                        box(RagdollPart.LEFT_LEG,  -.34375*bs,    cy-.59375*bs,               -.5625*bs,      .1875*bs,  .28125*bs, .1875*bs),
+                        box(RagdollPart.RIGHT_LEG,  .34375*bs,    cy-.59375*bs,               -.5625*bs,      .1875*bs,  .28125*bs, .1875*bs),
+                };
+            }
+            case IRON_GOLEM: {
+                double cy = 1.515625;
+                return new PartAABB[]{
+                        box(RagdollPart.TORSO,      0,        cy,           0,       .5625,  .546875, .34375),
+                        box(RagdollPart.HEAD,       0,        cy+.828125,   .25,     .25,    .34375,  .3125),
+                        box(RagdollPart.LEFT_ARM,  -.6875,   cy-.359375,  -.03125, .125,   .9375,   .1875),
+                        box(RagdollPart.RIGHT_ARM,  .6875,   cy-.359375,  -.03125, .125,   .9375,   .1875),
+                        box(RagdollPart.LEFT_LEG,  -.28125,  cy-1.015625,  0,       .1875,  .5,      .15625),
+                        box(RagdollPart.RIGHT_LEG,  .28125,  cy-1.015625,  0,       .1875,  .5,      .15625),
+                };
+            }
+            case GOAT: {
+                boolean baby=entity.isBaby(); double b=baby?.5:1, h=baby?.6:1, cy=baby?.34375:.6875;
+                return new PartAABB[]{
+                        box(RagdollPart.TORSO,0,cy,0,.34375*b,.4375*b,.53125*b),
+                        box(RagdollPart.HEAD,0,cy+(baby?.05:.15625),baby?.409375:.75,.34375*h,.46875*h,.15625*h),
+                        box(RagdollPart.LEFT_ARM,-.125*b,cy-.375*b,.3125*b,.09375*b,.3125*b,.09375*b),
+                        box(RagdollPart.RIGHT_ARM,.125*b,cy-.375*b,.3125*b,.09375*b,.3125*b,.09375*b),
+                        box(RagdollPart.LEFT_LEG,-.125*b,cy-.5*b,-.3125*b,.09375*b,.1875*b,.09375*b),
+                        box(RagdollPart.RIGHT_LEG,.125*b,cy-.5*b,-.3125*b,.09375*b,.1875*b,.09375*b)};
+            }
+            case POLAR_BEAR: {
+                boolean baby=entity.isBaby(); double b=baby?.5:1, h=baby?2.0/3.0:1, cy=baby?.50625:1.0125, rs=1.2;
+                return new PartAABB[]{
+                        box(RagdollPart.TORSO,0,cy,0,.4375*b*rs,.34375*b*rs,.8125*b*rs),
+                        box(RagdollPart.HEAD,0,cy+(baby?-.00625:.0375),baby?.65:1.275,.28125*h*rs,.25*h*rs,.3125*h*rs),
+                        box(RagdollPart.LEFT_ARM,-.28125*b*rs,cy-.53125*b*rs,.375*b*rs,.125*b*rs,.3125*b*rs,.1875*b*rs),
+                        box(RagdollPart.RIGHT_ARM,.28125*b*rs,cy-.53125*b*rs,.375*b*rs,.125*b*rs,.3125*b*rs,.1875*b*rs),
+                        box(RagdollPart.LEFT_LEG,-.28125*b*rs,cy-.53125*b*rs,-.5*b*rs,.125*b*rs,.3125*b*rs,.25*b*rs),
+                        box(RagdollPart.RIGHT_LEG,.28125*b*rs,cy-.53125*b*rs,-.5*b*rs,.125*b*rs,.3125*b*rs,.25*b*rs)};
+            }
+            case TURTLE: {
+                double b=entity.isBaby()?1.0/6.0:1, cy=entity.isBaby()?.046875:.28125;
+                return new PartAABB[]{
+                        box(RagdollPart.TORSO,0,cy,0,.59375*b,.28125*b,.625*b),
+                        box(RagdollPart.HEAD,0,cy-.0625*b,.8125*b,.1875*b,.15625*b,.1875*b),
+                        box(RagdollPart.LEFT_ARM,-.71875*b,cy-.125*b,.40625*b,.40625*b,.03125*b,.15625*b),
+                        box(RagdollPart.RIGHT_ARM,.71875*b,cy-.125*b,.40625*b,.40625*b,.03125*b,.15625*b),
+                        box(RagdollPart.LEFT_LEG,-.21875*b,cy-.1875*b,-.8125*b,.125*b,.03125*b,.3125*b),
+                        box(RagdollPart.RIGHT_LEG,.21875*b,cy-.1875*b,-.8125*b,.125*b,.03125*b,.3125*b)};
+            }
+            case ENDERMAN: {
+                double cy=2.0;
+                return new PartAABB[]{
+                        box(RagdollPart.TORSO,0,cy,0,.25,.375,.125),
+                        box(RagdollPart.HEAD,0,cy+.5625,0,.25,.25,.25),
+                        box(RagdollPart.LEFT_ARM,-.3125,cy-.5625,0,.0625,.9375,.0625),
+                        box(RagdollPart.RIGHT_ARM,.3125,cy-.5625,0,.0625,.9375,.0625),
+                        box(RagdollPart.LEFT_LEG,-.125,cy-1.125,0,.0625,.9375,.0625),
+                        box(RagdollPart.RIGHT_LEG,.125,cy-1.125,0,.0625,.9375,.0625)};
+            }
+            case CAMEL: {
+                double b=entity.isBaby()?.45:1,cy=entity.isBaby()?.73078:1.625;
+                return new PartAABB[]{box(RagdollPart.TORSO,0,cy,0,.46875*b,.375*b,.84375*b),box(RagdollPart.HEAD,0,cy+.4375*b,1.125*b,.21875*b,.6875*b,.78125*b),box(RagdollPart.LEFT_ARM,-.30625*b,cy-.96875*b,.625*b,.15625*b,.65625*b,.15625*b),box(RagdollPart.RIGHT_ARM,.30625*b,cy-.96875*b,.625*b,.15625*b,.65625*b,.15625*b),box(RagdollPart.LEFT_LEG,-.30625*b,cy-.96875*b,-.625*b,.15625*b,.65625*b,.15625*b),box(RagdollPart.RIGHT_LEG,.30625*b,cy-.96875*b,-.625*b,.15625*b,.65625*b,.15625*b)};
+            }
+            case LLAMA: {
+                boolean baby=entity.isBaby();double cy=baby?.363636:1.0625;
+                if(baby)return new PartAABB[]{box(RagdollPart.TORSO,0,cy,0,.234375,.142045,.255682),box(RagdollPart.HEAD,0,cy+.34494,.39944,.178571,.426136,.248016),box(RagdollPart.LEFT_ARM,-.099432,cy-.15496,.170455,.056818,.180785,.056818),box(RagdollPart.RIGHT_ARM,.099432,cy-.15496,.170455,.056818,.180785,.056818),box(RagdollPart.LEFT_LEG,-.099432,cy-.15496,-.142045,.056818,.180785,.056818),box(RagdollPart.RIGHT_LEG,.099432,cy-.15496,-.142045,.056818,.180785,.056818)};
+                return new PartAABB[]{box(RagdollPart.TORSO,0,cy,0,.375,.3125,.5625),box(RagdollPart.HEAD,0,cy+.53125,.75,.25,.65625,.3125),box(RagdollPart.LEFT_ARM,-.21875,cy-.625,.375,.125,.4375,.125),box(RagdollPart.RIGHT_ARM,.21875,cy-.625,.375,.125,.4375,.125),box(RagdollPart.LEFT_LEG,-.21875,cy-.625,-.3125,.125,.4375,.125),box(RagdollPart.RIGHT_LEG,.21875,cy-.625,-.3125,.125,.4375,.125)};
+            }
+            case RABBIT: {
+                boolean baby=entity.isBaby();double bs=baby?.4:.6,hs=baby?.5666667:.6,cy=baby?.156:.234;
+                return new PartAABB[]{box(RagdollPart.TORSO,0,cy,0,.1875*bs,.15625*bs,.3125*bs),box(RagdollPart.HEAD,0,cy+(baby?.1575:.141),baby?.1314:.2487,.2*hs,.28125*hs,.2*hs),box(RagdollPart.LEFT_ARM,baby?-.075:-.1125,cy+(baby?-.067:-.10075),baby?.1185:.1777,.0625*bs,.21875*bs,.08333*bs),box(RagdollPart.RIGHT_ARM,baby?.075:.1125,cy+(baby?-.067:-.10075),baby?.1185:.1777,.0625*bs,.21875*bs,.08333*bs),box(RagdollPart.LEFT_LEG,baby?-.075:-.1125,cy+(baby?-.07475:-.112),baby?-.03175:-.0476,.125*bs,.3*bs,.35*bs),box(RagdollPart.RIGHT_LEG,baby?.075:.1125,cy+(baby?-.07475:-.112),baby?-.03175:-.0476,.125*bs,.3*bs,.35*bs)};
+            }
+            case FROG: {
+                double cy=.15625;return new PartAABB[]{box(RagdollPart.TORSO,0,cy,0,.21875,.09375,.28125),box(RagdollPart.HEAD,0,cy+.125,0,.21875,.09375,.28125),box(RagdollPart.LEFT_ARM,-.25,cy-.0625,.15625,.0625,.09375,.09375),box(RagdollPart.RIGHT_ARM,.25,cy-.0625,.15625,.0625,.09375,.09375),box(RagdollPart.LEFT_LEG,-.25,cy-.0625,-.21875,.09375,.09375,.125),box(RagdollPart.RIGHT_LEG,.25,cy-.0625,-.21875,.09375,.09375,.125)};
+            }
+            case HOGLIN: {
+                boolean baby=entity.isBaby();double b=baby?.5:1,h=baby?1.5/1.9:1,cy=baby?.53125:1.0625;
+                return new PartAABB[]{box(RagdollPart.TORSO,0,cy,0,.5*b,.4375*b,.8125*b),box(RagdollPart.HEAD,0,cy+(baby?.1163:-.1423),baby?.5974:1.1317,.4375*h,.5751*h,.5251*h),box(RagdollPart.LEFT_ARM,-.25*b,cy-.625*b,.53125*b,.1875*b,.4375*b,.1875*b),box(RagdollPart.RIGHT_ARM,.25*b,cy-.625*b,.53125*b,.1875*b,.4375*b,.1875*b),box(RagdollPart.LEFT_LEG,-.15625*b,cy-.71875*b,-.625*b,.15625*b,.34375*b,.15625*b),box(RagdollPart.RIGHT_LEG,.15625*b,cy-.71875*b,-.625*b,.15625*b,.34375*b,.15625*b)};
+            }
+            case SNIFFER: {
+                boolean baby=entity.isBaby();double b=baby?.5:1,h=baby?.6:1,cy=baby?.578125:1.15625;
+                return new PartAABB[]{box(RagdollPart.TORSO,0,cy,0,.78125*b,.90625*b,1.25*b),box(RagdollPart.HEAD,0,cy+(baby?-.28125:-.5),baby?.905625:1.87375,.469375*h,.59375*h,.625*h),box(RagdollPart.LEFT_ARM,-.46875*b,cy-.84375*b,.9375*b,.21875*b,.3125*b,.25*b),box(RagdollPart.RIGHT_ARM,.46875*b,cy-.84375*b,.9375*b,.21875*b,.3125*b,.25*b),box(RagdollPart.LEFT_LEG,-.46875*b,cy-.84375*b,-.9375*b,.21875*b,.3125*b,.25*b),box(RagdollPart.RIGHT_LEG,.46875*b,cy-.84375*b,-.9375*b,.21875*b,.3125*b,.25*b)};
+            }
+            case RAVAGER: {
+                double cy=1.625;return new PartAABB[]{box(RagdollPart.TORSO,0,cy,0,.4375,.625,.90625),box(RagdollPart.HEAD,0,cy-.0625,1.5,.5,.625,.5),box(RagdollPart.LEFT_ARM,-.5,cy-.46875,.71875,.25,1.15625,.25),box(RagdollPart.RIGHT_ARM,.5,cy-.46875,.71875,.25,1.15625,.25),box(RagdollPart.LEFT_LEG,-.5,cy-.46875,-.71875,.25,1.15625,.25),box(RagdollPart.RIGHT_LEG,.5,cy-.46875,-.71875,.25,1.15625,.25)};
+            }
+            case PHANTOM: {
+                int size=Math.max(0,Math.round((scale*3.6f-1f)*4.5f));double s=1+.15*size,cy=1.34375*s;
+                return new PartAABB[]{box(RagdollPart.TORSO,0,cy,0,.15625*s,.09375*s,.28125*s),box(RagdollPart.HEAD,0,cy-.0625*s,.375*s,.21875*s,.09375*s,.15625*s),box(RagdollPart.LEFT_ARM,-.75*s,cy+.03125*s,0,.59375*s,.0625*s,.28125*s),box(RagdollPart.RIGHT_ARM,.75*s,cy+.03125*s,0,.59375*s,.0625*s,.28125*s),box(RagdollPart.LEFT_LEG,0,cy+.03125*s,-.46875*s,.09375*s,.0625*s,.1875*s),box(RagdollPart.RIGHT_LEG,0,cy+.03125*s,-.84375*s,.03125*s,.03125*s,.1875*s)};
+            }
+            case PARROT: {
+                double cy=.28125;return new PartAABB[]{box(RagdollPart.TORSO,0,cy,0,.09375,.1875,.09375),box(RagdollPart.HEAD,0,cy+.238125,-.015,.09375,.1875,.1875),box(RagdollPart.LEFT_ARM,-.09375,cy+.00375,-.015,.03125,.15625,.09375),box(RagdollPart.RIGHT_ARM,.09375,cy+.00375,-.015,.03125,.15625,.09375),box(RagdollPart.LEFT_LEG,-.0625,cy-.21875,-.121875,.03125,.0625,.03125),box(RagdollPart.RIGHT_LEG,.0625,cy-.21875,-.121875,.03125,.0625,.03125)};
+            }
+            case SLIME:
+            case MAGMA_CUBE:
+                return new PartAABB[]{box(RagdollPart.TORSO,0,.25,0,.25,.25,.25)};
+            case SILVERFISH: {
+                double cy=.125;return new PartAABB[]{box(RagdollPart.TORSO,0,cy,-.0625,.1875,.125,.09375),box(RagdollPart.HEAD,0,cy-.03125,.15625,.125,.09375,.125),box(RagdollPart.LEFT_LEG,0,cy-.03125,-.25,.09375,.09375,.09375),box(RagdollPart.RIGHT_LEG,0,cy-.0625,-.4375,.0625,.0625,.09375),box(RagdollPart.LEFT_ARM,0,cy-.09375,-.59375,.0625,.03125,.0625),box(RagdollPart.RIGHT_ARM,0,cy-.09375,-.71875,.03125,.03125,.0625)};
+            }
+            case ENDERMITE: {
+                double cy=.125;return new PartAABB[]{box(RagdollPart.TORSO,0,cy,0,.1875,.125,.15625),box(RagdollPart.HEAD,0,cy-.03125,.21875,.125,.09375,.0625),box(RagdollPart.LEFT_LEG,0,cy-.03125,-.1875,.09375,.09375,.03125),box(RagdollPart.RIGHT_LEG,0,cy-.0625,-.25,.03125,.0625,.03125)};
+            }
+            case ALLAY: {
+                double cy=.125;return new PartAABB[]{box(RagdollPart.TORSO,0,cy,0,.09375,.1625,.06875),box(RagdollPart.HEAD,0,cy+.311875,0,.15625,.15625,.15625),box(RagdollPart.LEFT_ARM,-.125,cy+.03125,0,.03125,.125,.0625),box(RagdollPart.RIGHT_ARM,.125,cy+.03125,0,.03125,.125,.0625)};
+            }
+            case STRIDER: {
+                double s=entity.isBaby()?.5:1,cy=entity.isBaby()?.65625:1.3125;return new PartAABB[]{box(RagdollPart.TORSO,0,cy,0,.5*s,.4375*s,.5*s),box(RagdollPart.LEFT_LEG,-.25*s,cy-.8125*s,0,.125*s,.5*s,.125*s),box(RagdollPart.RIGHT_LEG,.25*s,cy-.8125*s,0,.125*s,.5*s,.125*s)};
+            }
+            case SNOW_GOLEM: {
+                double cy=1;return new PartAABB[]{box(RagdollPart.TORSO,0,cy,0,.28125,.28125,.28125),box(RagdollPart.HEAD,0,cy+.5,0,.21875,.21875,.21875),box(RagdollPart.LEFT_LEG,0,cy-.625,0,.34375,.34375,.34375)};
+            }
+            case BLAZE: {
+                return new PartAABB[]{box(RagdollPart.TORSO,0,1.2,0,.25,.25,.25)};
+            }
+            case SPIDER: {
+                double s=entity instanceof net.minecraft.world.entity.monster.CaveSpider?.7:1,cy=.5625*s;return new PartAABB[]{box(RagdollPart.TORSO,0,cy,0,.3125*s,.25*s,.5625*s),box(RagdollPart.HEAD,0,cy,.8125*s,.25*s,.25*s,.25*s)};
+            }
+            case SHULKER: {
+                return new PartAABB[]{box(RagdollPart.TORSO,0,.25,0,.5,.25,.5),box(RagdollPart.HEAD,0,.875,0,.5,.375,.5)};
+            }
+            case GHAST: {
+                return new PartAABB[]{box(RagdollPart.TORSO,0,2.25,0,2.25,2.25,2.25)};
+            }
+            case VEX: {
+                double cy=.35;return new PartAABB[]{box(RagdollPart.TORSO,0,cy,0,.09375,.15625,.0625),box(RagdollPart.HEAD,0,cy+.28125,0,.15625,.15625,.15625),box(RagdollPart.LEFT_ARM,-.125,cy-.109375,0,.05625,.1125,.05625),box(RagdollPart.RIGHT_ARM,.125,cy-.109375,0,.05625,.1125,.05625)};
+            }
+            case WARDEN: {
+                double cy=1.46875;return new PartAABB[]{box(RagdollPart.TORSO,0,cy,0,.5625,.65625,.34375),box(RagdollPart.HEAD,0,cy+1.15625,0,.5,.5,.3125),box(RagdollPart.LEFT_LEG,-.36875,cy-1.0625,0,.1875,.40625,.1875),box(RagdollPart.RIGHT_LEG,.36875,cy-1.0625,0,.1875,.40625,.1875),box(RagdollPart.LEFT_ARM,-.8125,cy-.21875,.0625,.25,.875,.25),box(RagdollPart.RIGHT_ARM,.8125,cy-.21875,.0625,.25,.875,.25)};
+            }
+            case EQUINE: {
+                double rs = entity.getType() == net.minecraft.world.entity.EntityType.HORSE ? 1.1
+                        : entity.getType() == net.minecraft.world.entity.EntityType.DONKEY ? 0.87
+                        : entity.getType() == net.minecraft.world.entity.EntityType.MULE ? 0.92 : 1.0;
+                double cy = rs;
+                return new PartAABB[]{
+                        box(RagdollPart.TORSO,      0,          cy,             0,           .3125*rs, .3125*rs, .6875*rs),
+                        box(RagdollPart.HEAD,       0,          cy + .47*rs,     .69*rs,      .22*rs,   .59*rs,   .44*rs),
+                        box(RagdollPart.LEFT_ARM,  -.19*rs,    cy - .66*rs,     .56*rs,      .125*rs,  .344*rs,  .125*rs),
+                        box(RagdollPart.RIGHT_ARM,  .19*rs,    cy - .66*rs,     .56*rs,      .125*rs,  .344*rs,  .125*rs),
+                        box(RagdollPart.LEFT_LEG,  -.25*rs,    cy - .66*rs,    -.56*rs,      .125*rs,  .344*rs,  .125*rs),
+                        box(RagdollPart.RIGHT_LEG,  .25*rs,    cy - .66*rs,    -.56*rs,      .125*rs,  .344*rs,  .125*rs),
+                };
+            }
             case CHICKEN: {
                 double cy = 0.4 * scale;
                 float s = scale;
@@ -171,11 +338,8 @@ public final class RagdollHitMapper {
         }
     }
 
-    /**
-     * Run the bullet ray against each part AABB, return the part it enters first
-     * (smallest positive t). Returns null if the ray misses every box — caller falls
-     * back to bbox bucketing.
-     */
+    // Ray against every part AABB, returning the one entered first (smallest positive t), or
+    // null if it misses them all — the caller then falls back to bbox bucketing.
     private static RagdollPart mapByRaytrace(MobModelHelper.ModelType modelType, LivingEntity entity,
                                              Vec3 hitPos, Vec3 direction) {
         PartAABB[] aabbs = aabbsFor(modelType, entity);
@@ -211,13 +375,9 @@ public final class RagdollHitMapper {
         return bestPart;
     }
 
-    /**
-     * Slab-method ray-AABB intersection. Returns the t at which the ray first hits
-     * the box (entry point), or {@link Double#NEGATIVE_INFINITY} if the ray misses.
-     * Accepts negative t when the origin is already inside the box (bullet xOld can be
-     * inside the entity hitbox if the bullet overshot in one tick) — in that case the
-     * box is considered "hit" with t=0.
-     */
+    // Slab-method ray/AABB intersection returning the entry t, or NEGATIVE_INFINITY on a miss.
+    // Negative t is accepted when the origin already sits inside the box — a bullet's xOld can
+    // land inside the hitbox after overshooting in one tick — and counts as a hit at t=0.
     private static double rayAabb(double ox, double oy, double oz,
                                   double dx, double dy, double dz,
                                   double minX, double minY, double minZ,
@@ -299,7 +459,22 @@ public final class RagdollHitMapper {
                 return RagdollPart.TORSO;
             }
             case QUADRUPED:
-            case CHICKEN: {
+            case WOLF:
+            case FOX:
+            case PANDA:
+            case GOAT:
+            case POLAR_BEAR:
+            case CAMEL:
+            case LLAMA:
+            case RABBIT:
+            case FROG:
+            case HOGLIN:
+            case SNIFFER:
+            case RAVAGER:
+            case STRIDER:
+            case SPIDER:
+            case CHICKEN:
+            case EQUINE: {
                 // For quadrupeds the head extends forward beyond the body's center along
                 // +rotZ, so accept hits high or hits that are forward-and-not-low as head.
                 if (relY > 0.85f) return RagdollPart.HEAD;
@@ -312,6 +487,64 @@ public final class RagdollHitMapper {
                 }
                 return RagdollPart.TORSO;
             }
+            case TURTLE: {
+                if (rotZ > bbW*.35f) return RagdollPart.HEAD;
+                if (Math.abs(rotX) > bbW*.42f) {
+                    return rotX < 0 ? RagdollPart.LEFT_ARM : RagdollPart.RIGHT_ARM;
+                }
+                if (rotZ < -bbW*.25f) {
+                    return rotX < 0 ? RagdollPart.LEFT_LEG : RagdollPart.RIGHT_LEG;
+                }
+                return RagdollPart.TORSO;
+            }
+            case IRON_GOLEM: {
+                if (relY > 0.72f) return RagdollPart.HEAD;
+                if (relY < 0.45f) return rotX < 0 ? RagdollPart.LEFT_LEG : RagdollPart.RIGHT_LEG;
+                if (Math.abs(rotX) > bbW * 0.24f) {
+                    return rotX < 0 ? RagdollPart.LEFT_ARM : RagdollPart.RIGHT_ARM;
+                }
+                return RagdollPart.TORSO;
+            }
+            case ENDERMAN: {
+                if (relY > 0.82f) return RagdollPart.HEAD;
+                if (relY < 0.48f) return rotX < 0 ? RagdollPart.LEFT_LEG : RagdollPart.RIGHT_LEG;
+                if (Math.abs(rotX) > bbW*.2f) return rotX < 0 ? RagdollPart.LEFT_ARM : RagdollPart.RIGHT_ARM;
+                return RagdollPart.TORSO;
+            }
+            case PHANTOM: {
+                if (rotZ > bbW*.2f) return RagdollPart.HEAD;
+                if (Math.abs(rotX) > bbW*.25f) return rotX < 0 ? RagdollPart.LEFT_ARM : RagdollPart.RIGHT_ARM;
+                if (rotZ < -bbW*.2f) return rotZ < -bbW*.55f ? RagdollPart.RIGHT_LEG : RagdollPart.LEFT_LEG;
+                return RagdollPart.TORSO;
+            }
+            case PARROT: {
+                if (relY>.68f) return RagdollPart.HEAD;
+                if (Math.abs(rotX)>bbW*.25f) return rotX<0?RagdollPart.LEFT_ARM:RagdollPart.RIGHT_ARM;
+                if (relY<.35f) return rotX<0?RagdollPart.LEFT_LEG:RagdollPart.RIGHT_LEG;
+                return RagdollPart.TORSO;
+            }
+            case SLIME:
+            case MAGMA_CUBE:
+                return RagdollPart.TORSO;
+            case SILVERFISH:
+            case ENDERMITE: {
+                if(rotZ>bbW*.2f)return RagdollPart.HEAD;
+                if(rotZ<-bbW*.55f)return RagdollPart.RIGHT_ARM;
+                if(rotZ<-bbW*.25f)return RagdollPart.LEFT_LEG;
+                return RagdollPart.TORSO;
+            }
+            case ALLAY: {
+                if(relY>.7f)return RagdollPart.HEAD;
+                if(Math.abs(rotX)>bbW*.25f)return rotX<0?RagdollPart.LEFT_ARM:RagdollPart.RIGHT_ARM;
+                return RagdollPart.TORSO;
+            }
+            case SNOW_GOLEM: {
+                if(relY>.72f)return RagdollPart.HEAD;if(relY<.35f)return RagdollPart.LEFT_LEG;
+                if(Math.abs(rotX)>bbW*.25f)return rotX<0?RagdollPart.LEFT_ARM:RagdollPart.RIGHT_ARM;
+                return RagdollPart.TORSO;
+            }
+            case BLAZE:
+                return relY>.65f?RagdollPart.TORSO:(rotX<0?RagdollPart.LEFT_ARM:RagdollPart.RIGHT_ARM);
             default:
                 return RagdollPart.TORSO;
         }

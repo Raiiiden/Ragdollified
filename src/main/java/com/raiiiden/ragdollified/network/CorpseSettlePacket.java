@@ -9,15 +9,13 @@ import net.minecraftforge.network.NetworkEvent;
 import java.util.UUID;
 import java.util.function.Supplier;
 
-/**
- * Client→Server: "a player ragdoll near me settled". Identifies the dead player and exact
- * death entity, then carries the settle origin and six frozen part transforms so the server
- * can spawn the posed corpse from any nearby observer's simulation.
- */
+// Client reports that a nearby player ragdoll settled. Carries the dead player, the death
+// entity, the settle origin, and six frozen part transforms, so the server can spawn the posed
+// corpse from any nearby observer's simulation.
 public class CorpseSettlePacket {
 
     private final double originX, originY, originZ;
-    private final RagdollTransform[] transforms; // length 6, entries may be null
+    private final RagdollTransform[] transforms; // fixed MAX_PARTS, entries may be null
     private final UUID ownerUUID;
     private final int ragdollEntityId;
     private final int impulseRevision;
@@ -46,7 +44,7 @@ public class CorpseSettlePacket {
         buf.writeDouble(msg.originX);
         buf.writeDouble(msg.originY);
         buf.writeDouble(msg.originZ);
-        for (int i = 0; i < 6; i++) {
+        for (int i = 0; i < RagdollTransform.MAX_PARTS; i++) {
             RagdollTransform t = (msg.transforms != null && i < msg.transforms.length) ? msg.transforms[i] : null;
             boolean present = t != null;
             buf.writeBoolean(present);
@@ -63,8 +61,8 @@ public class CorpseSettlePacket {
         double ox = buf.readDouble();
         double oy = buf.readDouble();
         double oz = buf.readDouble();
-        RagdollTransform[] transforms = new RagdollTransform[6];
-        for (int i = 0; i < 6; i++) {
+        RagdollTransform[] transforms = new RagdollTransform[RagdollTransform.MAX_PARTS];
+        for (int i = 0; i < RagdollTransform.MAX_PARTS; i++) {
             if (buf.readBoolean()) transforms[i] = RagdollTransform.readFrom(buf);
         }
         // Old clients end after the transforms. Preserve their owner-only behavior.

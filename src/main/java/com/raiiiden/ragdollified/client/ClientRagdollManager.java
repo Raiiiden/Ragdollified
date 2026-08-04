@@ -5,6 +5,9 @@ import com.bulletphysics.collision.narrowphase.ManifoldPoint;
 import com.bulletphysics.dynamics.DiscreteDynamicsWorld;
 import com.bulletphysics.dynamics.RigidBody;
 import com.raiiiden.ragdollified.*;
+import com.raiiiden.ragdollified.api.DragEnd;
+import com.raiiiden.ragdollified.api.DragTarget;
+import com.raiiiden.ragdollified.api.RagdollSpawnTransform;
 import javax.vecmath.Quat4f;
 import javax.vecmath.Vector3f;
 import java.lang.management.GarbageCollectorMXBean;
@@ -14,6 +17,7 @@ import com.raiiiden.ragdollified.entity.CorpseEntity;
 import com.raiiiden.ragdollified.network.CorpseSettlePacket;
 import com.raiiiden.ragdollified.network.ModNetwork;
 import com.raiiiden.ragdollified.network.RagdollStatePacket;
+import com.raiiiden.ragdollified.network.RagdollStreamPacket;
 import net.minecraft.client.Minecraft;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.client.multiplayer.ClientLevel;
@@ -169,6 +173,72 @@ public class ClientRagdollManager {
     // can't cull a newer death's ragdoll for the same player.
     private static final ConcurrentLinkedQueue<Integer> removeByRagdollIdQueue = new ConcurrentLinkedQueue<>();
 
+    // Public API drag targets. These are intentionally targets rather than impulses. Each
+    // request can drive several limbs, and the complete immutable request is consumed before
+    // Bullet's next step so paired arms/legs are never updated one at a time.
+    private static final class DragRequest {
+        final Map<RagdollPart, Vec3> partTargets;
+        final DragEnd end;
+        final DragTarget endTarget;
+
+        private DragRequest(Map<RagdollPart, Vec3> partTargets, DragEnd end, DragTarget endTarget) {
+            this.partTargets = partTargets;
+            this.end = end;
+            this.endTarget = endTarget;
+        }
+
+        static DragRequest forParts(Map<RagdollPart, Vec3> targets) {
+            EnumMap<RagdollPart, Vec3> copy = new EnumMap<>(RagdollPart.class);
+            if (targets != null) {
+                for (Map.Entry<RagdollPart, Vec3> entry : targets.entrySet()) {
+                    if (entry.getKey() != null && entry.getValue() != null) copy.put(entry.getKey(), entry.getValue());
+                }
+            }
+            return copy.isEmpty() ? null : new DragRequest(Map.copyOf(copy), null, null);
+        }
+
+        static DragRequest forEnd(DragEnd end, DragTarget target) {
+            return end == null || target == null ? null : new DragRequest(Map.of(), end, target);
+        }
+    }
+    // Owner-streamed player ragdolls. The server assigns exactly one owner per player body;
+    // TRUE means "this client simulates and streams it", FALSE means "play back the stream".
+    // No entry at all means simulate locally — mobs, singleplayer, and vanilla/older servers.
+    private static final ConcurrentHashMap<Integer, Boolean> streamOwnership = new ConcurrentHashMap<>();
+    private static final ConcurrentLinkedQueue<StreamedPoseUpdate> streamPoseQueue = new ConcurrentLinkedQueue<>();
+    private static final ConcurrentHashMap<Integer, Integer> streamSendSequences = new ConcurrentHashMap<>();
+
+    private record StreamedPoseUpdate(int entityId, RagdollTransform[] transforms, int sequence) {}
+
+    private static final ConcurrentHashMap<Integer, DragRequest> dragTargets = new ConcurrentHashMap<>();
+    private static final ConcurrentLinkedQueue<Integer> endedDragIds = new ConcurrentLinkedQueue<>();
+    private static final ConcurrentLinkedQueue<Integer> deathLifetimeRestarts = new ConcurrentLinkedQueue<>();
+    // Bodies handed back at death, which must report a real settle before becoming a corpse.
+    // No timer: the age-based give-up shortcut below is just switched off for them. That
+    // shortcut exists for a ragdoll stuck mid-air and keys off age, which a body that spent a
+    // whole knock alive always trips — why it fired the instant the handover landed. Written on
+    // the caller's thread, not inside the ragdoll's restart, because that restart runs on the
+    // physics worker while the corpse bridge runs on main in the gap before it drains.
+    private static final Set<Integer> awaitingRealSettle = ConcurrentHashMap.newKeySet();
+
+    // API spawns deliberately bypass the user's automatic-death enable list, but still
+    // require a model type Ragdollified can actually construct and render.
+    private static final Set<Integer> forcedSpawnIds = ConcurrentHashMap.newKeySet();
+    private static final Set<Integer> persistentRagdollIds = ConcurrentHashMap.newKeySet();
+    private static final ConcurrentHashMap<Integer, Boolean> pendingPersistenceUpdates = new ConcurrentHashMap<>();
+
+    // Explicit visibility overrides are client-local. They are separate from the automatic
+    // dead-entity hiding done by HideDeadEntityMixin.
+    private static final Set<Integer> explicitlyHiddenEntityIds = ConcurrentHashMap.newKeySet();
+
+    // Minecraft hands a respawning player their previous entity id back, so a corpse's stored
+    // ragdoll id alone does NOT identify the body that corpse replaced — the same id is later
+    // reused by that player's next death or downed body. Every queued player ragdoll bumps a
+    // generation for its entity id, and each corpse remembers the generation that was current
+    // when this client first saw it, so a corpse can only ever retire that exact body.
+    private static final Map<Integer, Integer> playerRagdollGenerations = new ConcurrentHashMap<>();
+    private static final Map<UUID, Integer> corpseHandoffGenerations = new ConcurrentHashMap<>();
+
     // Single-thread executor that runs all physics work. Daemon so it dies with the JVM.
     // submitTick() is called from ClientTickEvent (render thread); the executor takes the
     // work off-thread so render never blocks on physics.
@@ -184,15 +254,19 @@ public class ClientRagdollManager {
     }
 
     // Once jbullet's internal state corrupts (UnionFind / DbvtBroadphase exception),
-    // every subsequent step throws. Set this flag on first crash, disable submissions
-    // until the next world load resets state cleanly.
+    // every subsequent step throws. Latching this flag on the first crash used to disable
+    // the worker for the rest of the session — and since processSpawnQueue runs inside
+    // tickAll, that also meant no ragdoll ever spawned again until the player rejoined.
+    // A crash is recovered from instead (see handlePhysicsCrash); the flag now only latches
+    // once recovery has been tried MAX_PHYSICS_RECOVERIES times, so a deterministic crash
+    // still can't spin forever.
     private static volatile boolean physicsBroken = false;
+    private static final int MAX_PHYSICS_RECOVERIES = 3;
+    private static int physicsRecoveries = 0;
 
-    /**
-     * Submit a physics tick to the worker thread. If the previous tick is still running,
-     * THIS tick is dropped (not queued) — better to fall behind one tick than to backlog
-     * and run two physics steps back-to-back. Called from ClientTickEvent at 20 Hz.
-     */
+    // Submit a physics tick to the worker. If the previous tick is still running this one is
+    // dropped rather than queued — falling behind a tick beats backlogging into two steps
+    // back-to-back. Driven from ClientTickEvent at 20 Hz.
     public static void submitTick() {
         if (physicsBroken) return;
         if (!physicsBusy.compareAndSet(false, true)) return;
@@ -200,20 +274,67 @@ public class ClientRagdollManager {
             try {
                 tickAll();
             } catch (Throwable t) {
-                if (!physicsBroken) {
-                    physicsBroken = true;
-                    Ragdollified.LOGGER.error(
-                            "Ragdoll physics crashed — disabling worker until world reload. "
-                          + "This usually means jbullet's world state was corrupted by "
-                          + "a cross-thread modification.", t);
-                }
+                handlePhysicsCrash(t);
             } finally {
                 physicsBusy.set(false);
             }
         });
     }
 
-    /** Enqueue a punch/click impulse for the physics thread to apply on its next tick. */
+    // Recover from a crash inside tickAll(). The corrupted jbullet world is what keeps throwing,
+    // so every body is dropped and the world discarded; the next tick's ClientJbulletWorld.get
+    // builds a clean one and spawning resumes. Runs on the physics worker, the only thread
+    // allowed to touch jbullet. Bounded per world load, since a crash that is not really about
+    // world state would otherwise rebuild forever — after the budget the worker latches off.
+    private static void handlePhysicsCrash(Throwable t) {
+        if (physicsRecoveries >= MAX_PHYSICS_RECOVERIES) {
+            if (!physicsBroken) {
+                physicsBroken = true;
+                Ragdollified.LOGGER.error(
+                        "Ragdoll physics crashed {} times — disabling worker until world reload. "
+                      + "This usually means jbullet's world state was corrupted by "
+                      + "a cross-thread modification.", physicsRecoveries, t);
+            }
+            return;
+        }
+        physicsRecoveries++;
+        Ragdollified.LOGGER.error(
+                "Ragdoll physics crashed (recovery {}/{}) — dropping every body and rebuilding "
+              + "the jbullet world. Existing ragdolls are lost; new deaths will ragdoll again.",
+                physicsRecoveries, MAX_PHYSICS_RECOVERIES, t);
+
+        // Tear the bodies down one at a time: destroy() reaches into the world that just threw,
+        // so one unrecoverable body must not abort the teardown of the rest.
+        for (ClientRagdoll ragdoll : ragdolls.values()) {
+            try {
+                ragdoll.destroy();
+            } catch (Throwable ignored) {
+                // Dropped with the world instance below either way.
+            }
+        }
+        ragdolls.clear();
+        try {
+            clear();
+        } catch (Throwable ignored) {
+            // Already emptied above; the remaining bookkeeping is cleared below.
+        }
+        pendingSpawns.clear();
+        spawnOrder.clear();
+        impulseQueue.clear();
+        blockChangeQueue.clear();
+        removeByRagdollIdQueue.clear();
+        streamPoseQueue.clear();
+        endedDragIds.clear();
+        deathLifetimeRestarts.clear();
+        awaitingRealSettle.clear();
+        try {
+            ClientJbulletWorld.onWorldUnload();
+        } catch (Throwable disposeFailure) {
+            Ragdollified.LOGGER.error("Failed to dispose the crashed jbullet world", disposeFailure);
+        }
+    }
+
+    // Enqueue a punch/click impulse for the physics thread to apply on its next tick.
     public static void enqueueImpulse(int ragdollId, int partIndex, float x, float y, float z) {
         enqueueImpulse(ragdollId, partIndex, x, y, z, 0, true);
     }
@@ -223,28 +344,229 @@ public class ClientRagdollManager {
         impulseQueue.offer(new ImpulseRequest(ragdollId, partIndex, x, y, z, revision, apply));
     }
 
-    /** Destroy a specific physics ragdoll (by entity id) on the physics thread (corpse handoff). */
+    // Destroy a specific physics ragdoll (by entity id) on the physics thread (corpse handoff).
     public static void requestRemoveRagdoll(int entityId) {
+        dragTargets.remove(entityId);
+        pendingSpawns.remove(entityId);
+        forcedSpawnIds.remove(entityId);
+        persistentRagdollIds.remove(entityId);
+        pendingPersistenceUpdates.remove(entityId);
+        authoritativeStates.remove(entityId);
+        streamOwnership.remove(entityId);
+        streamSendSequences.remove(entityId);
         removeByRagdollIdQueue.offer(entityId);
     }
 
-    /**
-     * Main-thread (client tick) corpse bridge. Two jobs, both cheap and only active when
-     * corpses are enabled and this client has a settled/settling player ragdoll:
-     *  1. Report any player's ragdoll settle to the server (once) so a nearby observer can
-     *     pose the corpse at the true resting position even when its owner is far away.
-     *  2. Once the posed corpse entity has arrived, drop the now-redundant physics ragdoll.
-     */
+    // Start (or replace) a no-impulse drag for one ragdoll part.
+    public static boolean beginDrag(int entityId, RagdollPart part, Vec3 target) {
+        return beginDrag(entityId, part == null || target == null ? null : Map.of(part, target));
+    }
+
+    // Start a no-impulse drag that moves every supplied part atomically.
+    public static boolean beginDrag(int entityId, Map<RagdollPart, Vec3> targets) {
+        DragRequest request = DragRequest.forParts(targets);
+        if (request == null || !hasPendingOrActiveRagdoll(entityId)) return false;
+        dragTargets.put(entityId, request);
+        return true;
+    }
+
+    // Start a paired arm or leg drag. Target offsets are calculated on the physics worker.
+    public static boolean beginDrag(int entityId, DragEnd end, DragTarget target) {
+        DragRequest request = DragRequest.forEnd(end, target);
+        if (request == null || !hasPendingOrActiveRagdoll(entityId)) return false;
+        dragTargets.put(entityId, request);
+        return true;
+    }
+
+    // Update an existing single-part drag target.
+    public static boolean updateDrag(int entityId, Vec3 target) {
+        DragRequest current = dragTargets.get(entityId);
+        if (target == null || current == null || current.partTargets.size() != 1) return false;
+        return updateDrag(entityId, Map.of(current.partTargets.keySet().iterator().next(), target));
+    }
+
+    // Replace all direct limb targets as one atomic update.
+    public static boolean updateDrag(int entityId, Map<RagdollPart, Vec3> targets) {
+        DragRequest request = DragRequest.forParts(targets);
+        if (request == null || !dragTargets.containsKey(entityId) || !hasPendingOrActiveRagdoll(entityId)) return false;
+        dragTargets.put(entityId, request);
+        return true;
+    }
+
+    // Update the anchor for a paired arm/leg drag.
+    public static boolean updateDrag(int entityId, DragTarget target) {
+        DragRequest current = dragTargets.get(entityId);
+        if (target == null || current == null || current.end == null || !hasPendingOrActiveRagdoll(entityId)) return false;
+        dragTargets.replace(entityId, current, DragRequest.forEnd(current.end, target));
+        return true;
+    }
+
+    // Stop a drag. The selected part then resumes normal simulation.
+    public static void endDrag(int entityId) {
+        if (dragTargets.remove(entityId) != null) endedDragIds.offer(entityId);
+    }
+
+    public static boolean isDragging(int entityId) {
+        return dragTargets.containsKey(entityId) && hasRagdollFor(entityId);
+    }
+
+    // Turn an integration-owned body into a fresh death ragdoll in place. The pose survives, the
+    // lifetime restarts, and it reports its rest pose again, so the corpse is built from where
+    // the body actually lies rather than the server's stale death position.
+    public static void restartDeathLifetime(int entityId) {
+        if (!hasPendingOrActiveRagdoll(entityId)) return;
+        // Hold the corpse report here, on the caller's thread, rather than relying only on the
+        // grace the ragdoll sets inside its own restart. That restart runs on the physics worker,
+        // which is asynchronous, so between this call and the queue being drained the body still
+        // reads as an ancient, unreported, no-longer-dragged ragdoll — and tickCorpseClient runs
+        // on the main thread inside exactly that window. That gap is how a body handed over at
+        // death still converted to a corpse before it ever moved.
+        awaitingRealSettle.add(entityId);
+        deathLifetimeRestarts.offer(entityId);
+    }
+
+    // Set a ragdoll's externally controlled lifetime. Safe before its queued spawn is built.
+    public static void setPersistent(int entityId, boolean persistent) {
+        if (persistent) persistentRagdollIds.add(entityId);
+        else persistentRagdollIds.remove(entityId);
+        pendingPersistenceUpdates.put(entityId, persistent);
+    }
+
+    public static boolean isPersistent(int entityId) {
+        return persistentRagdollIds.contains(entityId);
+    }
+
+    // Make a clean client-local ragdoll from a loaded entity. Unlike automatic death ragdolls
+    // this skips the enable list and deliberately applies no hit impulse.
+    // Snapshot whatever the installed damage-visual mods are drawing on an entity, so the ragdoll
+    // that replaces it can reproduce it after the entity is hidden or gone. Called from every
+    // spawn path (death event, server spawn packet, API) because whichever one runs first is the
+    // only one guaranteed to still see the live entity.
+    public static void captureCompatVisuals(LivingEntity entity) {
+        if (entity == null) return;
+        // Better Blood Overlay: mobs are already captured every frame by
+        // EntityRenderCaptureHandler, but that path skips players — so capture players here,
+        // while their wounds are still registered.
+        if (entity instanceof Player) {
+            com.raiiiden.ragdollified.client.compat.BetterBloodOverlayCompat.capture(entity.getId(), entity);
+            // Curios: the server empties the curio slots when it builds the corpse, so the worn
+            // set has to be read now. Only the player path renders them (see
+            // ClientRagdollRenderer#renderBodyCurios), so mobs are not captured.
+            com.raiiiden.ragdollified.client.compat.CuriosRenderCompat.capture(entity.getId(), entity);
+        }
+        // Visual Health: one snapshot of the damage tier covers players and mobs alike.
+        com.raiiiden.ragdollified.client.compat.VisualHealthCompat.capture(entity.getId(), entity);
+    }
+
+    public static boolean spawnFromEntity(LivingEntity entity) {
+        return spawnFromEntity(entity, false, null);
+    }
+
+    public static boolean spawnFromEntity(LivingEntity entity, boolean persistent) {
+        return spawnFromEntity(entity, persistent, null);
+    }
+
+    // Queue a clean ragdoll using an optional immutable authoritative transform.
+    public static boolean spawnFromEntity(LivingEntity entity, boolean persistent, RagdollSpawnTransform spawnTransform) {
+        if (entity == null || hasPendingOrActiveRagdoll(entity.getId())) return false;
+        Minecraft mc = Minecraft.getInstance();
+        if (mc.level == null || entity.level() != mc.level) return false;
+
+        boolean isPlayer = entity instanceof Player;
+        String mobType = EntityType.getKey(entity.getType()).toString();
+        MobModelHelper.ModelType modelType = isPlayer
+                ? MobModelHelper.ModelType.HUMANOID_STANDARD
+                : ClientMobModelHelper.getActualModelType(entity);
+        if (!isPlayer && !MobModelHelper.isSupportedModelType(modelType)) return false;
+
+        boolean wasSheared = entity instanceof net.minecraft.world.entity.animal.Sheep sheep && sheep.isSheared();
+        int dyeColorId = entity instanceof net.minecraft.world.entity.animal.Sheep sheep
+                ? sheep.getColor().getId() : 0;
+        if (entity instanceof net.minecraft.world.entity.animal.Wolf wolf) {
+            wasSheared = wolf.isTame();
+            dyeColorId = wolf.getCollarColor().getId();
+        }
+        if (entity instanceof net.minecraft.world.entity.animal.goat.Goat goat) {
+            dyeColorId = (goat.hasLeftHorn() ? 1 : 0) | (goat.hasRightHorn() ? 2 : 0);
+        }
+        if (entity instanceof net.minecraft.world.entity.animal.Turtle turtle) {
+            wasSheared = turtle.hasEgg();
+        }
+        if (entity instanceof net.minecraft.world.entity.animal.SnowGolem snowGolem) {
+            wasSheared = snowGolem.hasPumpkin();
+        }
+        if (entity instanceof net.minecraft.world.entity.animal.horse.AbstractChestedHorse horse) {
+            wasSheared = horse.hasChest();
+        }
+        if (entity instanceof net.minecraft.world.entity.animal.horse.Horse horse) {
+            dyeColorId = horse.getMarkings().getId();
+        }
+        boolean chargedCreeper = entity instanceof net.minecraft.world.entity.monster.Creeper creeper
+                && creeper.isPowered();
+        if (entity instanceof net.minecraft.world.entity.animal.horse.AbstractHorse horse) {
+            chargedCreeper = horse.isSaddled();
+        }
+        boolean saddledPig = entity instanceof net.minecraft.world.entity.animal.Pig pig && pig.isSaddled();
+        if (entity instanceof net.minecraft.world.entity.monster.Strider strider) saddledPig = strider.isSaddled();
+        if (!isPlayer) EntityRenderCaptureHandler.captureRenderState(entity);
+        ResourceLocation texture = !isPlayer ? ClientMobTextureCache.getTextureForDeadMob(entity.getId()) : null;
+
+        ClientRagdoll.SpawnData data = new ClientRagdoll.SpawnData(
+                entity.getId(), isPlayer, mobType, modelType,
+                isPlayer ? 1.0f : entity.getBbHeight() / 1.8f,
+                isPlayer ? entity.getUUID() : null,
+                isPlayer ? entity.getName().getString() : "",
+                entity.getItemBySlot(EquipmentSlot.HEAD).copy(),
+                entity.getItemBySlot(EquipmentSlot.CHEST).copy(),
+                entity.getItemBySlot(EquipmentSlot.LEGS).copy(),
+                entity.getItemBySlot(EquipmentSlot.FEET).copy(),
+                spawnTransform != null ? spawnTransform.position() : entity.position(),
+                spawnTransform != null ? spawnTransform.bodyYaw() : entity.getVisualRotationYInDegrees(),
+                spawnTransform != null ? spawnTransform.pitch() : entity.getXRot(),
+                spawnTransform != null ? spawnTransform.velocity() : RagdollSpawnState.captureLinearVelocity(entity),
+                MobPoseCapture.getPose(entity.getId()),
+                spawnTransform != null ? spawnTransform.swimming() : entity.getPose() == Pose.SWIMMING,
+                entity.isBaby(), texture,
+                -1, null, wasSheared, dyeColorId, chargedCreeper, saddledPig);
+        if (persistent) persistentRagdollIds.add(entity.getId());
+        boolean queued = enqueueSpawn(data, true);
+        if (!queued) persistentRagdollIds.remove(entity.getId());
+        // API spawns ragdollify a live entity without any death event, so this is their only
+        // chance to snapshot the damage visuals.
+        if (queued) captureCompatVisuals(entity);
+        return queued;
+    }
+
+    public static void setEntityHidden(int entityId, boolean hidden) {
+        if (hidden) explicitlyHiddenEntityIds.add(entityId);
+        else explicitlyHiddenEntityIds.remove(entityId);
+    }
+
+    public static boolean isEntityExplicitlyHidden(int entityId) {
+        return explicitlyHiddenEntityIds.contains(entityId);
+    }
+
+    // Main-thread corpse bridge, cheap and only live when corpses are on and this client has a
+    // settling player ragdoll. Two jobs: report a settle to the server once, so a nearby
+    // observer can pose the corpse at the true rest position even with its owner far away; and
+    // once the posed corpse entity arrives, drop the now-redundant physics ragdoll.
     public static void tickCorpseClient() {
         if (!RagdollifiedConfig.isCorpseEnabled()) return;
         Minecraft mc = Minecraft.getInstance();
         if (mc.player == null || mc.level == null) return;
-        if (ragdolls.isEmpty()) return; // nothing to report or hand off
         // Job 1 — settle reports for every player ragdoll simulated by this client. The
         // server validates UUID + death entity id + reporter proximity and accepts only the
         // first matching report, so every nearby observer can safely participate.
         for (ClientRagdoll r : ragdolls.values()) {
             if (!r.isPlayer() || r.getPlayerUUID() == null || r.isCorpseSettleReported()) continue;
+
+            // A towed body is not a stuck one. Its pose changes every tick, and the drag itself
+            // re-arms the report every tick, so the give-up branch below fires continuously for
+            // as long as the tow lasts — a long-lived body is always past that age threshold.
+            // The server drops those reports while the owner is alive, then accepts the first one
+            // after they die, which converted a dragged player to a corpse on the very next tick.
+            // Nothing is lost by waiting: the drag ends before the death is finished processing.
+            if (isDragging(r.getId()) || r.isAwaitingSettleGrace()) continue;
 
             // Report when the ragdoll has settled, OR shortly before it would despawn / the
             // server would time out, so a stuck ragdoll still reports its actual current pose.
@@ -252,13 +574,17 @@ public class ClientRagdollManager {
                                  RagdollifiedConfig.getCorpseSettleTimeoutTicks());
             // A distance-frozen observer is not near the body; let another nearby client
             // report, or wait until this client returns and resumes the simulation.
-            boolean nearGiveUp = !r.isFrozen() && r.getTicksExisted() >= Math.max(20, limit - 40);
+            // A body handed over at death waits for a real settle instead: it is old by
+            // definition, so the age test would fire immediately and skip the settle entirely.
+            // The server's own settle deadline still covers one that never comes to rest.
+            boolean nearGiveUp = !r.isFrozen() && !awaitingRealSettle.contains(r.getId())
+                    && r.getTicksExisted() >= Math.max(20, limit - 40);
             if (r.isSettled() || nearGiveUp) {
                 ClientRagdoll.TransformSnapshot snap = r.getSnapshot();
                 if (snap != null) {
                     Vector3f origin = snap.cachedTorsoPos;
-                    RagdollTransform[] rel = new RagdollTransform[6];
-                    for (int i = 0; i < 6 && i < snap.positions.length; i++) {
+                    RagdollTransform[] rel = new RagdollTransform[RagdollTransform.MAX_PARTS];
+                    for (int i = 0; i < RagdollTransform.MAX_PARTS && i < snap.positions.length; i++) {
                         Vector3f p = snap.positions[i];
                         if (p == null) continue;
                         rel[i] = new RagdollTransform(i,
@@ -269,30 +595,98 @@ public class ClientRagdollManager {
                             origin.x, origin.y, origin.z, rel,
                             r.getPlayerUUID(), r.getOriginalEntityId(), r.getLastImpulseRevision()));
                     r.markCorpseSettleReported();
+                    awaitingRealSettle.remove(r.getId());
                 }
             }
         }
 
         // Job 2 — on EVERY client (owner included): once a posed corpse exists for the exact
         // ragdoll it replaced, drop that ragdoll so the corpse is the only visible body (no
-        // double-up). Matched by ragdoll entity id (not player UUID), so an older corpse never
-        // culls a newer death's ragdoll for the same player. Idempotent — once the ragdoll is
-        // gone the lookup misses, so this naturally stops requesting (and handles repeat deaths).
+        // double-up). Idempotent — once the ragdoll is gone the lookup misses, so this naturally
+        // stops requesting (and handles repeat deaths).
+        //
+        // A corpse must be remembered even while this client simulates no ragdoll at all: the
+        // player it belongs to can respawn, get their old entity id back, and only then produce
+        // a new body. Recording the sighting late would make that new body look like the one
+        // this corpse replaced and delete it. Scanning is throttled while there is nothing to
+        // hand off, since the walk over the render list is the only cost here.
+        if (ragdolls.isEmpty() && mc.level.getGameTime() % 10L != 0L) return;
         for (Entity e : mc.level.entitiesForRendering()) {
             if (!(e instanceof CorpseEntity c) || !c.isPosed()) continue;
             int ragId = c.getRagdollEntityId();
             if (ragId < 0) continue;
+            int handoffGeneration = corpseHandoffGenerations.computeIfAbsent(c.getUUID(),
+                    ignored -> playerRagdollGenerations.getOrDefault(ragId, 0));
+            // A newer generation means this id has been recycled by a later death or knock —
+            // that body belongs to a different death and gets its own corpse. (A corpse whose
+            // very first sighting here is already later than the body it replaced simply never
+            // hands off; a redundant body for one lifetime beats deleting a live player's.)
+            if (handoffGeneration != playerRagdollGenerations.getOrDefault(ragId, 0)) continue;
             ClientRagdoll r = ragdolls.get(ragId);
-            if (r != null && !r.isDestroyed()) {
+            // The body a corpse replaces is always its owner's player ragdoll, so require that
+            // identity too. The stored id alone is not one: entity ids restart from low numbers
+            // every server session while corpses persist across restarts and chunk unloads, so
+            // a corpse loaded after a restart would otherwise delete whatever unrelated body
+            // (usually a mob — mob spawns never bump the generation) inherited its id. With many
+            // corpses loaded that is one poisoned id each, and ragdolls stop appearing at a rate
+            // that scales with the corpse count.
+            if (r == null || r.isDestroyed() || !r.isPlayer()) continue;
+            UUID corpseOwner = c.getOwnerUUID();
+            if (corpseOwner != null && corpseOwner.equals(r.getPlayerUUID())) {
+                // Re-key the damage visuals onto the corpse before the ragdoll goes away — its
+                // destroy() evicts them by entity id, which would leave the corpse clean.
+                com.raiiiden.ragdollified.client.compat.BetterBloodOverlayCompat.transferTo(ragId, c.getUUID());
+                com.raiiiden.ragdollified.client.compat.VisualHealthCompat.transferTo(ragId, c.getUUID());
                 requestRemoveRagdoll(ragId);
             }
         }
     }
 
-    /**
-     * Report the first stable pose for every ragdoll to a modded server. The server retains
-     * it only for the ragdoll lifetime and uses it when another player later enters the area.
-     */
+    // Server→client ownership assignment for a player ragdoll. Main thread.
+    public static void enqueueStreamOwnership(int entityId, boolean owner) {
+        streamOwnership.put(entityId, owner);
+    }
+
+    // Server→client relayed pose frame from the owning client. Main thread.
+    public static void enqueueStreamedPose(int entityId, RagdollTransform[] transforms, int sequence) {
+        if (transforms == null) return;
+        streamPoseQueue.offer(new StreamedPoseUpdate(entityId, transforms, sequence));
+    }
+
+    // Stream this client's owned player ragdolls to the server while they are still moving. At
+    // 10 Hz: dense enough that observers interpolate rather than guess, sparse enough to stay
+    // under a kilobyte per second per body.
+    public static void tickRagdollStreamClient() {
+        if (streamOwnership.isEmpty()) return;
+        Minecraft mc = Minecraft.getInstance();
+        if (mc.player == null || mc.level == null || mc.getConnection() == null) return;
+        if (!ModNetwork.CHANNEL.isRemotePresent(mc.getConnection().getConnection())) return;
+
+        for (Map.Entry<Integer, Boolean> entry : streamOwnership.entrySet()) {
+            if (!Boolean.TRUE.equals(entry.getValue())) continue;
+            ClientRagdoll ragdoll = ragdolls.get(entry.getKey());
+            if (ragdoll == null || ragdoll.isDestroyed()) continue;
+            // Once settled, RagdollStatePacket carries the single authoritative resting pose
+            // that every observer ends on. Streaming a frozen body past that is pure waste.
+            if (ragdoll.isSettled()) continue;
+
+            ClientRagdoll.TransformSnapshot snap = ragdoll.getSnapshot();
+            if (snap == null || snap.destroyed) continue;
+            RagdollTransform[] transforms = new RagdollTransform[RagdollTransform.MAX_PARTS];
+            for (int i = 0; i < transforms.length && i < snap.positions.length; i++) {
+                if (snap.positions[i] == null || snap.rotations[i] == null) continue;
+                transforms[i] = new RagdollTransform(i, snap.positions[i], snap.rotations[i]);
+            }
+            if (transforms[0] == null) continue; // no torso anchor to encode the rest against
+
+            int sequence = streamSendSequences.merge(entry.getKey(), 1, Integer::sum);
+            ModNetwork.CHANNEL.sendToServer(
+                    new RagdollStreamPacket(entry.getKey(), sequence, transforms));
+        }
+    }
+
+    // Report each ragdoll's first stable pose to a modded server, which keeps it for the
+    // ragdoll lifetime and replays it to players who enter the area later.
     public static void tickRagdollSyncClient() {
         Minecraft mc = Minecraft.getInstance();
         if (mc.player == null || mc.level == null || mc.getConnection() == null) return;
@@ -303,7 +697,7 @@ public class ClientRagdollManager {
             ClientRagdoll.TransformSnapshot snap = ragdoll.getSnapshot();
             if (snap == null || snap.destroyed) continue;
 
-            RagdollTransform[] transforms = new RagdollTransform[6];
+            RagdollTransform[] transforms = new RagdollTransform[RagdollTransform.MAX_PARTS];
             for (int i = 0; i < transforms.length && i < snap.positions.length; i++) {
                 if (snap.positions[i] == null || snap.rotations[i] == null) continue;
                 transforms[i] = new RagdollTransform(i, snap.positions[i], snap.rotations[i]);
@@ -315,7 +709,7 @@ public class ClientRagdollManager {
         }
     }
 
-    /** Enqueue a block-change wake event. Block updates fire frequently — keep cheap. */
+    // Enqueue a block-change wake event. Block updates fire frequently — keep cheap.
     public static void enqueueBlockChange(BlockPos pos) {
         if (ragdolls.isEmpty()) return; // common case: no ragdolls, skip the alloc
         blockChangeQueue.offer(pos.immutable());
@@ -338,6 +732,51 @@ public class ClientRagdollManager {
         while ((ragId = removeByRagdollIdQueue.poll()) != null) {
             ClientRagdoll r = ragdolls.get(ragId);
             if (r != null && !r.isDestroyed()) r.destroy();
+        }
+        while ((ragId = endedDragIds.poll()) != null) {
+            ClientRagdoll r = ragdolls.get(ragId);
+            if (r != null && !r.isDestroyed()) r.endDrag();
+        }
+        while ((ragId = deathLifetimeRestarts.poll()) != null) {
+            ClientRagdoll r = ragdolls.get(ragId);
+            if (r != null && !r.isDestroyed()) r.restartDeathLifetime();
+        }
+        // Ownership is re-applied every tick rather than once on arrival: the assignment can
+        // land before the body is built, and setReplicated is a no-op when nothing changed.
+        for (Map.Entry<Integer, Boolean> entry : streamOwnership.entrySet()) {
+            ClientRagdoll r = ragdolls.get(entry.getKey());
+            // A body that already gave up on a silent owner keeps its local takeover until a
+            // frame actually arrives again; re-asserting ownership here would freeze it.
+            if (r != null && !r.isDestroyed() && !r.hasStreamTimedOut()) {
+                r.setReplicated(!entry.getValue());
+            }
+        }
+        StreamedPoseUpdate streamed;
+        while ((streamed = streamPoseQueue.poll()) != null) {
+            ClientRagdoll r = ragdolls.get(streamed.entityId());
+            if (r == null || r.isDestroyed()) continue;
+            // A frame arriving before the ownership packet is itself proof this client is an
+            // observer, so it doubles as the assignment and avoids a gap of local simulation.
+            streamOwnership.putIfAbsent(streamed.entityId(), Boolean.FALSE);
+            r.setReplicated(true);
+            r.applyStreamedPose(streamed.transforms(), streamed.sequence());
+        }
+        for (Map.Entry<Integer, Boolean> entry : pendingPersistenceUpdates.entrySet()) {
+            ClientRagdoll r = ragdolls.get(entry.getKey());
+            if (r != null && pendingPersistenceUpdates.remove(entry.getKey(), entry.getValue())) {
+                r.setPersistent(entry.getValue());
+            }
+        }
+        for (Map.Entry<Integer, DragRequest> entry : dragTargets.entrySet()) {
+            ClientRagdoll r = ragdolls.get(entry.getKey());
+            DragRequest drag = entry.getValue();
+            if (r == null && pendingSpawns.containsKey(entry.getKey())) continue;
+            if (r == null || r.isDestroyed()) {
+                dragTargets.remove(entry.getKey(), drag);
+                continue;
+            }
+            if (drag.end != null) r.dragEndTo(drag.end, drag.endTarget);
+            else r.dragPartsTo(drag.partTargets);
         }
         for (Map.Entry<Integer, AuthoritativeState> entry : authoritativeStates.entrySet()) {
             // A newer server spawn snapshot is about to replace the current/local body.
@@ -514,6 +953,11 @@ public class ClientRagdollManager {
             ragdoll.tick(cameraPos);
             if (ragdoll.isDestroyed()) {
                 it.remove();
+                // Bodies that expire on their own never pass through requestRemoveRagdoll,
+                // so their stream bookkeeping has to be released here or it accumulates for
+                // the rest of the session.
+                streamOwnership.remove(entry.getKey());
+                streamSendSequences.remove(entry.getKey());
             }
         }
         lastPostTickNanos = System.nanoTime() - t0;
@@ -742,16 +1186,14 @@ public class ClientRagdollManager {
         return String.format("%.2f", nanos / 1_000_000.0);
     }
 
-    /**
-     * Capture the entity's death state into a SpawnData snapshot and enqueue it.
-     * The actual ClientRagdoll (and its physics bodies) is constructed later in
-     * {@link #tickAll()}, rate-limited by config so
-     * a mass kill (e.g. explosion taking out 20 mobs) doesn't spike a single tick.
-     * Returns null because the ragdoll doesn't exist yet — callers don't use the
-     * return value.
-     */
+    // Snapshot the entity's death state into SpawnData and queue it. The ClientRagdoll and its
+    // physics bodies are built later in tickAll(), rate-limited by config so a mass kill does
+    // not spike one tick. Returns null because the ragdoll does not exist yet; no caller reads it.
     public static ClientRagdoll createFromEntity(LivingEntity entity, @Nullable DamageSource damageSource) {
         if (entity == null) return null;
+        // Match the authoritative server hook: split-stage deaths are not final corpses.
+        // MagmaCube is covered because it inherits Slime.
+        if (entity instanceof net.minecraft.world.entity.monster.Slime slime && slime.getSize() > 1) return null;
 
         int entityId = entity.getId();
         if (hasPendingOrActiveRagdoll(entityId)) return null;
@@ -781,10 +1223,14 @@ public class ClientRagdollManager {
         boolean isBaby = entity.isBaby();
 
         MobPoseCapture.MobPose capturedPose = MobPoseCapture.getPose(entityId);
-        Vec3 vel = RagdollSpawnState.captureLinearVelocity(entity);
+        Vec3 vel = RagdollSpawnState.applyAttackerDirectionFallback(
+                entity, damageSource, RagdollSpawnState.captureLinearVelocity(entity));
 
         ResourceLocation texture = null;
         if (!isPlayer) {
+            // The entity may never have reached RenderLivingEvent.Pre (off-screen/instant death),
+            // so resolve renderer-owned textures while the live entity is still available.
+            EntityRenderCaptureHandler.captureRenderState(entity);
             texture = ClientMobTextureCache.getTextureForDeadMob(entityId);
         }
 
@@ -809,11 +1255,34 @@ public class ClientRagdollManager {
             wasSheared = sheep.isSheared();
             dyeColorId = sheep.getColor().getId();
         }
+        if (entity instanceof net.minecraft.world.entity.animal.Wolf wolf) {
+            wasSheared = wolf.isTame();
+            dyeColorId = wolf.getCollarColor().getId();
+        }
+        if (entity instanceof net.minecraft.world.entity.animal.goat.Goat goat) {
+            dyeColorId = (goat.hasLeftHorn() ? 1 : 0) | (goat.hasRightHorn() ? 2 : 0);
+        }
+        if (entity instanceof net.minecraft.world.entity.animal.Turtle turtle) {
+            wasSheared = turtle.hasEgg();
+        }
+        if (entity instanceof net.minecraft.world.entity.animal.SnowGolem snowGolem) {
+            wasSheared = snowGolem.hasPumpkin();
+        }
+        if (entity instanceof net.minecraft.world.entity.animal.horse.AbstractChestedHorse horse) {
+            wasSheared = horse.hasChest();
+        }
+        if (entity instanceof net.minecraft.world.entity.animal.horse.Horse horse) {
+            dyeColorId = horse.getMarkings().getId();
+        }
         // Other per-mob overlay flags. Captured here so the local-spawn path (no server
         // packet — singleplayer / dedicated-server-with-mod) sees the same state the
         // server-broadcast path would have packed into the spawn packet.
         boolean chargedCreeper = entity instanceof net.minecraft.world.entity.monster.Creeper c && c.isPowered();
+        if (entity instanceof net.minecraft.world.entity.animal.horse.AbstractHorse horse) {
+            chargedCreeper = horse.isSaddled();
+        }
         boolean saddledPig = entity instanceof net.minecraft.world.entity.animal.Pig p && p.isSaddled();
+        if (entity instanceof net.minecraft.world.entity.monster.Strider strider) saddledPig = strider.isSaddled();
 
         ClientRagdoll.SpawnData data = new ClientRagdoll.SpawnData(
                 entityId, isPlayer, mobType, modelType, scale,
@@ -839,7 +1308,7 @@ public class ClientRagdollManager {
         return null;
     }
 
-    /** Pop up to the configured spawn budget; returns count actually constructed. */
+    // Pop up to the configured spawn budget; returns count actually constructed.
     private static int processSpawnQueue(ClientJbulletWorld physicsWorld) {
         int budget = RagdollifiedConfig.get(RagdollifiedConfig.MAX_SPAWNS_PER_TICK);
         int spawned = 0;
@@ -853,7 +1322,8 @@ public class ClientRagdollManager {
         while (budget > 0 && scanGuard-- > 0 && (entityId = spawnOrder.poll()) != null) {
             ClientRagdoll.SpawnData data = pendingSpawns.remove(entityId);
             if (data == null) continue; // stale order entry after replacement/drop
-            if (!isSupportedSpawn(data)) {
+            boolean forced = forcedSpawnIds.remove(entityId);
+            if (!isSupportedSpawn(data, forced)) {
                 continue;
             }
             budget--;
@@ -865,6 +1335,13 @@ public class ClientRagdollManager {
                 existing.destroy();
             }
             ClientRagdoll ragdoll = new ClientRagdoll(data, physicsWorld);
+            ragdoll.setPersistent(persistentRagdollIds.contains(data.originalEntityId));
+            // Apply a known observer role at construction. drainInputQueues runs before this
+            // method, so waiting for its next pass would leak one tick of local simulation
+            // into a body this client is only supposed to play back.
+            if (Boolean.FALSE.equals(streamOwnership.get(data.originalEntityId))) {
+                ragdoll.setReplicated(true);
+            }
             AuthoritativeState retainedState = authoritativeStates.remove(data.originalEntityId);
             if (retainedState != null) {
                 ragdoll.applyAuthoritativeState(
@@ -883,17 +1360,26 @@ public class ClientRagdollManager {
         return spawned;
     }
 
-    /**
-     * Public entry point for queueing a ragdoll spawn from any thread (used by network
-     * packet handlers). The actual ClientRagdoll construction — which calls into
-     * jbullet — happens on the physics worker via processSpawnQueue.
-     */
+    // Entry point for queueing a spawn from any thread, used by packet handlers. The
+    // ClientRagdoll construction, which calls into jbullet, happens on the physics worker in
+    // processSpawnQueue.
     public static void enqueueSpawn(ClientRagdoll.SpawnData data) {
-        if (data == null) return;
-        if (!isSupportedSpawn(data)) {
-            return;
-        }
+        enqueueSpawn(data, false);
+    }
+
+    // Queue a spawn from an integration. Forced spawns skip the automatic-death config filters,
+    // but an unsupported model type is always rejected.
+    public static boolean enqueueSpawn(ClientRagdoll.SpawnData data, boolean force) {
+        if (data == null || !isSupportedSpawn(data, force)) return false;
+        // An integration-owned persistent body is already the visual authority for this id.
+        // In particular, a downed player who dies for real keeps that exact physical body;
+        // replacing it with the normal death packet would snap it back to the server player
+        // origin and undo the downed simulation.
+        if (!force && persistentRagdollIds.contains(data.originalEntityId)
+                && hasPendingOrActiveRagdoll(data.originalEntityId)) return false;
+        if (force) forcedSpawnIds.add(data.originalEntityId);
         offerSpawn(data);
+        return true;
     }
 
     public static void enqueueAuthoritativeState(int entityId, RagdollTransform[] transforms,
@@ -903,6 +1389,9 @@ public class ClientRagdollManager {
 
     private static void offerSpawn(ClientRagdoll.SpawnData data) {
         int entityId = data.originalEntityId;
+        // Queue order is the ordering that matters: a corpse arriving after this point belongs
+        // to a later death than the body queued here, and must not adopt it.
+        if (data.isPlayer) playerRagdollGenerations.merge(entityId, 1, Integer::sum);
         ClientRagdoll.SpawnData previous = pendingSpawns.put(entityId, data);
         if (previous != null) return; // authoritative data replaced the pending local snapshot
 
@@ -917,7 +1406,11 @@ public class ClientRagdollManager {
     }
 
     private static boolean isSupportedSpawn(ClientRagdoll.SpawnData data) {
-        if (!RagdollifiedConfig.isRagdollEnabledFor(data.mobType, data.isPlayer)) return false;
+        return isSupportedSpawn(data, false);
+    }
+
+    private static boolean isSupportedSpawn(ClientRagdoll.SpawnData data, boolean force) {
+        if (!force && !RagdollifiedConfig.isRagdollEnabledFor(data.mobType, data.isPlayer)) return false;
         if (data.isPlayer) return true;
         if (MobModelHelper.isSupportedModelType(data.modelType)) return true;
         Ragdollified.LOGGER.info(
@@ -926,11 +1419,9 @@ public class ClientRagdollManager {
         return false;
     }
 
-    /**
-     * Retire the oldest of a single player's death ragdolls until they're at or under the
-     * per-player cap. Runs on the physics thread (called from processSpawnQueue), so destroy()
-     * is safe here. Corpses aren't in the ragdolls map, so they're inherently excluded.
-     */
+    // Retire a player's oldest death ragdolls until they are back under the per-player cap.
+    // Runs on the physics thread from processSpawnQueue, so destroy() is safe. Corpses are not
+    // in the ragdolls map and so are excluded by construction.
     private static void enforceMaxRagdollsPerPlayer(UUID playerUUID) {
         // A corpse-bound player ragdoll is the live visual/physics representation of protected
         // loot until the server materializes its corpse. Never cull it through the cosmetic
@@ -944,7 +1435,7 @@ public class ClientRagdollManager {
             for (ClientRagdoll r : ragdolls.values()) {
                 if (r.isPlayer() && playerUUID.equals(r.getPlayerUUID()) && !r.isDestroyed()) {
                     count++;
-                    if (r.getTicksExisted() > oldestTicks) {
+                    if (!r.isPersistent() && r.getTicksExisted() > oldestTicks) {
                         oldestTicks = r.getTicksExisted();
                         oldest = r;
                     }
@@ -963,22 +1454,21 @@ public class ClientRagdollManager {
             ClientRagdoll oldest = null;
             int oldestTicks = -1;
             for (ClientRagdoll r : ragdolls.values()) {
-                if (r.getTicksExisted() > oldestTicks) {
+                if (!r.isPersistent() && r.getTicksExisted() > oldestTicks) {
                     oldestTicks = r.getTicksExisted();
                     oldest = r;
                 }
             }
+            // Externally persistent bodies are intentionally exempt from cosmetic capacity
+            // pruning; their owner must explicitly remove them.
             if (oldest == null) break;
             oldest.destroy();
             ragdolls.remove(oldest.getOriginalEntityId());
         }
     }
 
-    /**
-     * @deprecated unsafe — constructs the ClientRagdoll on the calling thread, which
-     * means jbullet body insertion races the physics worker. Use {@link #enqueueSpawn}.
-     * Kept for compile compatibility; no longer called by mod code.
-     */
+    // Deprecated and unsafe: builds the ClientRagdoll on the calling thread, racing the physics
+    // worker on jbullet body insertion. Use enqueueSpawn. Kept only for compile compatibility.
     @Deprecated
     public static void addRagdoll(int id, ClientRagdoll ragdoll) {
         // Best-effort: if called, just put in map. The ragdoll's bodies were added on
@@ -994,11 +1484,9 @@ public class ClientRagdollManager {
     public static ClientRagdoll get(int id) { return ragdolls.get(id); }
     public static Collection<ClientRagdoll> getAll() { return ragdolls.values(); }
 
-    /**
-     * @deprecated unsafe across threads — destroys jbullet bodies on the caller's
-     * thread. Avoid using; deferred destroy happens automatically when the spawn
-     * queue replaces an existing ragdoll, or on lifetime expiry inside the tick.
-     */
+    // Deprecated and unsafe across threads: destroys jbullet bodies on the caller's thread.
+    // Deferred destroy already happens when the spawn queue replaces a ragdoll or its lifetime
+    // expires inside the tick.
     @Deprecated
     public static void remove(int id) {
         ClientRagdoll ragdoll = ragdolls.remove(id);
@@ -1022,6 +1510,18 @@ public class ClientRagdollManager {
         pendingSpawns.clear();
         spawnOrder.clear();
         authoritativeStates.clear();
+        dragTargets.clear();
+        streamOwnership.clear();
+        streamPoseQueue.clear();
+        streamSendSequences.clear();
+        forcedSpawnIds.clear();
+        persistentRagdollIds.clear();
+        pendingPersistenceUpdates.clear();
+        explicitlyHiddenEntityIds.clear();
+        // Entity ids are only meaningful within one connection, so both sides of the corpse
+        // handoff bookkeeping are dropped together.
+        playerRagdollGenerations.clear();
+        corpseHandoffGenerations.clear();
     }
 
     public static void onWorldUnload() {
@@ -1041,16 +1541,26 @@ public class ClientRagdollManager {
         }
         physicsBusy.set(false);
         physicsBroken = false; // fresh world gets a fresh start
+        physicsRecoveries = 0;
         impulseQueue.clear();
         blockChangeQueue.clear();
         removeByRagdollIdQueue.clear();
+        deathLifetimeRestarts.clear();
+        awaitingRealSettle.clear();
         clear();
+        // Corpse-keyed damage visuals outlive individual ragdolls, so clear() does not reach
+        // them — and both key spaces only mean anything within one connection anyway.
+        com.raiiiden.ragdollified.client.compat.BetterBloodOverlayCompat.clearAll();
+        com.raiiiden.ragdollified.client.compat.VisualHealthCompat.clearAll();
+        com.raiiiden.ragdollified.client.compat.CuriosRenderCompat.clearAll();
         RagdollHitTracker.clear();
         ClientPlayerSkinCache.clear();
+        // Entity renderers are rebuilt with the level, so the cached model instances go stale.
+        ClientMobModelCache.clear();
         ClientJbulletWorld.onWorldUnload();
     }
 
-    /** @deprecated use {@link #enqueueBlockChange(BlockPos)} — direct call races with physics thread. */
+    // Deprecated: use enqueueBlockChange(BlockPos); a direct call races the physics thread.
     @Deprecated
     public static void onBlockChanged(BlockPos pos) {
         enqueueBlockChange(pos);

@@ -11,30 +11,25 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
-/**
- * World-persistent registry of {@link PendingCorpse} entries (deaths whose corpse hasn't
- * been spawned yet because the ragdoll is still settling). Stored on the overworld's data
- * storage; each entry records its own dimension so corpses are restored in the right level.
- * This is what makes the "spawn only after settle" flow crash-safe.
- */
+// World-persistent registry of PendingCorpse entries: deaths whose corpse has not spawned
+// because the ragdoll is still settling. Kept on the overworld's data storage, with each entry
+// recording its own dimension, which is what makes the spawn-after-settle flow crash-safe.
 public class PendingCorpseStore extends SavedData {
 
     private static final String NAME = "ragdollified_pending_corpses";
 
     public final Map<UUID, PendingCorpse> pending = new HashMap<>();
-    /** Full loot snapshots for spawned corpses, including those in unloaded chunks. */
+    // Full loot snapshots for spawned corpses, including those in unloaded chunks.
     public final Map<UUID, PendingCorpse> materialized = new HashMap<>();
-    /** Most recent corpse id per owner; retained after looting so "lastdeath" can report gone. */
+    // Most recent corpse id per owner; retained after looting so "lastdeath" can report gone.
     public final Map<UUID, UUID> lastDeaths = new HashMap<>();
-    /** Recovered/removed ids whose still-unloaded entity NBT must be discarded when loaded. */
+    // Recovered/removed ids whose still-unloaded entity NBT must be discarded when loaded.
     public final Set<UUID> removedCorpseIds = new HashSet<>();
 
-    /**
-     * Per-owner "give a Corpse Compass on next respawn" queue. Recorded at death and consumed
-     * on respawn. Kept separate from {@link #pending} because a ragdoll can settle (removing the
-     * pending) before the player actually clicks respawn, and we must still hand out the compass.
-     * Each value carries the compass target: corpse id, position, dimension and owner name.
-     */
+    // Per-owner "give a Corpse Compass on next respawn" queue: recorded at death, consumed at
+    // respawn. Separate from pending because a ragdoll can settle and clear its pending before
+    // the player clicks respawn, and the compass still has to be handed out. Each value carries
+    // the target: corpse id, position, dimension, owner name.
     public final Map<UUID, CompoundTag> deathTargets = new HashMap<>();
 
     public PendingCorpseStore() {}

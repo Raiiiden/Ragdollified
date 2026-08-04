@@ -6,12 +6,6 @@ import org.spongepowered.asm.mixin.gen.Invoker;
 
 @Mixin(Camera.class)
 public interface CameraAccessor {
-    @Invoker("move")
-    void invokerMove(double x, double y, double z);
-
     @Invoker("setPosition")
-    void invokerSetPosition(double x, double y, double z);
-
-    @Invoker("setRotation")
-    void invokerSetRotation(float yRot, float xRot);
+    void ragdollified$setPosition(double x, double y, double z);
 }

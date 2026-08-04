@@ -73,6 +73,9 @@ public class RagdollifiedConfig {
     public static final ForgeConfigSpec.DoubleValue GRAVITY;
     public static final ForgeConfigSpec.DoubleValue MASS_SCALE;
     public static final ForgeConfigSpec.DoubleValue INITIAL_VELOCITY_SCALE;
+    public static final ForgeConfigSpec.BooleanValue SCALE_VELOCITY_BY_MODEL_SIZE;
+    public static final ForgeConfigSpec.DoubleValue MIN_MODEL_SIZE_VELOCITY_SCALE;
+    public static final ForgeConfigSpec.DoubleValue DIRECTIONAL_CARRY_SPEED;
     public static final ForgeConfigSpec.DoubleValue LINEAR_DAMPING;
     public static final ForgeConfigSpec.DoubleValue ANGULAR_DAMPING;
     public static final ForgeConfigSpec.DoubleValue FRICTION;
@@ -131,7 +134,7 @@ public class RagdollifiedConfig {
 
         MAX_RAGDOLLS = SERVER_BUILDER
                 .comment("Maximum number of ragdolls that can exist at once.")
-                .defineInRange("maxRagdolls", 20, 1, 100);
+                .defineInRange("maxRagdolls", 40, 1, 100);
 
         MAX_RAGDOLLS_PER_PLAYER = SERVER_BUILDER
                 .comment("Maximum number of a single player's death ragdolls that can exist at once. When a player",
@@ -150,16 +153,9 @@ public class RagdollifiedConfig {
 
         ENTITY_DENYLIST = SERVER_BUILDER
                 .comment("Entity registry ids that should never ragdoll. Use minecraft:player for players.",
-                        "The defaults are mobs that have no authored ragdoll body but would otherwise",
-                        "borrow one: client-side model detection falls back on any model extending",
-                        "QuadrupedModel or HumanoidModel, which silently catches these. Remove an entry",
-                        "once a real body profile exists for it.")
+                        "Entries here never spawn ragdolls, even when an authored model exists.")
                 .defineListAllowEmpty(List.of("entityDenylist"),
-                        List.of("minecraft:goat",
-                                "minecraft:panda",
-                                "minecraft:polar_bear",
-                                "minecraft:turtle",
-                                "minecraft:enderman"),
+                        List.of(),
                         value -> value instanceof String);
 
         SERVER_BUILDER.pop();
@@ -244,18 +240,24 @@ public class RagdollifiedConfig {
                         "These are multiplied by physics.massScale, which remains a global scalar.")
                 .push("partWeights");
 
+        // These MUST stay equal to REFERENCE_WEIGHT_* — the multiplier is config/reference, so
+        // any mismatch silently rescales every skeleton in the mod. torso 10 / head 8 shipped
+        // as the defaults against references of 8 / 4, which multiplied every body's torso by
+        // 1.25 and its head by 2.0: impulses divide by mass, so death knockback lost 20% on the
+        // torso and 50% on the head, and quadrupeds ended up planted on proportionally lighter
+        // legs instead of collapsing.
         PART_WEIGHT_TORSO = SERVER_BUILDER.comment("Weight of the torso.")
-                .defineInRange("torso", 10.0, 0.1, 200.0);
+                .defineInRange("torso", REFERENCE_WEIGHT_TORSO, 0.1, 200.0);
         PART_WEIGHT_HEAD = SERVER_BUILDER.comment("Weight of the head.")
-                .defineInRange("head", 8.0, 0.1, 200.0);
+                .defineInRange("head", REFERENCE_WEIGHT_HEAD, 0.1, 200.0);
         PART_WEIGHT_LEFT_ARM = SERVER_BUILDER.comment("Weight of the left arm.")
-                .defineInRange("leftArm", 4.0, 0.1, 200.0);
+                .defineInRange("leftArm", REFERENCE_WEIGHT_ARM, 0.1, 200.0);
         PART_WEIGHT_RIGHT_ARM = SERVER_BUILDER.comment("Weight of the right arm.")
-                .defineInRange("rightArm", 4.0, 0.1, 200.0);
+                .defineInRange("rightArm", REFERENCE_WEIGHT_ARM, 0.1, 200.0);
         PART_WEIGHT_LEFT_LEG = SERVER_BUILDER.comment("Weight of the left leg.")
-                .defineInRange("leftLeg", 6.0, 0.1, 200.0);
+                .defineInRange("leftLeg", REFERENCE_WEIGHT_LEG, 0.1, 200.0);
         PART_WEIGHT_RIGHT_LEG = SERVER_BUILDER.comment("Weight of the right leg.")
-                .defineInRange("rightLeg", 6.0, 0.1, 200.0);
+                .defineInRange("rightLeg", REFERENCE_WEIGHT_LEG, 0.1, 200.0);
 
         SERVER_BUILDER.pop();
         SERVER_BUILDER.comment("Physics Settings").push("physics");
@@ -268,6 +270,21 @@ public class RagdollifiedConfig {
                 .comment("Scale applied after inheriting the entity's exact death-time velocity.",
                         "1.0 preserves its movement; lower values intentionally reduce momentum.")
                 .defineInRange("initialVelocityScale", 1.0, 0.0, 5.0);
+        SCALE_VELOCITY_BY_MODEL_SIZE = SERVER_BUILDER
+                .comment("Damp inherited velocity and hit knockback on ragdolls smaller than a player.",
+                        "Impulses are a fixed magnitude, so a light body (chicken, bat, bee, rabbit) picks up far",
+                        "more speed from the same hit than a humanoid and gets launched. Bodies at player size or",
+                        "larger are never affected — this only reduces, never boosts.")
+                .define("scaleVelocityByModelSize", true);
+        MIN_MODEL_SIZE_VELOCITY_SCALE = SERVER_BUILDER
+                .comment("Floor for the size damping above, so the very smallest ragdolls still react to hits.",
+                        "The multiplier is the body's height relative to a player (1.8 blocks), clamped to this",
+                        "minimum. Lower = smaller mobs fly less; 1.0 disables the damping entirely.")
+                .defineInRange("minModelSizeVelocityScale", 0.35, 0.05, 1.0);
+        DIRECTIONAL_CARRY_SPEED = SERVER_BUILDER
+                .comment("Minimum horizontal speed given to a nearly stationary death in the attacker's look direction,",
+                        "in blocks per second. Set to 0 to disable directional death carry.")
+                .defineInRange("directionalCarrySpeed", 0.75, 0.0, 20.0);
         LINEAR_DAMPING = SERVER_BUILDER
                 .comment("Per-tick linear (movement) velocity damping. 0 = none, 1 = bodies stop almost instantly.",
                         "Higher makes ragdolls bleed off momentum faster so they don't slide as far.")
@@ -410,6 +427,9 @@ public class RagdollifiedConfig {
         register("gravity", GRAVITY);
         register("massScale", MASS_SCALE);
         register("initialVelocityScale", INITIAL_VELOCITY_SCALE);
+        register("scaleVelocityByModelSize", SCALE_VELOCITY_BY_MODEL_SIZE);
+        register("minModelSizeVelocityScale", MIN_MODEL_SIZE_VELOCITY_SCALE);
+        register("directionalCarrySpeed", DIRECTIONAL_CARRY_SPEED);
         register("linearDamping", LINEAR_DAMPING);
         register("angularDamping", ANGULAR_DAMPING);
         register("friction", FRICTION);
@@ -439,7 +459,7 @@ public class RagdollifiedConfig {
         GAMEPLAY_KEYS.put(value, key);
     }
 
-    /** Capture the server's current COMMON gameplay values for transmission to a client. */
+    // Capture the server's current COMMON gameplay values for transmission to a client.
     public static CompoundTag createGameplaySnapshot() {
         CompoundTag tag = new CompoundTag();
         tag.putInt("schema", 1);
@@ -458,7 +478,7 @@ public class RagdollifiedConfig {
         return tag;
     }
 
-    /** Install a server-owned runtime snapshot without modifying the client's TOML file. */
+    // Install a server-owned runtime snapshot without modifying the client's TOML file.
     public static void applyServerSnapshot(CompoundTag snapshot) {
         remoteGameplaySnapshot = snapshot == null ? null : snapshot.copy();
     }
@@ -552,6 +572,16 @@ public class RagdollifiedConfig {
             case LEFT_ARM -> (float) get(DEATH_PART_KNOCKBACK_LEFT_ARM);
             case RIGHT_ARM -> (float) get(DEATH_PART_KNOCKBACK_RIGHT_ARM);
         };
+    }
+
+    // Velocity/knockback damping for undersized bodies. `bodyScale` is the ragdoll's spawn scale
+    // (bbHeight / 1.8, so 1.0 is a player). Hit impulses are authored as fixed magnitudes, so the
+    // resulting speed is J/m: a chicken part weighs a fraction of a humanoid torso and leaves the
+    // ground at several times the speed from the same shot. Clamped at 1.0 because normal and
+    // large bodies already behave — this only ever reduces.
+    public static float getModelSizeVelocityScale(float bodyScale) {
+        if (!get(SCALE_VELOCITY_BY_MODEL_SIZE) || bodyScale >= 1.0f) return 1.0f;
+        return Math.max((float) get(MIN_MODEL_SIZE_VELOCITY_SCALE), bodyScale);
     }
 
     public static boolean shouldDebugRenderPhysics() { return debugRenderPhysics.get(); }

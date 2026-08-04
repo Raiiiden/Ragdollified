@@ -17,11 +17,8 @@ import javax.vecmath.Vector3f;
 import java.util.function.Supplier;
 import java.util.concurrent.atomic.AtomicInteger;
 
-/**
- * Punch sync packet.
- * Client→Server: "I punched ragdoll X, part Y, impulse Z"
- * Server broadcasts to all OTHER clients so they see the same push.
- */
+// Punch sync: client reports ragdoll, part, and impulse; the server rebroadcasts it to every
+// other client so they all see the same push.
 public class RagdollImpulsePacket {
 
     private final int ragdollId;

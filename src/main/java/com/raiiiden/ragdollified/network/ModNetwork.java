@@ -7,7 +7,7 @@ import net.minecraftforge.network.NetworkDirection;
 import net.minecraftforge.network.simple.SimpleChannel;
 
 public class ModNetwork {
-    private static final String PROTOCOL_VERSION = "4";
+    private static final String PROTOCOL_VERSION = "6";
     public static final SimpleChannel CHANNEL = NetworkRegistry.newSimpleChannel(
             new ResourceLocation(Ragdollified.MODID, "main"),
             () -> PROTOCOL_VERSION,
@@ -23,7 +23,7 @@ public class ModNetwork {
 
     private static boolean acceptsVersion(String version) {
         // Keep the channel optional for vanilla servers/clients while rejecting a different
-        // mod packet layout (v4 adds retained ragdoll state messages).
+        // mod packet layout (v6 expands poses to ten parts for native spider/Ghast anatomy).
         return PROTOCOL_VERSION.equals(version)
                 || NetworkRegistry.ABSENT.equals(version)
                 || NetworkRegistry.ACCEPTVANILLA.equals(version);
@@ -49,6 +49,17 @@ public class ModNetwork {
                 RagdollStatePacket::encode,
                 RagdollStatePacket::decode,
                 RagdollStatePacket::handle);
+
+        CHANNEL.registerMessage(nextId(), RagdollStreamPacket.class,
+                RagdollStreamPacket::encode,
+                RagdollStreamPacket::decode,
+                RagdollStreamPacket::handle);
+
+        CHANNEL.messageBuilder(RagdollStreamOwnerPacket.class, nextId(), NetworkDirection.PLAY_TO_CLIENT)
+                .encoder(RagdollStreamOwnerPacket::encode)
+                .decoder(RagdollStreamOwnerPacket::decode)
+                .consumerMainThread(RagdollStreamOwnerPacket::handle)
+                .add();
 
         CHANNEL.messageBuilder(GameplayConfigSyncPacket.class, nextId(), NetworkDirection.PLAY_TO_CLIENT)
                 .encoder(GameplayConfigSyncPacket::encode)

@@ -11,9 +11,7 @@ import net.minecraftforge.network.NetworkEvent;
 
 import java.util.function.Supplier;
 
-/**
- * Client→server settled-pose report and server→client retained state for late area entrants.
- */
+// Client to server settled-pose report, server to client retained state for late arrivals.
 public class RagdollStatePacket {
     private final int entityId;
     private final RagdollTransform[] transforms;
@@ -35,7 +33,7 @@ public class RagdollStatePacket {
         buf.writeInt(msg.impulseRevision);
         buf.writeVarInt(Math.max(0, msg.ageTicks));
         buf.writeBoolean(msg.settled);
-        for (int i = 0; i < 6; i++) {
+        for (int i = 0; i < RagdollTransform.MAX_PARTS; i++) {
             RagdollTransform transform =
                     msg.transforms != null && i < msg.transforms.length ? msg.transforms[i] : null;
             buf.writeBoolean(transform != null);
@@ -48,7 +46,7 @@ public class RagdollStatePacket {
         int impulseRevision = buf.readInt();
         int ageTicks = buf.readVarInt();
         boolean settled = buf.readBoolean();
-        RagdollTransform[] transforms = new RagdollTransform[6];
+        RagdollTransform[] transforms = new RagdollTransform[RagdollTransform.MAX_PARTS];
         for (int i = 0; i < transforms.length; i++) {
             if (buf.readBoolean()) transforms[i] = RagdollTransform.readFrom(buf);
         }

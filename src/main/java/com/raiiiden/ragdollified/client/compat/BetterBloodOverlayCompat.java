@@ -58,8 +58,12 @@ public class BetterBloodOverlayCompat {
     // Rebuilt, render-ready decals for a ragdoll, plus the ClientWounds to release later.
     private record Built(List<Decal> decals, List<Object> clientWounds) {}
 
-    private static final Map<Integer, Captured> CAPTURED = new ConcurrentHashMap<>();
-    private static final Map<Integer, Built> BUILT = new ConcurrentHashMap<>();
+    // Keyed by whatever currently owns the blood: the source entity's id (an Integer) while a
+    // physics ragdoll is the visible body, then the corpse entity's UUID once the corpse takes
+    // over. transferTo re-keys an entry at that handoff so the blood does not blink out with the
+    // ragdoll it was captured for.
+    private static final Map<Object, Captured> CAPTURED = new ConcurrentHashMap<>();
+    private static final Map<Object, Built> BUILT = new ConcurrentHashMap<>();
     // ClientWounds whose owning ragdoll is gone; drained + GL-released on the render thread.
     private static final List<Object> PENDING_RELEASE = new CopyOnWriteArrayList<>();
 
@@ -125,7 +129,7 @@ public class BetterBloodOverlayCompat {
         }
     }
 
-    public static void capture(int ragdollEntityId, LivingEntity entity) {
+    public static void capture(Object key, LivingEntity entity) {
         if (!available) return;
         try {
             Object list = getWounds.invoke(null, entity.getUUID());
@@ -138,23 +142,23 @@ public class BetterBloodOverlayCompat {
                 if (profile == null) profile = cwProfile.get(cw);
             }
             if (profile != null) {
-                CAPTURED.put(ragdollEntityId, new Captured(records, profile));
+                CAPTURED.put(key, new Captured(records, profile));
             }
         } catch (Throwable t) {
             LOGGER.debug("Failed to capture blood for entity {}", entity.getId(), t);
         }
     }
 
-    // True if we have captured or already-built blood for this ragdoll
-    public static boolean hasBlood(int ragdollEntityId) {
-        return available && (CAPTURED.containsKey(ragdollEntityId) || BUILT.containsKey(ragdollEntityId));
+    // True if we have captured or already-built blood for this body
+    public static boolean hasBlood(Object key) {
+        return available && (CAPTURED.containsKey(key) || BUILT.containsKey(key));
     }
 
-    public static List<Decal> decalsForPart(int ragdollEntityId, String partName) {
+    public static List<Decal> decalsForPart(Object key, String partName) {
         if (!available) return Collections.emptyList();
-        Built built = BUILT.get(ragdollEntityId);
+        Built built = BUILT.get(key);
         if (built == null) {
-            built = build(ragdollEntityId);
+            built = build(key);
             if (built == null) return Collections.emptyList();
         }
         if (built.decals().isEmpty()) return Collections.emptyList();
@@ -169,8 +173,11 @@ public class BetterBloodOverlayCompat {
         return out != null ? out : Collections.emptyList();
     }
 
-    private static Built build(int ragdollEntityId) {
-        Captured cap = CAPTURED.remove(ragdollEntityId);
+    // The raw capture is deliberately kept after building: a corpse that leaves render range has
+    // its wound textures freed (releaseTextures) and must be able to rebuild them from scratch
+    // when it comes back, long after the entity it was captured from is gone.
+    private static Built build(Object key) {
+        Captured cap = CAPTURED.get(key);
         if (cap == null) return null;
 
         List<Decal> decals = new ArrayList<>(cap.records().size());
@@ -184,14 +191,14 @@ public class BetterBloodOverlayCompat {
 
             // Fresh UUID so our rebuilt texture locations never collide with BBO's own live
             // ones (matters for players, whose real wounds may still be registered).
-            UUID key = UUID.randomUUID();
+            UUID textureOwner = UUID.randomUUID();
 
             for (Object record : cap.records()) {
                 Object limb = wrLimb.invoke(record);
                 Set<String> parts = partsFor(sites.get(limb));
                 if (parts.isEmpty()) continue;
 
-                Object cw = create.invoke(null, key, record, profile);
+                Object cw = create.invoke(null, textureOwner, record, profile);
                 revealAll.invoke(null, cw);
                 float alpha = (float) computeAlpha.invoke(null, cw);
                 ResourceLocation tex = (ResourceLocation) cwTexLocation.get(cw);
@@ -200,16 +207,16 @@ public class BetterBloodOverlayCompat {
                 clientWounds.add(cw);
             }
         } catch (Throwable t) {
-            LOGGER.debug("Failed to rebuild blood for ragdoll {}", ragdollEntityId, t);
+            LOGGER.debug("Failed to rebuild blood for {}", key, t);
             // Release anything we managed to allocate before the failure.
             for (Object cw : clientWounds) safeRelease(cw);
             Built empty = new Built(Collections.emptyList(), Collections.emptyList());
-            BUILT.put(ragdollEntityId, empty);
+            BUILT.put(key, empty);
             return empty;
         }
 
         Built built = new Built(decals, clientWounds);
-        BUILT.put(ragdollEntityId, built);
+        BUILT.put(key, built);
         return built;
     }
 
@@ -223,13 +230,40 @@ public class BetterBloodOverlayCompat {
         return parts;
     }
 
-    public static void evict(int ragdollEntityId) {
+    // Hand a body's blood over to a new owner, used when a settled ragdoll is replaced by its
+    // corpse entity. The ragdoll is destroyed right after, and its evict() would otherwise take
+    // the blood with it.
+    public static void transferTo(Object fromKey, Object toKey) {
+        if (!available || fromKey.equals(toKey)) return;
+        Captured cap = CAPTURED.remove(fromKey);
+        if (cap != null) CAPTURED.put(toKey, cap);
+        Built built = BUILT.remove(fromKey);
+        if (built != null) BUILT.put(toKey, built);
+    }
+
+    // Free the GL wound textures but keep the capture, so the body can rebuild them on demand.
+    // Used when a corpse unloads with the chunk: holding its textures for an unbounded number of
+    // out-of-range corpses would leak, and rebuilding on return is cheap.
+    public static void releaseTextures(Object key) {
         if (!available) return;
-        CAPTURED.remove(ragdollEntityId);
-        Built built = BUILT.remove(ragdollEntityId);
+        Built built = BUILT.remove(key);
         if (built != null && !built.clientWounds().isEmpty()) {
             PENDING_RELEASE.addAll(built.clientWounds());
         }
+    }
+
+    public static void evict(Object key) {
+        if (!available) return;
+        CAPTURED.remove(key);
+        releaseTextures(key);
+    }
+
+    // Drop everything on disconnect: both key spaces are only meaningful within one connection.
+    public static void clearAll() {
+        if (!available) return;
+        CAPTURED.clear();
+        for (Built built : BUILT.values()) PENDING_RELEASE.addAll(built.clientWounds());
+        BUILT.clear();
     }
 
     // Release queued wound textures. Must be called on the render thread each frame

@@ -21,15 +21,9 @@ import javax.annotation.Nullable;
 import java.util.List;
 import java.util.UUID;
 
-/**
- * A compass bound to a specific corpse. The target (corpse id, position, dimension, owner name)
- * is baked into the stack NBT at creation time, so the needle can point and the locator screen
- * can show coordinates without any per-frame networking — it works even when the corpse's chunk
- * is unloaded, which is the whole point of the item.
- *
- * <p>Right-clicking opens the locator screen (wired client-side); see the client item-property
- * registration for the spinning needle behavior.
- */
+// Compass bound to one corpse. Id, position, dimension, and owner are baked into the stack NBT
+// at creation, so the needle and locator screen need no per-frame networking and work with the
+// corpse's chunk unloaded. Right-click opens the locator screen, wired client-side.
 public class CorpseCompassItem extends Item {
 
     // NBT contract shared by the server (who bakes the target) and the client (needle + screen).
@@ -78,7 +72,7 @@ public class CorpseCompassItem extends Item {
         super.appendHoverText(stack, level, tooltip, flag);
     }
 
-    /** Build a bound Corpse Compass stack for the given target. */
+    // Build a bound Corpse Compass stack for the given target.
     public static ItemStack create(@Nullable UUID corpseId, Vec3 pos,
                                    @Nullable ResourceKey<Level> dim, String ownerName,
                                    ItemStack helmet, ItemStack chest, ItemStack legs, ItemStack boots) {
@@ -86,7 +80,7 @@ public class CorpseCompassItem extends Item {
                 helmet, chest, legs, boots);
     }
 
-    /** Build a bound compass that can follow the matching loaded ragdoll before corpse handoff. */
+    // Build a bound compass that can follow the matching loaded ragdoll before corpse handoff.
     public static ItemStack create(@Nullable UUID corpseId, @Nullable UUID ownerId, int ragdollEntityId,
                                    Vec3 pos, @Nullable ResourceKey<Level> dim, String ownerName,
                                    ItemStack helmet, ItemStack chest, ItemStack legs, ItemStack boots) {
@@ -111,7 +105,7 @@ public class CorpseCompassItem extends Item {
         if (stack != null && !stack.isEmpty()) tag.put(key, stack.save(new CompoundTag()));
     }
 
-    /** Worn armor baked at death for the given slot key ({@link #TAG_HELMET} etc.); EMPTY if none. */
+    // Worn armor baked at death for the given slot key (TAG_HELMET etc.); EMPTY if none.
     public static ItemStack getArmor(ItemStack stack, String key) {
         CompoundTag tag = stack.getTag();
         return (tag != null && tag.contains(key)) ? ItemStack.of(tag.getCompound(key)) : ItemStack.EMPTY;
@@ -150,7 +144,7 @@ public class CorpseCompassItem extends Item {
         return tag != null ? tag.getString(TAG_OWNER_NAME) : "";
     }
 
-    /** The dimension the corpse is in, or null if not recorded / unparseable. */
+    // The dimension the corpse is in, or null if not recorded / unparseable.
     @Nullable
     public static ResourceKey<Level> getTargetDimension(ItemStack stack) {
         CompoundTag tag = stack.getTag();

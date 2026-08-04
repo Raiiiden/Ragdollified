@@ -19,6 +19,7 @@ import net.minecraft.world.Containers;
 import net.minecraft.world.entity.ExperienceOrb;
 import net.minecraft.world.entity.player.Inventory;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.enchantment.EnchantmentHelper;
 import net.minecraft.world.level.GameRules;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.phys.Vec3;
@@ -36,17 +37,14 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
-/**
- * Server-side corpse lifecycle.
- *
- * <p>On death the player's inventory (and optionally XP) is captured into a
- * {@link PendingCorpse}, the inventory is cleared so vanilla drops nothing, and the pending
- * is persisted via {@link PendingCorpseStore}. <b>No corpse entity exists yet.</b> When the
- * a nearby client reports its ragdoll has settled, the corpse is spawned <i>directly at the
- * rest position</i> with the settled pose — so it never visibly teleports. A timeout (stuck
- * ragdoll / disconnect) or a server restart (crash recovery) instead spawns it flat at the
- * recorded death position. Either way the loot is safe from the moment of death.
- */
+// Server-side corpse lifecycle.
+//
+// On death the inventory, and optionally XP, is captured into a PendingCorpse, the inventory is
+// cleared so vanilla drops nothing, and the pending is persisted through PendingCorpseStore. No
+// corpse entity exists yet. Once a nearby client reports its ragdoll settled, the corpse spawns
+// directly at the rest position in the settled pose, so it never visibly teleports. A timeout
+// from a stuck ragdoll or disconnect, or a restart after a crash, spawns it flat at the recorded
+// death position instead. Either way the loot is safe from the moment of death.
 @Mod.EventBusSubscriber(modid = Ragdollified.MODID)
 public class CorpseManager {
 
@@ -73,14 +71,14 @@ public class CorpseManager {
         p.deathEntityId = player.getId(); // == the client ragdoll's originalEntityId (see PendingCorpse)
 
         // Worn armor copies for rendering (the real items also live in items[36..39]).
-        p.boots  = inv.getItem(36).copy();
-        p.legs   = inv.getItem(37).copy();
-        p.chest  = inv.getItem(38).copy();
-        p.helmet = inv.getItem(39).copy();
+        p.boots  = corpseCopy(inv.getItem(36));
+        p.legs   = corpseCopy(inv.getItem(37));
+        p.chest  = corpseCopy(inv.getItem(38));
+        p.helmet = corpseCopy(inv.getItem(39));
 
         boolean hasLoot = false;
         for (int i = 0; i < inv.getContainerSize(); i++) {
-            ItemStack s = inv.getItem(i).copy();
+            ItemStack s = corpseCopy(inv.getItem(i));
             p.items.add(s);
             if (!s.isEmpty()) hasLoot = true;
         }
@@ -123,11 +121,18 @@ public class CorpseManager {
         Ragdollified.LOGGER.debug("Captured pending corpse for {} at {}", p.name, p.deathPos);
     }
 
-    /**
-     * On respawn, hand the player the Corpse Compass queued for them at death (if the feature is
-     * enabled and a corpse was actually created). Gated on a queued target rather than the respawn
-     * reason, so returning from the End (which has no queued target) never triggers it.
-     */
+    // Corpse capture replaces vanilla's inventory-drop path, so apply vanilla's vanishing rule
+    // explicitly. The original inventory is cleared below; EMPTY makes the cursed item disappear
+    // instead of becoming recoverable or remaining visible on the corpse.
+    private static ItemStack corpseCopy(ItemStack stack) {
+        return stack.isEmpty() || EnchantmentHelper.hasVanishingCurse(stack)
+                ? ItemStack.EMPTY
+                : stack.copy();
+    }
+
+    // Hand over the Corpse Compass queued at death, when the feature is on and a corpse was
+    // actually made. Gated on the queued target rather than the respawn reason, so returning
+    // from the End never triggers it.
     @SubscribeEvent
     public static void onRespawn(net.minecraftforge.event.entity.player.PlayerEvent.PlayerRespawnEvent event) {
         if (!(event.getEntity() instanceof ServerPlayer player)) return;
@@ -240,10 +245,8 @@ public class CorpseManager {
         if (changed) store.setDirty();
     }
 
-    /**
-     * Crash/shutdown recovery: any pending that survived to the next start never got its
-     * settle report, so spawn it flat at the death position. Cleared from the store after.
-     */
+    // Crash and shutdown recovery: a pending that survived to the next start never got its
+    // settle report, so spawn it flat at the death position and clear it from the store.
     @SubscribeEvent
     public static void onServerStarted(ServerStartedEvent event) {
         MinecraftServer server = event.getServer();
@@ -256,21 +259,17 @@ public class CorpseManager {
         Ragdollified.LOGGER.info("Restored {} corpse(s) from a previous session", restore.size());
     }
 
-    /**
-     * Apply a client-reported settle: spawn the corpse at the rest position with the settled
-     * pose. Validates the reporter owns a pending and clamps the reported origin to a sane
-     * radius of the death position (anti-cheat).
-     */
+    // Apply a client-reported settle, spawning the corpse at the rest position in its settled
+    // pose. Checks the reporter owns a pending and clamps the origin to a sane radius of the
+    // death position.
     public static void handleSettle(ServerPlayer sender, double ox, double oy, double oz,
                                     RagdollTransform[] transforms) {
         handleSettleFor(sender, sender.getUUID(), -1, -1, false, ox, oy, oz, transforms);
     }
 
-    /**
-     * Apply a settle observed by any nearby player. UUID plus death entity id prevents a stale
-     * or unrelated ragdoll from consuming the pending corpse; proximity and dimension checks
-     * prevent remote clients from choosing its position.
-     */
+    // Apply a settle seen by any nearby player. UUID plus death entity id keeps a stale or
+    // unrelated ragdoll from consuming the pending, and the proximity and dimension checks keep
+    // remote clients from choosing where it lands.
     public static void handleObservedSettle(ServerPlayer sender, UUID ownerUUID, int ragdollEntityId,
                                             int impulseRevision,
                                             double ox, double oy, double oz,
@@ -336,7 +335,7 @@ public class CorpseManager {
 
     private static boolean isSanePose(RagdollTransform[] transforms) {
         if (transforms == null || transforms.length < 6) return false;
-        for (int i = 0; i < 6; i++) {
+        for (int i = 0; i < Math.min(transforms.length,RagdollTransform.MAX_PARTS); i++) {
             RagdollTransform t = transforms[i];
             if (t == null) continue;
             if (t.partId != i || !Float.isFinite(t.position.x) || !Float.isFinite(t.position.y)
@@ -350,12 +349,10 @@ public class CorpseManager {
         return true;
     }
 
-    /**
-     * OP retrieve command backing: find the corpse with {@code corpseId}, give its contents (+ XP)
-     * to {@code target}, and erase it. Checks loaded corpse entities across every dimension first,
-     * then the pending store (a corpse whose ragdoll hasn't settled into an entity yet). Returns
-     * {@code false} if no match is found (e.g. the corpse is in an unloaded chunk).
-     */
+    // Backs the OP retrieve command: find corpseId, give its contents and XP to the target, and
+    // erase it. Searches loaded corpse entities in every dimension first, then the pending store
+    // for one whose ragdoll has not settled yet. False when nothing matches, such as a corpse in
+    // an unloaded chunk.
     public static boolean retrieveByCorpseId(MinecraftServer server, UUID corpseId, ServerPlayer target) {
         for (ServerLevel level : server.getAllLevels()) {
             for (net.minecraft.world.entity.Entity e : level.getAllEntities()) {
@@ -478,7 +475,7 @@ public class CorpseManager {
     }
 
     private static RagdollTransform[] translatePose(RagdollTransform[] pose, Vec3 offset) {
-        RagdollTransform[] translated = new RagdollTransform[6];
+        RagdollTransform[] translated = new RagdollTransform[RagdollTransform.MAX_PARTS];
         for (int i = 0; i < translated.length && i < pose.length; i++) {
             RagdollTransform t = pose[i];
             if (t == null) continue;
@@ -492,7 +489,7 @@ public class CorpseManager {
         return translated;
     }
 
-    /** Last-resort fallback if the corpse entity can't be added: drop everything on the ground. */
+    // Last-resort fallback if the corpse entity can't be added: drop everything on the ground.
     private static void dropPendingLoot(ServerLevel level, PendingCorpse p, Vec3 pos) {
         for (ItemStack s : p.items) {
             if (s != null && !s.isEmpty()) Containers.dropItemStack(level, pos.x, pos.y, pos.z, s);

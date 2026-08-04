@@ -78,12 +78,9 @@ public class GeckoLibArmorHelper {
         }
     }
 
-    /**
-     * Shared invisible ArmorStand used as a LivingEntity stand-in when no real entity is
-     * available. Exposed so the vanilla/modded armor path can pass a non-null entity to
-     * Forge's getHumanoidArmorModel hook (many mods assume one). May be null very early
-     * before the level loads.
-     */
+    // Shared invisible ArmorStand standing in for a LivingEntity when there is no real one, so
+    // the armor path can hand Forge's getHumanoidArmorModel hook a non-null entity — many mods
+    // assume one. Null very early, before the level loads.
     public static LivingEntity getProxyEntity() {
         return getOrCreateProxy();
     }

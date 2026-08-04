@@ -8,13 +8,10 @@ import net.minecraft.network.chat.Component;
 import net.minecraft.world.entity.player.Inventory;
 import net.minecraft.world.inventory.Slot;
 
-/**
- * Custom corpse loot screen. Instead of reusing the vanilla chest texture, the whole window
- * is drawn from the vanilla GUI palette so the layout can adapt to a variable number of
- * curio slots and show clear separators between the equipment band, the corpse loot grid,
- * and the looting player's inventory. Slot frames are drawn under every menu slot, so the
- * frames always line up with whatever positions {@link CorpseMenu} chose.
- */
+// Corpse loot screen, drawn from the vanilla GUI palette rather than the chest texture so the
+// layout can absorb a variable number of curio slots and separate the equipment band, loot
+// grid, and player inventory. Frames are drawn under every menu slot, so they always line up
+// with whatever positions CorpseMenu chose.
 public class CorpseScreen extends AbstractContainerScreen<CorpseMenu> {
 
     // Vanilla inventory palette.
@@ -51,7 +48,7 @@ public class CorpseScreen extends AbstractContainerScreen<CorpseMenu> {
         addRenderableWidget(swap);
     }
 
-    /** Send a vanilla menu-button click so the server runs {@link CorpseMenu#clickMenuButton}. */
+    // Send a vanilla menu-button click so the server runs clickMenuButton.
     private void press(int buttonId) {
         if (this.minecraft != null && this.minecraft.gameMode != null) {
             this.minecraft.gameMode.handleInventoryButtonClick(this.menu.containerId, buttonId);
@@ -79,7 +76,7 @@ public class CorpseScreen extends AbstractContainerScreen<CorpseMenu> {
         }
     }
 
-    /** Raised beige panel with a 1px bevel, matching the vanilla inventory window. */
+    // Raised beige panel with a 1px bevel, matching the vanilla inventory window.
     private static void drawPanel(GuiGraphics g, int x, int y, int w, int h) {
         g.fill(x, y, x + w, y + h, PANEL_BG);
         g.fill(x, y, x + w, y + 1, PANEL_LIGHT);            // top
@@ -88,13 +85,13 @@ public class CorpseScreen extends AbstractContainerScreen<CorpseMenu> {
         g.fill(x, y + h - 1, x + w, y + h, PANEL_DARK);     // bottom
     }
 
-    /** A 2px beveled horizontal divider spanning the panel's inner width. */
+    // A 2px beveled horizontal divider spanning the panel's inner width.
     private static void drawDivider(GuiGraphics g, int x, int dy, int w) {
         g.fill(x + 7, dy, x + w - 7, dy + 1, BEVEL_DARK);
         g.fill(x + 7, dy + 1, x + w - 7, dy + 2, BEVEL_LIGHT);
     }
 
-    /** A vanilla-style recessed 18x18 slot. (sx, sy) is the 16x16 content origin. */
+    // A vanilla-style recessed 18x18 slot. (sx, sy) is the 16x16 content origin.
     private static void drawSlot(GuiGraphics g, int sx, int sy) {
         g.fill(sx - 1, sy - 1, sx + 17, sy,      BEVEL_DARK);   // top edge
         g.fill(sx - 1, sy - 1, sx,      sy + 17, BEVEL_DARK);   // left edge

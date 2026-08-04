@@ -8,6 +8,7 @@ import com.raiiiden.ragdollified.Ragdollified;
 import com.raiiiden.ragdollified.client.ClientRagdoll;
 import com.raiiiden.ragdollified.client.ClientJbulletWorld;
 import com.raiiiden.ragdollified.client.ClientMobModelHelper;
+import com.raiiiden.ragdollified.client.EntityRenderCaptureHandler;
 import com.raiiiden.ragdollified.client.ClientRagdollManager;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
@@ -22,12 +23,8 @@ import net.minecraftforge.network.NetworkEvent;
 import java.util.UUID;
 import java.util.function.Supplier;
 
-/**
- * Server→Client: Sent when an entity dies on the server.
- * Contains authoritative spawn data (exact entity position, velocity in blocks/second,
- * armor, etc.)
- * so all clients create the ragdoll from the same state.
- */
+// Sent to clients when an entity dies server-side, carrying authoritative spawn data (exact
+// position, velocity in blocks/second, armor) so every client builds the same ragdoll.
 public class RagdollSpawnPacket {
 
     private final int originalEntityId;
@@ -52,6 +49,9 @@ public class RagdollSpawnPacket {
     // "no hit info, don't apply an impulse".
     private final byte hitPartIndex;
     private final float hitImpulseX, hitImpulseY, hitImpulseZ;
+    // Impact point relative to the entity origin. Zero means "no lever arm known", which
+    // falls back to the old torque-free centre-of-mass application.
+    private final float hitOffsetX, hitOffsetY, hitOffsetZ;
     // Generic overlay-state bits for mob-specific extras the renderer needs to draw on
     // top of the base model. bit 0 = creeper was charged (powered armor swirl),
     // bit 1 = pig was saddled. Bits 2-7 reserved for future overlays. Zero = no overlay.
@@ -173,6 +173,33 @@ public class RagdollSpawnPacket {
                               byte hitPartIndex, float hitImpulseX, float hitImpulseY, float hitImpulseZ,
                               byte overlayState,
                               String villagerType, String villagerProfession, byte villagerLevel) {
+        this(originalEntityId, isPlayer, mobType, modelType, scale, playerUUID, playerName,
+                posX, posY, posZ, yRot, xRot, velX, velY, velZ, isSwimming, isBaby,
+                helmet, chestplate, leggings, boots, sheepState,
+                hitPartIndex, hitImpulseX, hitImpulseY, hitImpulseZ,
+                0f, 0f, 0f,
+                overlayState, villagerType, villagerProfession, villagerLevel);
+    }
+
+    // Canonical form. hitOffset is the impact point relative to the entity origin — the lever
+    // arm that turns a hit into rotation. Without it every impulse runs through the centre of
+    // mass, which is torque-free, so bodies get pushed but never tip over.
+    public RagdollSpawnPacket(int originalEntityId, boolean isPlayer, String mobType,
+                              MobModelHelper.ModelType modelType, float scale,
+                              String playerUUID, String playerName,
+                              double posX, double posY, double posZ,
+                              float yRot, float xRot,
+                              double velX, double velY, double velZ,
+                              boolean isSwimming, boolean isBaby,
+                              ItemStack helmet, ItemStack chestplate, ItemStack leggings, ItemStack boots,
+                              byte sheepState,
+                              byte hitPartIndex, float hitImpulseX, float hitImpulseY, float hitImpulseZ,
+                              float hitOffsetX, float hitOffsetY, float hitOffsetZ,
+                              byte overlayState,
+                              String villagerType, String villagerProfession, byte villagerLevel) {
+        this.hitOffsetX = hitOffsetX;
+        this.hitOffsetY = hitOffsetY;
+        this.hitOffsetZ = hitOffsetZ;
         this.originalEntityId = originalEntityId;
         this.isPlayer = isPlayer;
         this.mobType = mobType;
@@ -205,7 +232,10 @@ public class RagdollSpawnPacket {
         this.villagerLevel = villagerLevel;
     }
 
-    /** Pack wasSheared (bit 0) + dyeColorId (bits 1..4, 0..15) into one byte. */
+    // Player bodies are owner-streamed while in flight; mobs simulate locally per client.
+    public boolean isPlayer() { return isPlayer; }
+
+    // Pack wasSheared (bit 0) + dyeColorId (bits 1..4, 0..15) into one byte.
     public static byte packSheepState(boolean wasSheared, int dyeColorId) {
         return (byte) ((wasSheared ? 1 : 0) | ((dyeColorId & 0xF) << 1));
     }
@@ -253,6 +283,9 @@ public class RagdollSpawnPacket {
         buf.writeFloat(msg.hitImpulseX);
         buf.writeFloat(msg.hitImpulseY);
         buf.writeFloat(msg.hitImpulseZ);
+        buf.writeFloat(msg.hitOffsetX);
+        buf.writeFloat(msg.hitOffsetY);
+        buf.writeFloat(msg.hitOffsetZ);
         buf.writeByte(msg.overlayState);
         buf.writeUtf(msg.villagerType);
         buf.writeUtf(msg.villagerProfession);
@@ -277,6 +310,7 @@ public class RagdollSpawnPacket {
                 buf.readByte(),
                 buf.readByte(),
                 buf.readFloat(), buf.readFloat(), buf.readFloat(),
+                buf.readFloat(), buf.readFloat(), buf.readFloat(),
                 buf.readByte(),
                 buf.readUtf(), buf.readUtf(), buf.readByte()
         );
@@ -296,9 +330,20 @@ public class RagdollSpawnPacket {
 
         net.minecraft.world.entity.Entity worldEntity = level.getEntity(msg.originalEntityId);
         MobModelHelper.ModelType modelType = msg.modelType;
-        if (!msg.isPlayer && !MobModelHelper.isSupportedModelType(modelType)
-                && worldEntity instanceof net.minecraft.world.entity.LivingEntity living) {
-            modelType = ClientMobModelHelper.getActualModelType(living);
+        // The packet's type is resolved from the entity id alone, which is all the server can see.
+        // Where the client still has the entity, its real model class is the better answer and
+        // wins: a mod can give a humanoid-backed entity a villager-like id, and only the model
+        // knows which UVs its texture was drawn for. The
+        // id-based guess is kept whenever the model is one we do not recognise — vanilla villagers
+        // ride a VillagerModel this cannot identify, and their ILLAGER routing has to survive.
+        if (!msg.isPlayer && worldEntity instanceof net.minecraft.world.entity.LivingEntity living) {
+            MobModelHelper.ModelType actual = ClientMobModelHelper.getActualModelType(living);
+            if (MobModelHelper.isSupportedModelType(actual)) {
+                modelType = actual;
+            }
+            // Preserve renderer-owned textures and custom geometry before the dying entity can
+            // leave the client level. Optional mod-specific handling lives behind compat helpers.
+            EntityRenderCaptureHandler.captureRenderState(living);
         }
 
         if (!msg.isPlayer && !MobModelHelper.isSupportedModelType(modelType)) {
@@ -306,6 +351,13 @@ public class RagdollSpawnPacket {
                     "Skipping ragdoll for unsupported mob {} - no matching ragdoll body/render",
                     msg.mobType);
             return;
+        }
+
+        // Snapshot the damage visuals (Better Blood Overlay wounds, Visual Health damage tier)
+        // while the dying entity is still around. This packet frequently beats the client's own
+        // LivingDeathEvent, and whichever of the two runs first is the one that has to do it.
+        if (worldEntity instanceof net.minecraft.world.entity.LivingEntity dying) {
+            ClientRagdollManager.captureCompatVisuals(dying);
         }
 
         // Get captured pose if available locally
@@ -322,11 +374,17 @@ public class RagdollSpawnPacket {
         // receiving this packet anyway, or PhysicsHooks ran before the hit landed).
         int hitPartIndex;
         Vec3 hitImpulse;
+        // Lever arm for the impulse. Zero means the server had no impact point (older server,
+        // explosion kick, …) and the client falls back to a centre-of-mass impulse.
+        Vec3 hitOffset = null;
         if (msg.hitPartIndex >= 0
                 || msg.hitPartIndex == RagdollHitMapper.CENTER_HIT_PART_INDEX
                 || msg.hitPartIndex == RagdollHitMapper.GLOBAL_VELOCITY_KICK_INDEX) {
             hitPartIndex = msg.hitPartIndex;
             hitImpulse = new Vec3(msg.hitImpulseX, msg.hitImpulseY, msg.hitImpulseZ);
+            if (msg.hitOffsetX != 0f || msg.hitOffsetY != 0f || msg.hitOffsetZ != 0f) {
+                hitOffset = new Vec3(msg.hitOffsetX, msg.hitOffsetY, msg.hitOffsetZ);
+            }
         } else {
             com.raiiiden.ragdollified.client.RagdollHitTracker.ResolvedHit hit = null;
             if (worldEntity instanceof net.minecraft.world.entity.LivingEntity living) {
@@ -342,6 +400,9 @@ public class RagdollSpawnPacket {
         int dyeColorId = unpackDyeColorId(msg.sheepState);
         boolean chargedCreeper = unpackChargedCreeper(msg.overlayState);
         boolean saddledPig = unpackSaddledPig(msg.overlayState);
+        ResourceLocation capturedTexture = msg.isPlayer ? null
+                : com.raiiiden.ragdollified.client.ClientMobTextureCache
+                        .getTextureForDeadMob(msg.originalEntityId);
 
         ClientRagdoll.SpawnData data = new ClientRagdoll.SpawnData(
                 msg.originalEntityId,
@@ -358,8 +419,8 @@ public class RagdollSpawnPacket {
                 capturedPose,
                 msg.isSwimming,
                 msg.isBaby,
-                null, // texture will be looked up
-                hitPartIndex, hitImpulse,
+                capturedTexture,
+                hitPartIndex, hitImpulse, hitOffset,
                 wasSheared, dyeColorId,
                 chargedCreeper, saddledPig,
                 msg.villagerType, msg.villagerProfession, msg.villagerLevel

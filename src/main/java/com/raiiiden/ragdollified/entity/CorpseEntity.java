@@ -2,6 +2,7 @@ package com.raiiiden.ragdollified.entity;
 
 import com.raiiiden.ragdollified.RagdollPart;
 import com.raiiiden.ragdollified.RagdollTransform;
+import com.raiiiden.ragdollified.compat.CuriosCompat;
 import com.raiiiden.ragdollified.config.RagdollifiedConfig;
 import com.raiiiden.ragdollified.menu.CorpseMenu;
 import com.raiiiden.ragdollified.server.PendingCorpse;
@@ -33,16 +34,13 @@ import javax.vecmath.Quat4f;
 import javax.vecmath.Vector3f;
 import java.util.UUID;
 
-/**
- * Server-authoritative lootable corpse. Spawned when a player dies (if corpses are
- * enabled). Holds the dead player's inventory in {@link #inventory} (server-side only),
- * and a cosmetic render snapshot (owner skin identity, worn armor, frozen ragdoll pose)
- * synced to all clients via {@link #RENDER_DATA} so every client — including late
- * joiners — draws the same frozen body.
- */
+// Server-authoritative lootable corpse, spawned on player death when corpses are enabled. The
+// dead player's inventory lives in inventory, server-side only; the cosmetic snapshot — skin
+// identity, worn armor, frozen ragdoll pose — syncs through RENDER_DATA so every client, late
+// joiners included, draws the same body.
 public class CorpseEntity extends Entity {
 
-    /** Vanilla portion: 36 main/hotbar + 4 armor + 1 offhand. Curio slots (if any) follow. */
+    // Vanilla portion: 36 main/hotbar + 4 armor + 1 offhand. Curio slots (if any) follow.
     public static final int VANILLA_SLOTS = 41;
 
     // Cosmetic render state, synced to clients. Items themselves are NOT synced.
@@ -66,6 +64,9 @@ public class CorpseEntity extends Entity {
     // Cached, parsed pose for the renderer (client). Rebuilt lazily when RENDER_DATA changes.
     private RagdollTransform[] cachedPose = null;
     private CompoundTag cachedPoseSource = null;
+    // Same treatment for the worn-curios snapshot.
+    private java.util.List<CuriosCompat.WornCurio> cachedCurios = null;
+    private CompoundTag cachedCuriosSource = null;
     private boolean suppressPersistentSync = false;
 
     public CorpseEntity(EntityType<? extends CorpseEntity> type, Level level) {
@@ -80,11 +81,8 @@ public class CorpseEntity extends Entity {
     // Server-side construction
     // ============================
 
-    /**
-     * Populate the corpse's loot + identity at death time (server). {@code vanillaItems} are
-     * the 41 player slots (index-aligned); {@code curioStacks}/{@code curioIds} are the
-     * captured curios (parallel lists, may be empty when Curios isn't installed).
-     */
+    // Fill in loot and identity at death, server-side. vanillaItems is the 41 player slots,
+    // index-aligned; curioStacks and curioIds are parallel and empty without Curios.
     public void initCorpse(UUID owner, UUID corpseId, String name, int ragdollEntityId,
                            java.util.List<ItemStack> vanillaItems,
                            java.util.List<ItemStack> curioStacks, java.util.List<String> curioIds,
@@ -110,14 +108,12 @@ public class CorpseEntity extends Entity {
         rebuildRenderData(false, null, helmet, chest, legs, boots);
     }
 
-    /**
-     * Apply the settled ragdoll pose (server). Transforms are relative to this entity's
-     * position. Marks the corpse posed so clients begin rendering the frozen body.
-     */
+    // Apply the settled ragdoll pose, server-side, with transforms relative to this entity's
+    // position. Marks the corpse posed so clients start drawing the frozen body.
     public void applyPose(RagdollTransform[] relativeTransforms) {
         CompoundTag data = getEntityData().get(RENDER_DATA).copy();
         ListTag pose = new ListTag();
-        for (int i = 0; i < 6; i++) {
+        for (int i = 0; i < RagdollTransform.MAX_PARTS; i++) {
             RagdollTransform t = (relativeTransforms != null && i < relativeTransforms.length)
                     ? relativeTransforms[i] : null;
             CompoundTag c = new CompoundTag();
@@ -140,7 +136,7 @@ public class CorpseEntity extends Entity {
         }
     }
 
-    /** Settle-timeout fallback: mark posed with no captured pose so the renderer draws a flat body. */
+    // Settle-timeout fallback: mark posed with no captured pose so the renderer draws a flat body.
     public void markPosedFlat() {
         CompoundTag data = getRenderData().copy();
         data.putBoolean("Posed", true);
@@ -161,6 +157,20 @@ public class CorpseEntity extends Entity {
         data.put("Chest", saveStack(chest));
         data.put("Legs", saveStack(legs));
         data.put("Boots", saveStack(boots));
+        // Captured curios, so clients can draw them on the body the same way armor is drawn. Like
+        // the armor snapshot this is fixed at death and does not follow looting — the corpse keeps
+        // wearing what it died in. Only curios the drop rules handed to the corpse are here;
+        // anything the player kept was never ours to show.
+        ListTag curios = new ListTag();
+        for (int i = 0; i < curioSlotIds.size(); i++) {
+            ItemStack stack = inventory.getItem(VANILLA_SLOTS + i);
+            if (stack.isEmpty()) continue;
+            CompoundTag entry = new CompoundTag();
+            entry.putString("Id", curioSlotIds.get(i));
+            entry.put("Item", saveStack(stack));
+            curios.add(entry);
+        }
+        data.put("Curios", curios);
         getEntityData().set(RENDER_DATA, data);
     }
 
@@ -182,14 +192,14 @@ public class CorpseEntity extends Entity {
         return d.hasUUID("Owner") ? d.getUUID("Owner") : null;
     }
 
-    /** Stable death handle shared with the Corpse Compass and the retrieve command. */
+    // Stable death handle shared with the Corpse Compass and the retrieve command.
     @Nullable
     public UUID getCorpseId() {
         CompoundTag d = getRenderData();
         return d.hasUUID("CorpseId") ? d.getUUID("CorpseId") : corpseId;
     }
 
-    /** The physics-ragdoll entity id this corpse replaces, or -1 if unknown. */
+    // The physics-ragdoll entity id this corpse replaces, or -1 if unknown.
     public int getRagdollEntityId() {
         CompoundTag d = getRenderData();
         return d.contains("RagdollId") ? d.getInt("RagdollId") : -1;
@@ -200,15 +210,36 @@ public class CorpseEntity extends Entity {
         return d.contains(key) ? ItemStack.of(d.getCompound(key)) : ItemStack.EMPTY;
     }
 
-    /** Parsed pose transforms (entity-relative) for the renderer, or null if not posed. */
+    // The curios this corpse is wearing, for the renderer. Parsed once per render-data change —
+    // the renderer asks every frame, and rebuilding ItemStacks from NBT that often is not free.
+    // The slot index and flags are synthesised: the captured stacks are what the body was showing,
+    // so each is reported as a visible, non-cosmetic curio in its own slot.
+    public java.util.List<CuriosCompat.WornCurio> getWornCurios() {
+        CompoundTag d = getRenderData();
+        if (cachedCurios != null && d.equals(cachedCuriosSource)) return cachedCurios;
+
+        java.util.List<CuriosCompat.WornCurio> out = new java.util.ArrayList<>();
+        ListTag list = d.getList("Curios", 10); // 10 = CompoundTag
+        for (int i = 0; i < list.size(); i++) {
+            CompoundTag entry = list.getCompound(i);
+            ItemStack stack = ItemStack.of(entry.getCompound("Item"));
+            if (stack.isEmpty()) continue;
+            out.add(new CuriosCompat.WornCurio(entry.getString("Id"), 0, false, true, stack));
+        }
+        cachedCurios = java.util.List.copyOf(out);
+        cachedCuriosSource = d.copy();
+        return cachedCurios;
+    }
+
+    // Parsed pose transforms (entity-relative) for the renderer, or null if not posed.
     @Nullable
     public RagdollTransform[] getCorpsePose() {
         CompoundTag d = getRenderData();
         if (!d.getBoolean("Posed") || !d.contains("Pose")) return null;
         if (cachedPose != null && d.equals(cachedPoseSource)) return cachedPose;
         ListTag pose = d.getList("Pose", 10); // 10 = CompoundTag
-        RagdollTransform[] out = new RagdollTransform[6];
-        for (int i = 0; i < 6 && i < pose.size(); i++) {
+        RagdollTransform[] out = new RagdollTransform[RagdollTransform.MAX_PARTS];
+        for (int i = 0; i < RagdollTransform.MAX_PARTS && i < pose.size(); i++) {
             CompoundTag c = pose.getCompound(i);
             if (c.isEmpty()) continue;
             out[i] = new RagdollTransform(i,
@@ -287,13 +318,10 @@ public class CorpseEntity extends Entity {
         }
     }
 
-    /**
-     * General entity physics (server) — deliberately NOT the JBullet ragdoll simulation. Applies
-     * plain gravity + block collision via {@link #move} so a corpse rests on the ground, drops
-     * when the block under it is broken, and floats up to the surface of water instead of hanging
-     * in midair. Tiny residual drift is zeroed so a settled body stops moving (and stops sending
-     * position updates to clients).
-     */
+    // Ordinary server entity physics, deliberately not the jBullet simulation: plain gravity and
+    // block collision through move(), so a corpse rests on the ground, falls when the block under
+    // it breaks, and rises to the surface of water rather than hanging. Residual drift is zeroed
+    // so a settled body stops moving and stops sending position updates.
     private void tickPhysics() {
         Vec3 m = getDeltaMovement();
 
@@ -326,11 +354,8 @@ public class CorpseEntity extends Entity {
         Containers.dropContents(level(), this, inventory);
     }
 
-    /**
-     * Transfer every stored item (+ any stored XP) directly into {@code target}'s inventory
-     * (overflow drops at their feet), then remove this corpse. Used by the OP retrieve command
-     * — "erase the corpse and give me its items".
-     */
+    // Move every stored item and any XP into the target's inventory, dropping overflow at their
+    // feet, then remove this corpse. Backs the OP retrieve command.
     public void retrieveInto(ServerPlayer target) {
         if (level().isClientSide) return;
         suppressPersistentSync = true;

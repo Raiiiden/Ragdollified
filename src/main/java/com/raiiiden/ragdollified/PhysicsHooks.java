@@ -23,6 +23,10 @@ public class PhysicsHooks {
         LivingEntity entity = event.getEntity();
         if (entity.level().isClientSide) return;
 
+        // Large and medium slimes are replacement/split deaths, not the end of the mob family.
+        // Only the size-one child leaves a corpse; this covers MagmaCube as it extends Slime.
+        if (entity instanceof net.minecraft.world.entity.monster.Slime slime && slime.getSize() > 1) return;
+
         boolean isPlayer = entity instanceof ServerPlayer;
         String mobType = net.minecraft.world.entity.EntityType.getKey(entity.getType()).toString();
         if (!RagdollifiedConfig.isRagdollEnabledFor(mobType, isPlayer)) return;
@@ -35,7 +39,8 @@ public class PhysicsHooks {
             Ragdollified.LOGGER.debug("Sending ragdoll candidate for client-side model detection: {}", mobType);
         }
 
-        Vec3 vel = RagdollSpawnState.captureLinearVelocity(entity);
+        Vec3 vel = RagdollSpawnState.applyAttackerDirectionFallback(
+                entity, event.getSource(), RagdollSpawnState.captureLinearVelocity(entity));
 
         float scale = isPlayer ? 1.0f : entity.getBbHeight() / 1.8f;
         // Use LivingEntity.isBaby() rather than an AgeableMob check: zombies, husks and
@@ -56,6 +61,28 @@ public class PhysicsHooks {
         if (entity instanceof net.minecraft.world.entity.animal.Cat cat) {
             sheepState = RagdollSpawnPacket.packSheepState(cat.isTame(), cat.getCollarColor().getId());
         }
+        if (entity instanceof net.minecraft.world.entity.animal.Wolf wolf) {
+            sheepState = RagdollSpawnPacket.packSheepState(wolf.isTame(), wolf.getCollarColor().getId());
+        }
+        if (entity instanceof net.minecraft.world.entity.animal.goat.Goat goat) {
+            int hornMask = (goat.hasLeftHorn() ? 1 : 0) | (goat.hasRightHorn() ? 2 : 0);
+            sheepState = RagdollSpawnPacket.packSheepState(false, hornMask);
+        }
+        if (entity instanceof net.minecraft.world.entity.animal.Turtle turtle) {
+            sheepState = RagdollSpawnPacket.packSheepState(turtle.hasEgg(), 0);
+        }
+        if (entity instanceof net.minecraft.world.entity.animal.SnowGolem snowGolem) {
+            sheepState = RagdollSpawnPacket.packSheepState(snowGolem.hasPumpkin(), 0);
+        }
+        // Equines multiplex the same compact state: bit0 = donkey/mule chest, bits1-4 =
+        // Horse markings id. Species are mutually exclusive with sheep/cats.
+        if (entity instanceof net.minecraft.world.entity.animal.horse.AbstractHorse horse) {
+            boolean hasChest = horse instanceof net.minecraft.world.entity.animal.horse.AbstractChestedHorse chested
+                    && chested.hasChest();
+            int markings = horse instanceof net.minecraft.world.entity.animal.horse.Horse normalHorse
+                    ? normalHorse.getMarkings().getId() : 0;
+            sheepState = RagdollSpawnPacket.packSheepState(hasChest, markings);
+        }
 
         // Generic overlay-state bits for mobs whose corpse needs an extra layer based on
         // a single boolean (charged creeper → energy swirl, saddled pig → saddle, …).
@@ -66,6 +93,13 @@ public class PhysicsHooks {
         }
         if (entity instanceof net.minecraft.world.entity.animal.Pig pig && pig.isSaddled()) {
             overlayState |= 0x2;
+        }
+        if (entity instanceof net.minecraft.world.entity.monster.Strider strider && strider.isSaddled()) {
+            overlayState |= 0x2;
+        }
+        // The charged-creeper bit is also the equine saddle bit; the mob type disambiguates it.
+        if (entity instanceof net.minecraft.world.entity.animal.horse.AbstractHorse horse && horse.isSaddled()) {
+            overlayState |= 0x1;
         }
 
         // Villager / zombie villager profession state. Captured as registry-key strings
@@ -93,6 +127,10 @@ public class PhysicsHooks {
         ServerRagdollHitTracker.HitInfo hitInfo = ServerRagdollHitTracker.consume(entity.getId());
         byte hitPartIndex = -1;
         float hitImpulseX = 0f, hitImpulseY = 0f, hitImpulseZ = 0f;
+        // Lever arm for the death impulse, relative to the entity origin. A blow through the
+        // centre of mass produces no torque at all, so without this a struck body only ever
+        // slides — it never tips over.
+        float hitOffsetX = 0f, hitOffsetY = 0f, hitOffsetZ = 0f;
         Vec3 explosionKick = RagdollSpawnState.captureExplosionVelocityKick(entity, event.getSource());
         if (explosionKick != null) {
             hitPartIndex = (byte) RagdollHitMapper.GLOBAL_VELOCITY_KICK_INDEX;
@@ -110,6 +148,12 @@ public class PhysicsHooks {
                 hitImpulseX = (float) impulse.x;
                 hitImpulseY = (float) impulse.y;
                 hitImpulseZ = (float) impulse.z;
+                if (hitInfo.hitPos != null) {
+                    Vec3 origin = entity.position();
+                    hitOffsetX = (float) (hitInfo.hitPos.x - origin.x);
+                    hitOffsetY = (float) (hitInfo.hitPos.y - origin.y);
+                    hitOffsetZ = (float) (hitInfo.hitPos.z - origin.z);
+                }
             }
         }
 
@@ -137,6 +181,7 @@ public class PhysicsHooks {
                 entity.getItemBySlot(EquipmentSlot.FEET).copy(),
                 sheepState,
                 hitPartIndex, hitImpulseX, hitImpulseY, hitImpulseZ,
+                hitOffsetX, hitOffsetY, hitOffsetZ,
                 overlayState,
                 villagerType, villagerProfession, villagerLevel
         );

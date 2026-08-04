@@ -65,7 +65,7 @@ minecraft {
             if (project.hasProperty('mc_accessToken')) {
                 args '--accessToken', project.getProperty('mc_accessToken')
             }
-            //args '--username', 'PlayerTwo'
+            args '--username', 'PlayerTwo'
         }
 
         server {
@@ -137,12 +137,13 @@ dependencies {
 
     annotationProcessor "org.spongepowered:mixin:${mixin_version}:processor"
     implementation fg.deobf("curse.maven:configured-457570:5180900")
-    //implementation fg.deobf("curse.maven:better-blood-overlay-1332112:8246453")
+    //implementation fg.deobf("curse.maven:better-blood-overlay-1332112:8405671")
+    //implementation fg.deobf("curse.maven:visual-health-1473785:8368722")
+    //implementation fg.deobf("curse.maven:curios-309927:6418456")
     //implementation fg.deobf("curse.maven:timeless-and-classics-zero-1028108:6654541")
     //implementation fg.deobf("curse.maven:entity-texture-features-fabric-568563:7249541")
     //implementation fg.deobf("curse.maven:entity-model-features-844662:7260324")
     //implementation fg.deobf("curse.maven:geckolib-388172:7553267")
-    //implementation fg.deobf("curse.maven:curios-309927:6418456")
     //implementation fg.deobf("curse.maven:fracture-point-1207137:7215903")
     //implementation fg.deobf("curse.maven:spark-361579:4738952")
     //implementation fg.deobf("curse.maven:lesraisins-armor-1021131:7343690")

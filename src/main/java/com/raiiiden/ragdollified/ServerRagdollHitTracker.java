@@ -17,30 +17,17 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 
-/**
- * Server-side counterpart to {@code RagdollHitTracker}. The reason this exists in
- * addition to the client tracker:
- *
- * <p>{@code PhysicsHooks.onLivingDeath} runs <i>inside</i> {@code LivingEntity.die()},
- * which runs inside {@code LivingEntity.hurt()}. TACZ posts {@code EntityHurtByGunEvent.Post}
- * (and its mirror {@code ServerMessageGunHurt} packet) only <b>after</b> hurt() returns.
- * That means for a fatal shot:</p>
- *
- * <ol>
- *   <li>tacAttackEntity → hurt() → die() → LivingDeathEvent → PhysicsHooks queues RagdollSpawnPacket</li>
- *   <li>hurt() returns → EntityHurtByGunEvent.Post fires → ServerMessageGunHurt queued</li>
- * </ol>
- *
- * <p>Both packets ship same tick, but RagdollSpawnPacket is queued first, so it arrives
- * first on the client — which means the client tracker is empty when handleClient runs.
- * Result: kills look right intermittently (only when the target had already taken a hit
- * one tick earlier). To fix that race, we capture on the <b>Pre</b> event server-side
- * (which fires <i>before</i> hurt()), and {@link PhysicsHooks} reads from us to bake the
- * hit info directly into the spawn packet — no race window.</p>
- *
- * <p>Also subscribes to {@code LivingHurtEvent} so vanilla projectiles (arrows / tridents /
- * snowballs) get the same treatment when no TACZ event fires.</p>
- */
+// Server-side counterpart to RagdollHitTracker, existing to close a packet-ordering race.
+//
+// PhysicsHooks.onLivingDeath runs inside LivingEntity.die(), itself inside hurt(). TACZ posts
+// EntityHurtByGunEvent.Post only after hurt() returns, so a fatal shot goes: hurt, die,
+// LivingDeathEvent queues RagdollSpawnPacket, hurt returns, then the gun-hurt packet queues.
+// Both ship the same tick but the spawn packet is first, so the client tracker is still empty
+// when it arrives and kills only looked right when the target had been hit a tick earlier.
+//
+// Capturing on the Pre event, before hurt(), lets PhysicsHooks bake the hit info straight into
+// the spawn packet with no race window. LivingHurtEvent is covered too so vanilla projectiles
+// get the same treatment when no TACZ event fires.
 @Mod.EventBusSubscriber(modid = Ragdollified.MODID, bus = Mod.EventBusSubscriber.Bus.FORGE)
 public final class ServerRagdollHitTracker {
 
@@ -78,12 +65,9 @@ public final class ServerRagdollHitTracker {
     private static final long ENTRY_TTL_MS = 10_000L;
     private static int cleanupTick = 0;
 
-    /**
-     * Captures a TACZ hit on the server side, BEFORE hurt() runs. Listening on Pre is
-     * critical for fatal kills — see class javadoc for the race we're avoiding. We use
-     * EventPriority.HIGHEST so we run before any handler that might cancel the event,
-     * but it doesn't really matter (we don't mutate the event).
-     */
+    // Captures a TACZ hit before hurt() runs. Pre is what makes fatal kills work — see the
+    // class comment. HIGHEST priority puts this ahead of anything that might cancel the event,
+    // though it hardly matters since nothing here mutates it.
     public static void registerOptionalTaczHandler(IEventBus forgeBus) {
         if (!ModList.get().isLoaded("tacz")) return;
         try {
@@ -120,12 +104,9 @@ public final class ServerRagdollHitTracker {
         maybeCleanup();
     }
 
-    /**
-     * Vanilla projectile fallback (arrows, tridents, snowballs). Fires before TACZ's Pre
-     * for non-TACZ damage; the TACZ handler above never fires for vanilla projectiles, so
-     * there's no double-write conflict. Skip non-projectile damage to avoid creating
-     * entries for melee, fire, fall, etc.
-     */
+    // Vanilla projectile fallback for arrows, tridents, and snowballs. No conflict with the
+    // TACZ handler above, which never fires for these. Non-projectile damage is skipped so
+    // melee, fire, and fall never create entries.
     @SubscribeEvent(priority = EventPriority.HIGH)
     public static void onLivingHurt(LivingHurtEvent event) {
         if (event.getEntity().level().isClientSide) return;
@@ -182,16 +163,13 @@ public final class ServerRagdollHitTracker {
         return start.add(segment.scale(t));
     }
 
-    /**
-     * Read + remove the captured hit info for the given entity. Called from
-     * {@code PhysicsHooks.onLivingDeath}. Returns null if no hit has been captured for
-     * this entity (e.g., melee kill, fire damage, fall — no projectile in the chain).
-     */
+    // Read and remove an entity's captured hit info, called from PhysicsHooks.onLivingDeath.
+    // Null when nothing was captured — a melee kill, fire, or fall has no projectile in it.
     public static HitInfo consume(int entityId) {
         return HIT_INFO.remove(entityId);
     }
 
-    /** Clear all entries (server stop). */
+    // Clear all entries (server stop).
     public static void clear() {
         HIT_INFO.clear();
     }

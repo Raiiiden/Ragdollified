@@ -19,12 +19,9 @@ import net.minecraft.world.phys.Vec3;
 import javax.annotation.Nullable;
 import java.util.UUID;
 
-/**
- * Locator screen for the {@link CorpseCompassItem}, opened by right-clicking it. Shows the bound
- * corpse's coordinates + owner, a static render of the body (skin + baked death armor) on the left,
- * and a clickable Corpse ID line that copies the OP retrieve command to the clipboard. Purely
- * client-side and informational — it has no server menu; the only "action" is copying text.
- */
+// Locator screen for CorpseCompassItem, opened by right-clicking it: bound corpse coordinates
+// and owner, a static body render with skin and baked death armor, and a clickable Corpse ID
+// that copies the OP retrieve command. Client-side and informational, with no server menu.
 public class CorpseCompassScreen extends Screen {
 
     private static final int PANEL_BG    = 0xFFC6C6C6;

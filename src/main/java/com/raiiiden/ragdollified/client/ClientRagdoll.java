@@ -13,6 +13,8 @@ import com.bulletphysics.dynamics.constraintsolver.TypedConstraint;
 import com.bulletphysics.linearmath.DefaultMotionState;
 import com.bulletphysics.linearmath.Transform;
 import com.raiiiden.ragdollified.*;
+import com.raiiiden.ragdollified.api.DragEnd;
+import com.raiiiden.ragdollified.api.DragTarget;
 import com.raiiiden.ragdollified.config.RagdollifiedConfig;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.core.BlockPos;
@@ -50,6 +52,7 @@ public class ClientRagdoll {
     private final List<TypedConstraint> ragdollJoints = new ArrayList<>(5);
     private BlockPos lastCollisionCenter = BlockPos.ZERO;
     private ClientJbulletWorld.CollisionGeometryHandle currentCollisionGeometry;
+    private int currentCollisionRadius = 0;
     private BlockPos settledTerrainCenter = BlockPos.ZERO;
     private long settledTerrainSignature;
     private boolean hasSettledTerrainSignature;
@@ -64,6 +67,8 @@ public class ClientRagdoll {
     // (single client thread, no contention) — purely to avoid GC pressure from the
     // hundreds of `new Vector3f()` allocations per tick across all active ragdolls.
     private final Vector3f scratchVel = new Vector3f();
+    // Holds a dragged limb's pre-drive velocity so its fall speed survives the drag override.
+    private final Vector3f scratchDragVel = new Vector3f();
     private final Vector3f scratchAng = new Vector3f();
     private final Vector3f scratchNormal = new Vector3f();
     private final Vector3f groupPenetrationCorrection = new Vector3f();
@@ -88,14 +93,101 @@ public class ClientRagdoll {
     private static final float FLUID_SURFACE_BELOW = 1.0f;
     private static final float FLUID_SURFACE_ABOVE = 0.2f;
 
+    // Temporary drag-only collision tuning. Integrations provide target positions only;
+    // these Bullet details stay internal to the physics worker.
+    private static final int DRAG_COLLISION_RADIUS = 5;
+    private static final float DRAG_FRICTION = 0.35f;
+    private static final float DRAG_CCD_MOTION_THRESHOLD = 0.08f;
+    private static final float DRAG_CCD_MIN_RADIUS = 0.12f;
+    private static final float DRAG_STIFFNESS = 7.0f;
+    // Deadbeat gain for the fixed 20 Hz step: one tick of error closes in exactly one tick.
+    private static final float DRAG_MAX_STIFFNESS = 20.0f;
+    // Margin, in squared blocks, by which the swapped limb assignment must win before it is taken.
+    private static final double DRAG_SWAP_HYSTERESIS_SQ = 0.06;
+    private static final float DRAG_TORSO_ASSIST = 0.65f;
+    // Above a sprint, so towing at full speed is not clipped into a permanent trail.
+    private static final float DRAG_TORSO_MAX_SPEED = 9.0f;
+    // A paired velocity pull must not let joint correction accumulate into a somersault.
+    // These are deliberately drag-only: ordinary death ragdolls retain their full spin.
+    private static final float DRAG_ANGULAR_DAMPING = 0.38f;
+    private static final float DRAG_LIMB_MAX_ANGULAR_SPEED = 1.15f;
+    private static final float DRAG_TORSO_MAX_ANGULAR_SPEED = 0.90f;
+    private final Vector3f draggedLimbVelocity = new Vector3f();
+    private final float[] dragOriginalFriction = new float[RagdollTransform.MAX_PARTS];
+    private final float[] dragOriginalCcdThreshold = new float[RagdollTransform.MAX_PARTS];
+    private final float[] dragOriginalCcdRadius = new float[RagdollTransform.MAX_PARTS];
+    private final Vector3f smoothedDragAnchor = new Vector3f();
+    private boolean dragAnchorInitialized;
+    private float dragFacingX = 1f;
+    private float dragFacingZ;
+    private boolean dragFacingInitialized;
+    // Whether the paired drag currently hands the left limb the right-hand target.
+    private boolean dragEndsCrossed;
+    private boolean dragPhysicsActive;
+
 
     // Lifecycle
     private int ticksExisted = 0;
     private final int lifetime;
+    // External integrations can keep a downed body alive until they explicitly remove it.
+    // This is read and written only on the physics worker through ClientRagdollManager.
+    private boolean persistent;
     private boolean destroyed = false;
+
+    // Owner-streamed playback (player bodies on a modded server). A replicated body runs no
+    // solver at all — its rigid bodies are out of the dynamics world and every tick writes an
+    // interpolated stream pose into them instead. That is what removes the correction snap:
+    // an observer never builds a divergent trajectory that has to be overwritten later.
+    private boolean replicated;
+    private final ArrayDeque<StreamedPose> streamPoses = new ArrayDeque<>(STREAM_MAX_BUFFERED);
+    private int lastStreamSequence = Integer.MIN_VALUE;
+    private int ticksSinceStreamPose;
+    private int streamClock;
+    // Set when playback gave up on a silent owner; cleared by the next frame that arrives.
+    private boolean streamTimedOut;
+    // Playback runs this far behind the newest sample so ordinary network jitter has slack
+    // to absorb rather than showing up as a stutter.
+    private static final int STREAM_BUFFER_TICKS = 3;
+    // Owner disconnected, lagged out, or unloaded the area: take the body over locally rather
+    // than leaving it frozen mid-air. This is the same independent simulation mobs always use.
+    private static final int STREAM_TIMEOUT_TICKS = 40;
+    private static final int STREAM_MAX_BUFFERED = 12;
+    // Separate from scratchInterpPos/scratchInterpRot, which belong to the render thread —
+    // stream playback runs on the physics worker and must not share their storage.
+    private final Vector3f streamScratchPos = new Vector3f();
+    private final Quat4f streamScratchRot = new Quat4f();
+
+    // World-space impact point of the killing blow, or null when none was captured. Physics
+    // thread only; used as the lever arm so a death impulse can produce rotation.
+    private Vector3f deathHitPoint;
+    private final Vector3f scratchLever = new Vector3f();
+    private final Vector3f scratchHalfExtents = new Vector3f();
+
+    // One received stream frame, stamped with the local playback tick it arrived on.
+    private static final class StreamedPose {
+        final Vector3f[] positions = new Vector3f[RagdollTransform.MAX_PARTS];
+        final Quat4f[] rotations = new Quat4f[RagdollTransform.MAX_PARTS];
+        final int arrivalTick;
+
+        StreamedPose(RagdollTransform[] transforms, int arrivalTick) {
+            this.arrivalTick = arrivalTick;
+            for (int i = 0; i < RagdollTransform.MAX_PARTS && i < transforms.length; i++) {
+                RagdollTransform transform = transforms[i];
+                if (transform == null || transform.partId != i) continue;
+                positions[i] = new Vector3f(transform.position);
+                rotations[i] = new Quat4f(transform.rotation);
+            }
+        }
+    }
 
     // Settled detection
     private int settledTicks = 0;
+    // Ticks a handed-over body must simulate before it may settle again. Short on purpose: it
+    // only ensures an already-frozen body genuinely wakes rather than re-freezing two ticks
+    // later. When the corpse appears is decided by the body coming to rest, not by this.
+    private static final int HANDOVER_SETTLE_GRACE_TICKS = 20;
+    // Written on the physics worker, read from the client tick by the corpse bridge.
+    private volatile int settleGraceTicks = 0;
     private boolean settled = false;
     private boolean pendingTerrainValidation = false;
     // Set alongside `settled` when the resting surface was fluid (water/lava) instead of
@@ -120,13 +212,13 @@ public class ClientRagdoll {
     private static final float SETTLE_DISPLACEMENT_THRESHOLD_SQ = 0.04f; // (0.2 blocks)²
 
     // Cached transforms — current tick
-    private final RagdollTransform[] cachedTransforms = new RagdollTransform[6];
+    private final RagdollTransform[] cachedTransforms = new RagdollTransform[RagdollTransform.MAX_PARTS];
     private final Vector3f cachedTorsoPos = new Vector3f();
     private final Transform tempTransform = new Transform();
 
     // Previous-tick transforms for render interpolation
-    private final Vector3f[] prevPositions = new Vector3f[6];
-    private final Quat4f[] prevRotations = new Quat4f[6];
+    private final Vector3f[] prevPositions = new Vector3f[RagdollTransform.MAX_PARTS];
+    private final Quat4f[] prevRotations = new Quat4f[RagdollTransform.MAX_PARTS];
     private final Vector3f prevTorsoPos = new Vector3f();
     private boolean hasPrevTransforms = false;
 
@@ -134,15 +226,10 @@ public class ClientRagdoll {
     private final ResourceLocation cachedPlayerSkin;
     private final boolean cachedIsSlim;
 
-    /**
-     * Immutable snapshot of all transform state needed for rendering. Published
-     * atomically by the physics thread at the end of each updateCachedTransforms;
-     * read by the render thread (and click raycast) without any locking.
-     *
-     * Allocations: 1 snapshot + 26 small vectors per ragdoll per physics tick =
-     * ~5MB/sec at 50 ragdolls × 20Hz. Manageable, and the snapshot lifetime is
-     * exactly one tick so it dies young and lives in the eden generation.
-     */
+    // Immutable snapshot of every transform needed for rendering, published atomically by the
+    // physics thread at the end of updateCachedTransforms and read lock-free by the render
+    // thread and click raycast. Costs one snapshot plus 26 small vectors per ragdoll per tick,
+    // about 5 MB/s at 50 ragdolls, which stays in eden because it lives exactly one tick.
     public static final class TransformSnapshot {
         public final Vector3f[] positions;     // 6 part positions (current)
         public final Quat4f[] rotations;       // 6 part rotations (current)
@@ -153,11 +240,14 @@ public class ClientRagdoll {
         public final Vector3f prevTorsoPos;
         public final boolean hasPrev;
         public final boolean destroyed;
+        public final boolean settled;
+        public final boolean frozen;
+        public final int ageTicks;
 
         TransformSnapshot(Vector3f[] positions, Quat4f[] rotations, Vector3f[] halfExtents,
                           Vector3f[] prevPositions, Quat4f[] prevRotations,
                           Vector3f cachedTorsoPos, Vector3f prevTorsoPos,
-                          boolean hasPrev, boolean destroyed) {
+                          boolean hasPrev, boolean destroyed, boolean settled, boolean frozen, int ageTicks) {
             this.positions = positions;
             this.rotations = rotations;
             this.halfExtents = halfExtents;
@@ -167,9 +257,12 @@ public class ClientRagdoll {
             this.prevTorsoPos = prevTorsoPos;
             this.hasPrev = hasPrev;
             this.destroyed = destroyed;
+            this.settled = settled;
+            this.frozen = frozen;
+            this.ageTicks = ageTicks;
         }
 
-        /** Interpolated transform for the given part — for use on render thread. */
+        // Interpolated transform for the given part — for use on render thread.
         public RagdollTransform getInterpolatedTransform(RagdollPart part, float partialTick) {
             int i = part.index;
             if (i >= positions.length || positions[i] == null) return null;
@@ -199,11 +292,8 @@ public class ClientRagdoll {
         }
     }
 
-    /**
-     * The latest published transform state. Written by the physics thread inside
-     * publishSnapshot(); read freely by the render thread. Volatile guarantees
-     * visibility — every render-thread read sees a consistent snapshot.
-     */
+    // Latest published transform state: written by the physics thread in publishSnapshot(),
+    // read freely by the render thread. Volatile, so every read sees a consistent snapshot.
     private volatile TransformSnapshot publishedSnapshot = null;
 
     public TransformSnapshot getSnapshot() { return publishedSnapshot; }
@@ -220,21 +310,35 @@ public class ClientRagdoll {
     // SMOOTHING_RATE = 25 → half-life ~28ms, enough to kill 50ms-period jitter
     // (the typical tick-to-tick wobble) without visible lag on real motion.
     private static final float SMOOTHING_RATE = 25f;
-    private final Vector3f[] smoothPositions = new Vector3f[6];
-    private final Quat4f[] smoothRotations = new Quat4f[6];
+    // A settled pose from the server is a hard transform write onto a body this client had
+    // simulated independently. At the normal rate the resulting correction crosses the gap in
+    // ~85 ms, which reads as a pop; this rate (~115 ms half-life) spreads it over the ease
+    // window instead. Only used while correctionEaseUntilNanos is in the future.
+    private static final float CORRECTION_SMOOTHING_RATE = 6f;
+    private static final long CORRECTION_EASE_NANOS = 350_000_000L;
+    // Written on the physics worker, read on the render thread.
+    private volatile long correctionEaseUntilNanos = 0L;
+    private final Vector3f[] smoothPositions = new Vector3f[RagdollTransform.MAX_PARTS];
+    private final Quat4f[] smoothRotations = new Quat4f[RagdollTransform.MAX_PARTS];
     private final Vector3f smoothTorsoPos = new Vector3f();
     private boolean smoothInitialized = false;
     private long smoothLastFrameNanos = 0;
+    private long smoothRenderFrame = Long.MIN_VALUE;
     // Reusable scratch for per-frame interpolation (render thread only)
     private final Vector3f scratchInterpPos = new Vector3f();
     private final Quat4f scratchInterpRot = new Quat4f();
 
-    /**
-     * Update the smoothed render state from the latest snapshot. Called once per
-     * ragdoll per frame from the renderer. Render thread only.
-     */
+    // Update the smoothed render state from the latest snapshot, once per ragdoll per frame
+    // from the renderer. Render thread only.
     public void updateSmoothedRenderState(TransformSnapshot snap, float partialTick) {
+        updateSmoothedRenderState(snap, partialTick, Long.MIN_VALUE);
+    }
+
+    // Update once per render frame. The camera prepares its attached ragdoll before world
+    // rendering, so the renderer's later call with the same token is deliberately a no-op.
+    public void updateSmoothedRenderState(TransformSnapshot snap, float partialTick, long renderFrame) {
         if (snap == null || snap.destroyed) return;
+        if (renderFrame != Long.MIN_VALUE && smoothRenderFrame == renderFrame) return;
 
         long now = System.nanoTime();
         // First call after a long gap (or initial frame) → snap to current value
@@ -245,10 +349,11 @@ public class ClientRagdoll {
         float dt = needInit ? 0f : (now - smoothLastFrameNanos) / 1_000_000_000f;
         smoothLastFrameNanos = now;
 
-        float alpha = needInit ? 1f : (float) (1.0 - Math.exp(-dt * SMOOTHING_RATE));
+        float rate = now < correctionEaseUntilNanos ? CORRECTION_SMOOTHING_RATE : SMOOTHING_RATE;
+        float alpha = needInit ? 1f : (float) (1.0 - Math.exp(-dt * rate));
 
         // Smooth each part
-        for (int i = 0; i < snap.positions.length && i < 6; i++) {
+        for (int i = 0; i < snap.positions.length && i < RagdollTransform.MAX_PARTS; i++) {
             if (snap.positions[i] == null) continue;
             // Compute the snapshot-interpolated target for this part
             interpolateInto(snap, i, partialTick, scratchInterpPos, scratchInterpRot);
@@ -275,21 +380,23 @@ public class ClientRagdoll {
         }
 
         smoothInitialized = true;
+        smoothRenderFrame = renderFrame;
     }
 
-    /**
-     * Returns a transform built from the smoothed render state. Allocates a fresh
-     * RagdollTransform — caller (renderer) treats it as immutable for the frame.
-     */
+    // Transform built from the smoothed render state. Allocates a fresh RagdollTransform the
+    // renderer treats as immutable for the frame.
     public RagdollTransform getSmoothedTransform(RagdollPart part) {
-        int i = part.index;
-        if (i >= 6 || smoothPositions[i] == null) return null;
-        return new RagdollTransform(i, smoothPositions[i], smoothRotations[i]);
+        return getSmoothedTransform(part.index);
     }
 
-    public Vector3f getSmoothedTorsoPos() { return smoothTorsoPos; }
+    public RagdollTransform getSmoothedTransform(int i) {
+        if (i < 0 || i >= RagdollTransform.MAX_PARTS || smoothPositions[i] == null) return null;
+        return new RagdollTransform(i, new Vector3f(smoothPositions[i]), new Quat4f(smoothRotations[i]));
+    }
 
-    /** Helper — write the snapshot's interpolated transform into the provided buffers. */
+    public Vector3f getSmoothedTorsoPos() { return new Vector3f(smoothTorsoPos); }
+
+    // Helper — write the snapshot's interpolated transform into the provided buffers.
     private static void interpolateInto(TransformSnapshot snap, int i, float t,
                                         Vector3f outPos, Quat4f outRot) {
         Vector3f curr = snap.positions[i];
@@ -307,7 +414,7 @@ public class ClientRagdoll {
         slerpInto(prevRot, currRot, t, outRot);
     }
 
-    /** Slerp a→b by t, written into out (which may alias a or b). */
+    // Slerp a→b by t, written into out (which may alias a or b).
     private static void slerpInto(Quat4f a, Quat4f b, float t, Quat4f out) {
         float dot = a.x*b.x + a.y*b.y + a.z*b.z + a.w*b.w;
         float bx = b.x, by = b.y, bz = b.z, bw = b.w;
@@ -386,6 +493,8 @@ public class ClientRagdoll {
         // that kills a mob whips the right body part in the bullet's travel direction.
         public final int hitPartIndex;
         public final Vec3 hitImpulse;
+        // Impact point relative to position; null when none was captured.
+        public final Vec3 hitOffset;
         // Sheep state captured at death so the renderer can decide whether to draw the
         // wool layer and which dye color to tint it. Ignored for non-sheep mobs.
         public final boolean wasSheared;
@@ -490,6 +599,7 @@ public class ClientRagdoll {
                          boolean wasSheared, int dyeColorId,
                          boolean chargedCreeper, boolean saddledPig,
                          String villagerType, String villagerProfession, int villagerLevel) {
+            this.hitOffset = null;
             this.originalEntityId = originalEntityId;
             this.isPlayer = isPlayer;
             this.mobType = mobType;
@@ -551,6 +661,28 @@ public class ClientRagdoll {
                          boolean wasSheared, int dyeColorId,
                          boolean chargedCreeper, boolean saddledPig,
                          String villagerType, String villagerProfession, int villagerLevel) {
+            this(originalEntityId, isPlayer, mobType, modelType, scale, playerUUID, playerName,
+                    helmet, chestplate, leggings, boots, position, yRot, xRot, velocity,
+                    capturedPose, isSwimming, isBaby, texture, hitPartIndex, hitImpulse, null,
+                    wasSheared, dyeColorId, chargedCreeper, saddledPig,
+                    villagerType, villagerProfession, villagerLevel);
+        }
+
+        // Canonical form. hitOffset is the impact point relative to position — the lever arm
+        // that turns the death impulse into rotation. Null means none was captured, falling
+        // back to a torque-free centre-of-mass impulse.
+        public SpawnData(int originalEntityId, boolean isPlayer, String mobType,
+                         MobModelHelper.ModelType modelType, float scale,
+                         UUID playerUUID, String playerName,
+                         ItemStack helmet, ItemStack chestplate, ItemStack leggings, ItemStack boots,
+                         Vec3 position, float yRot, float xRot, Vec3 velocity,
+                         MobPoseCapture.MobPose capturedPose, boolean isSwimming, boolean isBaby,
+                         ResourceLocation texture,
+                         int hitPartIndex, Vec3 hitImpulse, Vec3 hitOffset,
+                         boolean wasSheared, int dyeColorId,
+                         boolean chargedCreeper, boolean saddledPig,
+                         String villagerType, String villagerProfession, int villagerLevel) {
+            this.hitOffset = hitOffset;
             this.originalEntityId = originalEntityId;
             this.isPlayer = isPlayer;
             this.mobType = mobType;
@@ -627,16 +759,22 @@ public class ClientRagdoll {
         // first rendered frame already shows the recoil. Runs on the physics worker
         // (we're inside processSpawnQueue), so direct jbullet calls are safe here.
         if (data.hitImpulse != null) {
+            // World-space impact point, used as the lever arm below.
+            deathHitPoint = data.hitOffset == null ? null : new Vector3f(
+                    (float) (data.position.x + data.hitOffset.x),
+                    (float) (data.position.y + data.hitOffset.y),
+                    (float) (data.position.z + data.hitOffset.z));
+            float sizeScale = modelSizeVelocityScale();
             if (data.hitPartIndex == RagdollHitMapper.GLOBAL_VELOCITY_KICK_INDEX) {
-                applyGlobalVelocityKick(data.hitImpulse);
+                applyGlobalVelocityKick(data.hitImpulse.scale(sizeScale));
             } else if (data.hitPartIndex == CENTER_HIT_PART_INDEX) {
                 applyCenteredDeathImpulse(data.hitImpulse);
             } else if (data.hitPartIndex >= 0 && data.hitPartIndex < ragdollParts.size()) {
                 RagdollPart part = RagdollPart.byIndex(data.hitPartIndex);
                 RigidBody body = ragdollParts.get(data.hitPartIndex);
                 body.activate(true);
-                body.applyCentralImpulse(scaledImpulse(data.hitImpulse,
-                        part != null ? RagdollifiedConfig.getDeathPartKnockbackMultiplier(part) : 1.0f));
+                applyOffCentreImpulse(body, scaledImpulse(data.hitImpulse, sizeScale
+                        * (part != null ? RagdollifiedConfig.getDeathPartKnockbackMultiplier(part) : 1.0f)));
             }
         }
         // Resolve player skin + slim variant NOW, while the entity is still loaded. Resolving
@@ -657,11 +795,9 @@ public class ClientRagdoll {
     // Tick — mirrors MobRagdollPhysics.update() order exactly
     // ============================
 
-    /**
-     * Aggregated per-phase timings across all ragdoll ticks in the current cycle.
-     * Reset at the start of each ClientRagdollManager.tickAll() and logged at the end.
-     * Public so the manager can read and reset; not thread-safe (client thread only).
-     */
+    // Per-phase timings aggregated across every ragdoll tick in the current cycle, reset at the
+    // start of ClientRagdollManager.tickAll() and logged at the end. Public so the manager can
+    // read and reset it; not thread-safe, client thread only.
     public static final class PhaseStats {
         public long updateCachedTransformsNanos;
         public long velocityClampNanos;
@@ -694,6 +830,13 @@ public class ClientRagdoll {
     public void tick(Vec3 cameraPos) {
         if (destroyed) return;
 
+        // Replicated bodies are driven entirely by the owner's stream. Checked before the
+        // cached-transform read because playback writes the transforms it then publishes.
+        if (replicated) {
+            tickReplicated();
+            return;
+        }
+
         long t = System.nanoTime();
         updateCachedTransforms();
         PHASE_STATS.updateCachedTransformsNanos += System.nanoTime() - t;
@@ -701,7 +844,7 @@ public class ClientRagdoll {
         if (settled) {
             // Settled bodies keep aging toward despawn even while the player is away.
             ticksExisted++;
-            if (ticksExisted >= lifetime) {
+            if (!persistent && ticksExisted >= lifetime) {
                 destroy();
                 return;
             }
@@ -722,7 +865,7 @@ public class ClientRagdoll {
                 settledGroundSupportBlocks.clear();
                 if (!atSurface) settledGroundSupportBlocks.addAll(activeGroundSupportBlocks);
                 settledTerrainCenter = torsoBlock;
-                settledTerrainSignature = computeTerrainSignature(torsoBlock);
+                settledTerrainSignature = computeTerrainSignature(torsoBlock,baseCollisionRadius());
                 hasSettledTerrainSignature = true;
             }
             // Periodic support check — ragdolls don't always get a NeighborNotifyEvent
@@ -732,7 +875,7 @@ public class ClientRagdoll {
             // wake up and force the collision cache to rebuild.
             boolean terrainChanged = hasSettledTerrainSignature
                     && Math.floorMod(ticksExisted + id, 20) == 0
-                    && computeTerrainSignature(settledTerrainCenter) != settledTerrainSignature;
+                    && computeTerrainSignature(settledTerrainCenter,baseCollisionRadius()) != settledTerrainSignature;
             boolean supportLost = false;
             boolean submergedBelowSurface = false;
             if (ticksExisted % 10 == 0) {
@@ -769,7 +912,7 @@ public class ClientRagdoll {
 
         // Actively simulating now — advance the lifetime clock (skipped while paused above).
         ticksExisted++;
-        if (ticksExisted >= lifetime) {
+        if (!persistent && ticksExisted >= lifetime) {
             destroy();
             return;
         }
@@ -851,7 +994,7 @@ public class ClientRagdoll {
         }
     }
 
-    /** True if this ragdoll is actively being simulated (not destroyed, settled, or frozen). */
+    // True if this ragdoll is actively being simulated (not destroyed, settled, or frozen).
     public boolean isActivelySimulating() {
         return !destroyed && !settled && !bodiesFrozen;
     }
@@ -867,12 +1010,9 @@ public class ClientRagdoll {
         return true;
     }
 
-    /**
-     * Wake from settled state because the support floor is gone. Drops the cached
-     * collision geometry so the next physics tick rebuilds without the missing block,
-     * AND invalidates nearby cache entries so other ragdolls in the same area also
-     * see fresh geometry. Called from the periodic floor check in tick().
-     */
+    // Wake from settled because the support floor is gone. Drops this body's cached collision
+    // geometry so the next tick rebuilds without the missing block, and invalidates nearby cache
+    // entries so other ragdolls in the area see fresh geometry too. From the floor check in tick().
     private void unsettleAndDropCache() {
         settled = false;
         pendingTerrainValidation = false;
@@ -887,7 +1027,7 @@ public class ClientRagdoll {
                 (int) Math.floor(cachedTorsoPos.x),
                 (int) Math.floor(cachedTorsoPos.y),
                 (int) Math.floor(cachedTorsoPos.z));
-        physicsWorld.invalidateCacheRegion(torsoBlock, COLLISION_RADIUS);
+        physicsWorld.invalidateCacheRegion(torsoBlock,baseCollisionRadius());
         releaseCurrentCollisionGeometry();
     }
 
@@ -903,7 +1043,7 @@ public class ClientRagdoll {
                     && settledTerrainCenter.equals(lastCollisionCenter)) {
                 settledTerrainSignature = currentCollisionGeometry.terrainSignature();
             } else {
-                settledTerrainSignature = computeTerrainSignature(settledTerrainCenter);
+                settledTerrainSignature = computeTerrainSignature(settledTerrainCenter,baseCollisionRadius());
             }
             hasSettledTerrainSignature = true;
         } else {
@@ -942,6 +1082,18 @@ public class ClientRagdoll {
     }
 
     private void updateSettledState() {
+        // A body handed back as a fresh death ragdoll is already lying still, so the two-tick
+        // velocity gate below would re-freeze it within a tenth of a second — waking it achieved
+        // nothing visible. Hold the settle off until it has actually simulated for a while.
+        if (settleGraceTicks > 0) {
+            settleGraceTicks--;
+            settledTicks = 0;
+            // Drag the displacement anchor along too, or that fallback fires the moment the
+            // grace expires and undoes the whole point of it.
+            settleAnchorPos.set(cachedTorsoPos);
+            settleAnchorTick = ticksExisted;
+            return;
+        }
         boolean onGround = collisionGeometryReadyForContacts() && collectTerrainGroundContacts();
         boolean atSurface = isFloatingAtSurface();
         if (!atSurface && isSubmergedBelowSurface()) {
@@ -1218,7 +1370,8 @@ public class ClientRagdoll {
             int dx = Math.abs(lastCollisionCenter.getX() - changedPos.getX());
             int dy = Math.abs(lastCollisionCenter.getY() - changedPos.getY());
             int dz = Math.abs(lastCollisionCenter.getZ() - changedPos.getZ());
-            if (dx <= COLLISION_RADIUS && dy <= COLLISION_RADIUS && dz <= COLLISION_RADIUS) {
+            int radius=currentCollisionRadius>0?currentCollisionRadius:baseCollisionRadius();
+            if (dx <= radius && dy <= radius && dz <= radius) {
                 releaseCurrentCollisionGeometry();
             }
         }
@@ -1228,7 +1381,8 @@ public class ClientRagdoll {
             double dx = changedPos.getX() + 0.5 - cachedTorsoPos.x;
             double dy = changedPos.getY() + 0.5 - cachedTorsoPos.y;
             double dz = changedPos.getZ() + 0.5 - cachedTorsoPos.z;
-            if (dx*dx + dy*dy + dz*dz < (COLLISION_RADIUS+1)*(COLLISION_RADIUS+1)) {
+            int radius=baseCollisionRadius();
+            if (dx*dx + dy*dy + dz*dz < (radius+1)*(radius+1)) {
                 settled = false;
                 pendingTerrainValidation = false;
                 settledOnLiquid = false;
@@ -1240,21 +1394,18 @@ public class ClientRagdoll {
         }
     }
 
-    /** @deprecated use {@link #onBlockChangedNear} which also invalidates stale cache. */
+    // Deprecated: use onBlockChangedNear, which also invalidates the stale cache.
     @Deprecated
     public void wakeIfNear(BlockPos changedPos) {
         onBlockChangedNear(changedPos);
     }
 
-    /**
-     * Wake this ragdoll if an active ragdoll's torso is within 2 blocks.
-     * Settled bodies use DISABLE_SIMULATION so active ragdolls would otherwise fall through
-     * them. The wake loop now runs BEFORE the physics step, so waking here ensures the
-     * settled bodies are back in the broadphase before contacts are resolved.
-     * 2-block radius (vs old 3) still stops cascade activation in dense piles while giving
-     * enough margin to account for up to ~0.5 blocks of movement per tick.
-     */
-    /** Returns true if this ragdoll was woken, false if it was already active or out of range. */
+    // Wake this ragdoll when an active one's torso comes within 2 blocks. Settled bodies use
+    // DISABLE_SIMULATION, so active ragdolls would otherwise fall straight through them. The
+    // wake loop runs before the physics step, putting settled bodies back in the broadphase
+    // before contacts resolve. 2 blocks rather than 3 still avoids cascade activation in dense
+    // piles while leaving margin for ~0.5 blocks of movement per tick.
+    // Returns true if this ragdoll was woken, false if it was already active or out of range.
     public boolean wakeIfNearRagdoll(Vector3f otherTorsoPos) {
         if (!settled) return false; // distance-frozen bodies are too far to matter
         // Water-settled corpses don't need cascade-wake. Bodies are removed from the world
@@ -1293,9 +1444,12 @@ public class ClientRagdoll {
             releaseCurrentCollisionGeometry();
         }
 
-        if (center.equals(lastCollisionCenter) && currentCollisionGeometry != null) {
+        int collisionRadius = dragPhysicsActive
+                ? Math.max(DRAG_COLLISION_RADIUS,baseCollisionRadius()) : baseCollisionRadius();
+        if (center.equals(lastCollisionCenter) && currentCollisionGeometry != null
+                && currentCollisionRadius == collisionRadius) {
             if (Math.floorMod(ticksExisted + id, 20) != 0) return;
-            long currentSignature = computeTerrainSignature(center);
+            long currentSignature = computeTerrainSignature(center,collisionRadius);
             if (currentSignature == currentCollisionGeometry.terrainSignature()) return;
             physicsWorld.invalidateCollisionGeometry(currentCollisionGeometry);
             releaseCurrentCollisionGeometry();
@@ -1313,7 +1467,7 @@ public class ClientRagdoll {
         // much larger narrowphase loss.
         ClientJbulletWorld.CollisionGeometryHandle newGeometry =
                 physicsWorld.getOrCreateCollisionGeometry(
-                        center, COLLISION_RADIUS, isOutrunningCollisionGeometry(),
+                        center, collisionRadius, isOutrunningCollisionGeometry(),
                         this::buildBlockCollisionGeometry);
 
         if (newGeometry == null) {
@@ -1328,6 +1482,7 @@ public class ClientRagdoll {
         }
 
         lastCollisionCenter = center;
+        currentCollisionRadius = collisionRadius;
         currentCollisionGeometry = newGeometry;
         collisionGeometryAcquiredTick = physicsWorld.getTickCount();
 
@@ -1336,12 +1491,9 @@ public class ClientRagdoll {
         // the new geometry within 1-2 substeps naturally.
     }
 
-    /**
-     * True when the torso is moving fast enough that keeping stale geometry for a tick
-     * risks it leaving its own COLLISION_RADIUS bubble and tunnelling. At the threshold
-     * the torso covers 0.5 blocks/tick, so it still has ~6 ticks of margin — enough that
-     * losing one or two rebuilds to the budget is survivable, but not many more.
-     */
+    // True when the torso moves fast enough that a tick of stale geometry risks it leaving its
+    // COLLISION_RADIUS bubble and tunnelling. At the threshold it covers 0.5 blocks a tick,
+    // leaving ~6 ticks of margin — enough to survive losing a rebuild or two to the budget.
     private boolean isOutrunningCollisionGeometry() {
         if (ragdollParts.isEmpty()) return false;
         // Torso only: parts are jointed so it tracks the body as a whole, and the
@@ -1392,11 +1544,13 @@ public class ClientRagdoll {
         return new ClientJbulletWorld.BuiltBlockCollisionGeometry(bodies, stateId);
     }
 
-    private long computeTerrainSignature(BlockPos center) {
+    private int baseCollisionRadius(){return getBodyProfile()==RagdollBodyFactory.BodyProfile.GHAST?6:COLLISION_RADIUS;}
+
+    private long computeTerrainSignature(BlockPos center,int radius) {
         long signature = terrainSignatureSeed();
-        for (int dx = -COLLISION_RADIUS; dx <= COLLISION_RADIUS; dx++) {
-            for (int dy = -COLLISION_RADIUS; dy <= COLLISION_RADIUS; dy++) {
-                for (int dz = -COLLISION_RADIUS; dz <= COLLISION_RADIUS; dz++) {
+        for (int dx = -radius; dx <= radius; dx++) {
+            for (int dy = -radius; dy <= radius; dy++) {
+                for (int dz = -radius; dz <= radius; dz++) {
                     terrainScanPos.set(
                             center.getX() + dx, center.getY() + dy, center.getZ() + dz);
                     signature = mixTerrainSignature(
@@ -1452,6 +1606,22 @@ public class ClientRagdoll {
         if (data.isSwimming) xRotDeg = 90;
 
         float spawnYOffset = isPlayer ? 1.2f : (modelType == MobModelHelper.ModelType.QUADRUPED ||
+                modelType == MobModelHelper.ModelType.WOLF || modelType == MobModelHelper.ModelType.FOX ||
+                modelType == MobModelHelper.ModelType.PANDA ||
+                modelType == MobModelHelper.ModelType.GOAT || modelType == MobModelHelper.ModelType.POLAR_BEAR ||
+                modelType == MobModelHelper.ModelType.TURTLE ||
+                modelType == MobModelHelper.ModelType.CAMEL || modelType == MobModelHelper.ModelType.LLAMA ||
+                modelType == MobModelHelper.ModelType.RABBIT || modelType == MobModelHelper.ModelType.FROG ||
+                modelType == MobModelHelper.ModelType.HOGLIN || modelType == MobModelHelper.ModelType.SNIFFER ||
+                modelType == MobModelHelper.ModelType.RAVAGER || modelType == MobModelHelper.ModelType.PHANTOM ||
+                modelType == MobModelHelper.ModelType.PARROT || modelType == MobModelHelper.ModelType.SLIME ||
+                modelType == MobModelHelper.ModelType.MAGMA_CUBE ||
+                modelType == MobModelHelper.ModelType.SILVERFISH || modelType == MobModelHelper.ModelType.ENDERMITE ||
+                modelType == MobModelHelper.ModelType.ALLAY || modelType == MobModelHelper.ModelType.STRIDER ||
+                modelType == MobModelHelper.ModelType.SNOW_GOLEM || modelType == MobModelHelper.ModelType.BLAZE ||
+                modelType == MobModelHelper.ModelType.SPIDER || modelType == MobModelHelper.ModelType.SHULKER ||
+                modelType == MobModelHelper.ModelType.GHAST || modelType == MobModelHelper.ModelType.VEX ||
+                modelType == MobModelHelper.ModelType.WARDEN ||
                 modelType == MobModelHelper.ModelType.CHICKEN ? 0f : 1.2f);
         // Baby humanoids are built at half size, so their torso centre sits ~half as high —
         // spawn them lower or they'd drop in from an adult's chest height.
@@ -1475,9 +1645,71 @@ public class ClientRagdoll {
             spawnYOffset = isBabySheep() ? 0.47f : 0.94f;
         } else if (bodyProfile == RagdollBodyFactory.BodyProfile.CAT) {
             spawnYOffset = isBabyCat() ? 0.20f : 0.36f;
+        } else if (bodyProfile == RagdollBodyFactory.BodyProfile.WOLF) {
+            spawnYOffset = isBabyWolf() ? 0.3125f : 0.625f;
+        } else if (bodyProfile == RagdollBodyFactory.BodyProfile.FOX) {
+            spawnYOffset = isBabyFox() ? 0.234375f : 0.469f;
+        } else if (bodyProfile == RagdollBodyFactory.BodyProfile.PANDA) {
+            spawnYOffset = isBabyPanda() ? 0.270833f : 0.875f;
+        } else if (bodyProfile == RagdollBodyFactory.BodyProfile.GOAT) {
+            spawnYOffset = isBabyGoat() ? 0.34375f : 0.6875f;
+        } else if (bodyProfile == RagdollBodyFactory.BodyProfile.POLAR_BEAR) {
+            spawnYOffset = isBabyPolarBear() ? 0.50625f : 1.0125f;
+        } else if (bodyProfile == RagdollBodyFactory.BodyProfile.TURTLE) {
+            spawnYOffset = isBabyTurtle() ? 0.046875f : 0.28125f;
+        } else if (bodyProfile == RagdollBodyFactory.BodyProfile.CAMEL) {
+            spawnYOffset = isBabyCamel() ? 0.73078f : 1.625f;
+        } else if (bodyProfile == RagdollBodyFactory.BodyProfile.LLAMA) {
+            spawnYOffset = isBabyLlama() ? 0.363636f : 1.0625f;
+        } else if (bodyProfile == RagdollBodyFactory.BodyProfile.RABBIT) {
+            spawnYOffset = isBabyRabbit() ? 0.156f : 0.234f;
+        } else if (bodyProfile == RagdollBodyFactory.BodyProfile.FROG) {
+            spawnYOffset = 0.15625f;
+        } else if (bodyProfile == RagdollBodyFactory.BodyProfile.HOGLIN) {
+            spawnYOffset = isBabyHoglin() ? 0.53125f : 1.0625f;
+        } else if (bodyProfile == RagdollBodyFactory.BodyProfile.SNIFFER) {
+            spawnYOffset = isBabySniffer() ? 0.578125f : 1.15625f;
+        } else if (bodyProfile == RagdollBodyFactory.BodyProfile.RAVAGER) {
+            spawnYOffset = 1.625f;
+        } else if (bodyProfile == RagdollBodyFactory.BodyProfile.PHANTOM) {
+            spawnYOffset = 1.34375f * getPhantomRenderScale();
+        } else if (bodyProfile == RagdollBodyFactory.BodyProfile.PARROT) {
+            spawnYOffset = 0.28125f;
+        } else if (bodyProfile == RagdollBodyFactory.BodyProfile.SLIME ||
+                bodyProfile == RagdollBodyFactory.BodyProfile.MAGMA_CUBE) {
+            spawnYOffset = 0.25f;
+        } else if (bodyProfile == RagdollBodyFactory.BodyProfile.SILVERFISH ||
+                bodyProfile == RagdollBodyFactory.BodyProfile.ENDERMITE ||
+                bodyProfile == RagdollBodyFactory.BodyProfile.ALLAY) {
+            spawnYOffset = 0.125f;
+        } else if (bodyProfile == RagdollBodyFactory.BodyProfile.STRIDER) {
+            spawnYOffset = isBabyStrider() ? .65625f : 1.3125f;
+        } else if (bodyProfile == RagdollBodyFactory.BodyProfile.SNOW_GOLEM) {
+            spawnYOffset = 1f;
+        } else if (bodyProfile == RagdollBodyFactory.BodyProfile.BLAZE) {
+            spawnYOffset = 1.2f;
+        } else if (bodyProfile == RagdollBodyFactory.BodyProfile.SPIDER) {
+            spawnYOffset = .5625f;
+        } else if (bodyProfile == RagdollBodyFactory.BodyProfile.CAVE_SPIDER) {
+            spawnYOffset = .39375f;
+        } else if (bodyProfile == RagdollBodyFactory.BodyProfile.SHULKER) {
+            spawnYOffset = .25f;
+        } else if (bodyProfile == RagdollBodyFactory.BodyProfile.GHAST) {
+            spawnYOffset = 2.25f;
+        } else if (bodyProfile == RagdollBodyFactory.BodyProfile.VEX) {
+            spawnYOffset = .35f;
+        } else if (bodyProfile == RagdollBodyFactory.BodyProfile.WARDEN) {
+            spawnYOffset = 1.46875f;
         } else if (bodyProfile == RagdollBodyFactory.BodyProfile.CHICKEN) {
             spawnYOffset = isBabyChicken() ? 0.27f : 0.54f;
+        } else if (modelType == MobModelHelper.ModelType.EQUINE) {
+            float rendererScale = bodyProfile == RagdollBodyFactory.BodyProfile.HORSE ? 1.1f
+                    : bodyProfile == RagdollBodyFactory.BodyProfile.DONKEY ? 0.87f
+                    : bodyProfile == RagdollBodyFactory.BodyProfile.MULE ? 0.92f : 1.0f;
+            spawnYOffset = (isBaby ? 0.63125f : 1.0f) * rendererScale;
         }
+        if (modelType == MobModelHelper.ModelType.IRON_GOLEM) spawnYOffset = 1.515625f;
+        if (modelType == MobModelHelper.ModelType.ENDERMAN) spawnYOffset = 2.0f;
 
         // Keep X/Z on the entity's exact death origin. The Y offset is not prediction or
         // random displacement: it converts the feet-level entity origin into this body's
@@ -1500,7 +1732,8 @@ public class ClientRagdoll {
                 (float) data.velocity.y,
                 (float) data.velocity.z
         );
-        initialVel.scale((float) RagdollifiedConfig.get(RagdollifiedConfig.INITIAL_VELOCITY_SCALE));
+        initialVel.scale((float) RagdollifiedConfig.get(RagdollifiedConfig.INITIAL_VELOCITY_SCALE)
+                * modelSizeVelocityScale());
 
         RagdollBodyFactory.build(world, ragdollParts, ragdollJoints,
                 modelType, pos, baseQuat, scale, initialVel, data.capturedPose, bodyProfile,
@@ -1515,23 +1748,17 @@ public class ClientRagdoll {
     // Forces — mirrors MobRagdollPhysics exactly
     // ============================
 
-    /**
-     * Per-part buoyancy + drag. For each part inside a fluid block, computes how far below
-     * the local fluid surface the part center sits and applies an upward velocity change
-     * proportional to that submersion. Equilibrium sits at half-submerged: at that depth
-     * buoyancy (2g·0.5 = g) exactly cancels gravity (-g). Below that the part rises; above
-     * it falls back. Net effect: parts hover at the surface with the heaviest part (torso)
-     * resting roughly at the waterline — a settled ragdoll then qualifies for water-surface
-     * settle and gets frozen so we stop simulating it.
-     *
-     * Heavy linear/angular drag (0.7 retention/tick = 30% loss) drains the buoyancy
-     * oscillation inside ~0.5s so the ragdoll converges quickly.
-     */
+    // Per-part buoyancy and drag. For each part in a fluid block, measure how far below the
+    // local surface its centre sits and add an upward velocity change proportional to that
+    // depth. Equilibrium is half-submerged, where buoyancy (2g x 0.5 = g) cancels gravity;
+    // deeper parts rise, shallower ones fall. Parts end up hovering at the surface with the
+    // torso near the waterline, which lets the body qualify for a water-surface settle and
+    // freeze. Heavy drag, 0.7 retention per tick, drains the oscillation in about half a second.
     private void applyFluidForces() {
         final float dt = 1f / 20f;
         final float gravity = (float) RagdollifiedConfig.get(RagdollifiedConfig.GRAVITY);
 
-        for (int i = 0; i < ragdollParts.size() && i < 6; i++) {
+        for (int i = 0; i < ragdollParts.size() && i < RagdollTransform.MAX_PARTS; i++) {
             if (cachedTransforms[i] == null) continue;
             RigidBody body = ragdollParts.get(i);
             Vector3f partPos = cachedTransforms[i].position;
@@ -1645,13 +1872,16 @@ public class ClientRagdoll {
     }
 
     private void applyPlayerCollisions() {
+        // A dragger is already steering the body through its paired limbs. Vanilla's local
+        // player-shove adds a competing impulse and was the source of most drag flips.
+        if (dragPhysicsActive) return;
         net.minecraft.client.Minecraft mc = net.minecraft.client.Minecraft.getInstance();
         if (mc.player == null) return;
         Vec3 playerPos = mc.player.position();
         Vec3 playerVel = mc.player.getDeltaMovement();
         if (playerVel.lengthSqr() < 0.01) return;
 
-        float playerSpeed = (float) playerVel.length();
+        float playerSpeed = (float) playerVel.length() * modelSizeVelocityScale();
         for (RigidBody part : ragdollParts) {
             part.getMotionState().getWorldTransform(tempTransform);
             Vector3f partPos = tempTransform.origin;
@@ -1673,6 +1903,14 @@ public class ClientRagdoll {
         }
     }
 
+    // Damping factor for everything that injects momentum into this body — inherited death
+    // velocity, death-hit impulses, later player hits and shoves. `scale` is bbHeight / 1.8, so
+    // a player is 1.0 and nothing at or above player size is touched. See
+    // RagdollifiedConfig#getModelSizeVelocityScale for why small bodies need it.
+    private float modelSizeVelocityScale() {
+        return RagdollifiedConfig.getModelSizeVelocityScale(scale);
+    }
+
     // ============================
     // Public API
     // ============================
@@ -1690,20 +1928,396 @@ public class ClientRagdoll {
         RigidBody body = ragdollParts.get(part.index);
         body.activate(true);
         Vector3f scaled = new Vector3f(impulse);
-        scaled.scale(RagdollifiedConfig.getPartKnockbackMultiplier(part));
+        scaled.scale(RagdollifiedConfig.getPartKnockbackMultiplier(part) * modelSizeVelocityScale());
         body.applyCentralImpulse(scaled);
         // Any previously sent settle pose predates this push and must be reported again after
         // the body comes to rest. The server also rejects reports with an older revision.
         markSettledPoseDirty();
     }
 
-    /**
-     * Apply a server-retained state on the physics thread. Settled transforms are absolute
-     * world coordinates, allowing a player who enters later to see the already-resting pose.
-     */
+    // Drive a whole limb group on the physics worker. Every target lands before the next Bullet
+    // step, so paired arms or legs never fight each other across ticks. Velocity-driven only:
+    // it never teleports a rigid body and never applies an impulse.
+    public void dragPartsTo(Map<RagdollPart, Vec3> targets) {
+        drivePartsTo(targets, DRAG_STIFFNESS, DragTarget.DEFAULT_MAX_HORIZONTAL_SPEED,
+                DragTarget.DEFAULT_MAX_VERTICAL_SPEED, DRAG_TORSO_MAX_SPEED);
+    }
+
+    private void drivePartsTo(Map<RagdollPart, Vec3> targets, float stiffness, float maxHorizontalSpeed,
+                              float maxVerticalSpeed, float maxTorsoFollowSpeed) {
+        if (targets == null || targets.isEmpty()) return;
+        boolean hasValidTarget = false;
+        for (Map.Entry<RagdollPart, Vec3> entry : targets.entrySet()) {
+            if (entry.getKey() != null && entry.getValue() != null && entry.getKey().index < ragdollParts.size()) {
+                hasValidTarget = true;
+                break;
+            }
+        }
+        if (!hasValidTarget) return;
+
+        wakeForDrag();
+        enableDragPhysics();
+        draggedLimbVelocity.set(0f, 0f, 0f);
+        int targetCount = 0;
+        for (Map.Entry<RagdollPart, Vec3> entry : targets.entrySet()) {
+            RagdollPart part = entry.getKey();
+            Vec3 target = entry.getValue();
+            if (part == null || target == null || part.index >= ragdollParts.size()) continue;
+            driveDraggedPart(part, target, stiffness, maxHorizontalSpeed, maxVerticalSpeed, draggedLimbVelocity);
+            targetCount++;
+        }
+        if (targetCount > 0) {
+            draggedLimbVelocity.scale(1f / targetCount);
+            assistTorsoDuringDrag(draggedLimbVelocity, maxTorsoFollowSpeed);
+        }
+        stabilizeDragRotation();
+        markSettledPoseDirty();
+    }
+
+    // Derive stable, smoothed raised left/right targets for a paired arm or leg drag.
+    public void dragEndTo(DragEnd end, DragTarget target) {
+        if (end == null || target == null) return;
+        updateSmoothedDragAnchor(target);
+        updateDragFacing(target);
+        float sideX = -dragFacingZ;
+        float sideZ = dragFacingX;
+        float separation = (end == DragEnd.ARMS
+                ? DragTarget.DEFAULT_ARM_SEPARATION : DragTarget.DEFAULT_LEG_SEPARATION) * 0.5f;
+        float lift = target.liftOffset() >= 0f ? target.liftOffset()
+                : (end == DragEnd.ARMS ? DragTarget.DEFAULT_ARM_LIFT : DragTarget.DEFAULT_LEG_LIFT);
+        Vec3 anchor = new Vec3(smoothedDragAnchor.x, smoothedDragAnchor.y, smoothedDragAnchor.z);
+        Vec3 sideA = anchor.add(sideX * separation, lift, sideZ * separation);
+        Vec3 sideB = anchor.add(-sideX * separation, lift, -sideZ * separation);
+        RagdollPart leftPart = end == DragEnd.ARMS ? RagdollPart.LEFT_ARM : RagdollPart.LEFT_LEG;
+        RagdollPart rightPart = end == DragEnd.ARMS ? RagdollPart.RIGHT_ARM : RagdollPart.RIGHT_LEG;
+
+        // Hand each target to whichever limb is already nearest it, instead of always giving the
+        // left limb the left-hand target. The two targets are laid out along the *dragger's* side
+        // axis, which says nothing about which way the body is lying: a prone or reversed body
+        // had its limbs assigned to the far target and crossed over to reach it, and the twist
+        // that put through the hips and shoulders is also what kept rolling a body onto its face.
+        boolean crossed = pickCrossedAssignment(leftPart, rightPart, sideA, sideB);
+        Map<RagdollPart, Vec3> targets = new EnumMap<>(RagdollPart.class);
+        targets.put(leftPart, crossed ? sideB : sideA);
+        targets.put(rightPart, crossed ? sideA : sideB);
+        // A drag's follow responsiveness drives the limbs as well as the anchor: at the default 7
+        // a limb settles into a steady lag of (player speed / 7), which is most of a block behind
+        // at a sprint. Capped because this is velocity control on a fixed 20 Hz step — a gain
+        // above 1/dt moves the limb past its target every tick and rings instead of converging.
+        drivePartsTo(targets, Math.min(DRAG_MAX_STIFFNESS, target.followResponsiveness()),
+                target.maxHorizontalSpeed(), target.maxVerticalSpeed(),
+                Math.min(DRAG_TORSO_MAX_SPEED, target.maxHorizontalSpeed()));
+    }
+
+    // Decide whether to swap the paired targets, keeping the previous answer unless the other is
+    // clearly better. Without that hysteresis a body lying square to the pull sits on the tie
+    // point and flips every tick, which reads as the limbs shivering.
+    private boolean pickCrossedAssignment(RagdollPart leftPart, RagdollPart rightPart,
+                                          Vec3 sideA, Vec3 sideB) {
+        if (leftPart.index >= ragdollParts.size() || rightPart.index >= ragdollParts.size()) {
+            return dragEndsCrossed;
+        }
+        double straight = distanceSqrToPart(leftPart, sideA) + distanceSqrToPart(rightPart, sideB);
+        double crossed = distanceSqrToPart(leftPart, sideB) + distanceSqrToPart(rightPart, sideA);
+        if (crossed + DRAG_SWAP_HYSTERESIS_SQ < straight) dragEndsCrossed = true;
+        else if (straight + DRAG_SWAP_HYSTERESIS_SQ < crossed) dragEndsCrossed = false;
+        return dragEndsCrossed;
+    }
+
+    private double distanceSqrToPart(RagdollPart part, Vec3 point) {
+        ragdollParts.get(part.index).getWorldTransform(tempTransform);
+        double dx = point.x - tempTransform.origin.x;
+        double dy = point.y - tempTransform.origin.y;
+        double dz = point.z - tempTransform.origin.z;
+        return dx * dx + dy * dy + dz * dz;
+    }
+
+    // Restore normal friction and CCD values after a drag session ends.
+    public void endDrag() {
+        if (!dragPhysicsActive) return;
+        for (int i = 0; i < ragdollParts.size() && i < RagdollTransform.MAX_PARTS; i++) {
+            RigidBody body = ragdollParts.get(i);
+            body.setFriction(dragOriginalFriction[i]);
+            body.setCcdMotionThreshold(dragOriginalCcdThreshold[i]);
+            body.setCcdSweptSphereRadius(dragOriginalCcdRadius[i]);
+        }
+        dragPhysicsActive = false;
+        dragAnchorInitialized = false;
+        dragFacingInitialized = false;
+        dragEndsCrossed = false;
+    }
+
+    private void wakeForDrag() {
+        if (settled || bodiesFrozen) {
+            settled = false;
+            pendingTerrainValidation = false;
+            settledOnLiquid = false;
+            settledTicks = 0;
+            unfreezeBodies();
+        }
+    }
+
+    private void enableDragPhysics() {
+        if (dragPhysicsActive) return;
+        for (int i = 0; i < ragdollParts.size() && i < RagdollTransform.MAX_PARTS; i++) {
+            RigidBody body = ragdollParts.get(i);
+            dragOriginalFriction[i] = body.getFriction();
+            dragOriginalCcdThreshold[i] = body.getCcdMotionThreshold();
+            dragOriginalCcdRadius[i] = body.getCcdSweptSphereRadius();
+            body.setFriction(Math.min(DRAG_FRICTION, dragOriginalFriction[i]));
+            body.setCcdMotionThreshold(Math.min(DRAG_CCD_MOTION_THRESHOLD, dragOriginalCcdThreshold[i]));
+            body.setCcdSweptSphereRadius(Math.max(DRAG_CCD_MIN_RADIUS, dragOriginalCcdRadius[i]));
+            body.forceActivationState(CollisionObject.DISABLE_DEACTIVATION);
+            body.activate(true);
+        }
+        dragPhysicsActive = true;
+    }
+
+    private void driveDraggedPart(RagdollPart part, Vec3 target, float stiffness, float maxHorizontalSpeed,
+                                  float maxVerticalSpeed, Vector3f velocitySum) {
+        RigidBody body = ragdollParts.get(part.index);
+        body.getWorldTransform(tempTransform);
+        body.getLinearVelocity(scratchDragVel);
+        scratchVel.set((float) (target.x - tempTransform.origin.x) * stiffness,
+                (float) (target.y - tempTransform.origin.y) * stiffness,
+                (float) (target.z - tempTransform.origin.z) * stiffness);
+        float horizontal = (float) Math.sqrt(scratchVel.x * scratchVel.x + scratchVel.z * scratchVel.z);
+        if (horizontal > maxHorizontalSpeed) {
+            float scale = maxHorizontalSpeed / horizontal;
+            scratchVel.x *= scale;
+            scratchVel.z *= scale;
+        }
+        // Vertical is asymmetric on purpose, and this is what gives a towed body its weight.
+        // Clamping both directions replaced gravity outright: a limb below the hold point was
+        // hauled up at the full pull speed and one above it was driven back down just as hard,
+        // so the body behaved like it was on a rail. Lifting is now capped hard, and there is no
+        // downward drive at all — below the grip the limb simply falls under its own weight.
+        if (scratchVel.y > maxVerticalSpeed) scratchVel.y = maxVerticalSpeed;
+        if (scratchVel.y < 0F) scratchVel.y = Math.min(0F, scratchDragVel.y);
+        body.setLinearVelocity(scratchVel);
+        body.activate(true);
+        velocitySum.add(scratchVel);
+    }
+
+    // The constraints feed some of each limb's towing velocity into angular momentum. Damping it
+    // before the step stops a long pull building into a full flip, while leaving enough rotation
+    // for the body to conform to terrain.
+    private void stabilizeDragRotation() {
+        for (int i = 0; i < ragdollParts.size(); i++) {
+            RigidBody body = ragdollParts.get(i);
+            body.getAngularVelocity(scratchAng);
+            scratchAng.scale(DRAG_ANGULAR_DAMPING);
+            float maximum = i == RagdollPart.TORSO.index
+                    ? DRAG_TORSO_MAX_ANGULAR_SPEED : DRAG_LIMB_MAX_ANGULAR_SPEED;
+            float speed = scratchAng.length();
+            if (speed > maximum) scratchAng.scale(maximum / speed);
+            body.setAngularVelocity(scratchAng);
+        }
+    }
+
+    private void updateSmoothedDragAnchor(DragTarget target) {
+        Vec3 desired = target.position();
+        if (!dragAnchorInitialized) {
+            // Begin from the body rather than snapping the first dragged frame straight to
+            // the reviver's anchor. Subsequent target changes use the same capped smoothing.
+            smoothedDragAnchor.set(cachedTorsoPos);
+            dragAnchorInitialized = true;
+        }
+        // Exponential smoothing is frame-rate independent at the fixed 20 Hz physics step.
+        float alpha = 1f - (float) Math.exp(-target.followResponsiveness() / 20f);
+        float stepX = ((float) desired.x - smoothedDragAnchor.x) * alpha;
+        float stepY = ((float) desired.y - smoothedDragAnchor.y) * alpha;
+        float stepZ = ((float) desired.z - smoothedDragAnchor.z) * alpha;
+        float horizontal = (float) Math.sqrt(stepX * stepX + stepZ * stepZ);
+        float maxHorizontalStep = target.maxHorizontalSpeed() / 20f;
+        if (horizontal > maxHorizontalStep) {
+            float scale = maxHorizontalStep / horizontal;
+            stepX *= scale;
+            stepZ *= scale;
+        }
+        // Only the rise is capped, matching the limb drive. Capping the descent too is what made
+        // a towed body go weightless downhill: the vertical limit is deliberately far below a
+        // walking pace, so on any downward slope the anchor could not keep up with the dragger,
+        // hung in the air above them, and pulled the limbs up to it instead of letting them fall.
+        float maxRiseStep = target.maxVerticalSpeed() / 20f;
+        if (stepY > maxRiseStep) stepY = maxRiseStep;
+        smoothedDragAnchor.set(smoothedDragAnchor.x + stepX,
+                smoothedDragAnchor.y + stepY, smoothedDragAnchor.z + stepZ);
+    }
+
+    private void updateDragFacing(DragTarget target) {
+        Vec3 facing = target.facing();
+        float wantedX = facing != null ? (float) facing.x : 0f;
+        float wantedZ = facing != null ? (float) facing.z : 0f;
+        float length = (float) Math.sqrt(wantedX * wantedX + wantedZ * wantedZ);
+        if (length < 0.001f) {
+            if (dragFacingInitialized) return; // Compatibility targets retain a stable initial direction.
+            wantedX = smoothedDragAnchor.x - cachedTorsoPos.x;
+            wantedZ = smoothedDragAnchor.z - cachedTorsoPos.z;
+            length = (float) Math.sqrt(wantedX * wantedX + wantedZ * wantedZ);
+            if (length < 0.001f) { wantedX = 1f; wantedZ = 0f; length = 1f; }
+        }
+        wantedX /= length;
+        wantedZ /= length;
+        if (!dragFacingInitialized) {
+            dragFacingX = wantedX;
+            dragFacingZ = wantedZ;
+            dragFacingInitialized = true;
+            return;
+        }
+        float currentAngle = (float) Math.atan2(dragFacingZ, dragFacingX);
+        float wantedAngle = (float) Math.atan2(wantedZ, wantedX);
+        float delta = wantedAngle - currentAngle;
+        while (delta > Math.PI) delta -= (float) (Math.PI * 2.0);
+        while (delta < -Math.PI) delta += (float) (Math.PI * 2.0);
+        float maxTurn = (float) Math.toRadians(target.maxTurnRateDegrees()) / 20f;
+        delta = Math.max(-maxTurn, Math.min(maxTurn, delta));
+        float result = currentAngle + delta;
+        dragFacingX = (float) Math.cos(result);
+        dragFacingZ = (float) Math.sin(result);
+    }
+
+    private void assistTorsoDuringDrag(Vector3f grabbedVelocity, float maxFollowSpeed) {
+        if (ragdollParts.isEmpty()) return;
+        RigidBody torso = ragdollParts.get(RagdollPart.TORSO.index);
+        torso.getLinearVelocity(scratchVel);
+        scratchVel.x += (grabbedVelocity.x - scratchVel.x) * DRAG_TORSO_ASSIST;
+        scratchVel.z += (grabbedVelocity.z - scratchVel.z) * DRAG_TORSO_ASSIST;
+        float speed = (float) Math.sqrt(scratchVel.x * scratchVel.x + scratchVel.z * scratchVel.z);
+        float speedLimit = Math.max(0.1f, maxFollowSpeed);
+        if (speed > speedLimit) {
+            float scale = speedLimit / speed;
+            scratchVel.x *= scale;
+            scratchVel.z *= scale;
+        }
+        torso.setLinearVelocity(scratchVel);
+        // The joint solver may otherwise convert a fast limb relocation into a large torso
+        // spin. Keep the body visually stable without applying any corrective impulse.
+        torso.getAngularVelocity(scratchAng);
+        torso.activate(true);
+    }
+
+    // ===========================
+    // Owner-streamed replication
+    // ===========================
+
+    public boolean isReplicated() { return replicated; }
+
+    // True while this body has taken over from a silent owner and should be left alone.
+    public boolean hasStreamTimedOut() { return streamTimedOut; }
+
+    // Switch between local simulation and stream playback, physics thread only. Entering
+    // playback pulls the bodies out of the dynamics world entirely, so a replicated ragdoll
+    // costs nothing in the solver and cannot collide with or shove a live one.
+    public void setReplicated(boolean replicated) {
+        if (this.replicated == replicated || destroyed) return;
+        this.replicated = replicated;
+        if (replicated) {
+            if (!bodiesFrozen) freezeBodies();
+            ticksSinceStreamPose = 0;
+        } else {
+            streamPoses.clear();
+            lastStreamSequence = Integer.MIN_VALUE;
+            // Resume from wherever playback left the body rather than from the original
+            // spawn pose, so taking over a stream mid-flight is continuous.
+            if (bodiesFrozen && !settled) unfreezeBodies();
+        }
+    }
+
+    // Buffer one frame from the owner, physics thread only, drained by ClientRagdollManager.
+    // Out-of-order frames are dropped — they are stale by definition and would rewind playback.
+    public void applyStreamedPose(RagdollTransform[] transforms, int sequence) {
+        if (destroyed || transforms == null || transforms.length == 0) return;
+        if (transforms[0] == null) return; // no torso anchor — nothing to place the rest against
+        if (sequence <= lastStreamSequence) return;
+        lastStreamSequence = sequence;
+        ticksSinceStreamPose = 0;
+        streamTimedOut = false;
+        // A frame arriving before the first replicated tick still needs a sane stamp, and
+        // the clock only advances while replicated, so stamping with it is consistent.
+        if (streamPoses.size() >= STREAM_MAX_BUFFERED) streamPoses.pollFirst();
+        streamPoses.addLast(new StreamedPose(transforms, streamClock));
+    }
+
+    private void tickReplicated() {
+        ticksExisted++;
+        streamClock++;
+        ticksSinceStreamPose++;
+        if (!persistent && ticksExisted >= lifetime) {
+            destroy();
+            return;
+        }
+        if (ticksSinceStreamPose > STREAM_TIMEOUT_TICKS) {
+            // Latch the takeover so the manager's standing ownership assignment does not
+            // immediately push this body back into playback it is receiving nothing for.
+            streamTimedOut = true;
+            setReplicated(false);
+            return;
+        }
+        if (streamPoses.isEmpty()) return;
+
+        int playbackTick = streamClock - STREAM_BUFFER_TICKS;
+        StreamedPose from = null;
+        StreamedPose to = null;
+        for (StreamedPose pose : streamPoses) {
+            if (pose.arrivalTick <= playbackTick) {
+                from = pose;
+            } else {
+                to = pose;
+                break;
+            }
+        }
+        // Before the buffer has filled, hold the oldest frame; if playback has caught up with
+        // the newest, hold that. Holding beats extrapolating a body into terrain.
+        if (from == null) from = streamPoses.peekFirst();
+        float alpha = 0f;
+        if (to != null) {
+            int span = to.arrivalTick - from.arrivalTick;
+            if (span > 0) alpha = Math.min(1f, Math.max(0f, (playbackTick - from.arrivalTick) / (float) span));
+        }
+        writeStreamedPose(from, to, alpha);
+
+        // Anything strictly older than the frame currently being played from is unreachable.
+        while (streamPoses.size() > 1 && streamPoses.peekFirst() != from) streamPoses.pollFirst();
+
+        updateCachedTransforms();
+    }
+
+    private void writeStreamedPose(StreamedPose from, StreamedPose to, float alpha) {
+        for (int i = 0; i < ragdollParts.size() && i < RagdollTransform.MAX_PARTS; i++) {
+            if (from.positions[i] == null) continue;
+            streamScratchPos.set(from.positions[i]);
+            streamScratchRot.set(from.rotations[i]);
+            if (to != null && to.positions[i] != null && alpha > 0f) {
+                streamScratchPos.interpolate(to.positions[i], alpha);
+                slerpInto(from.rotations[i], to.rotations[i], alpha, streamScratchRot);
+            }
+            tempTransform.setIdentity();
+            tempTransform.origin.set(streamScratchPos);
+            tempTransform.setRotation(streamScratchRot);
+
+            RigidBody body = ragdollParts.get(i);
+            body.setWorldTransform(tempTransform);
+            // updateCachedTransforms reads the motion state, not the body, and a body that is
+            // out of the world is never stepped — so the motion state has to be written here.
+            if (body.getMotionState() != null) body.getMotionState().setWorldTransform(tempTransform);
+        }
+    }
+
+    // Apply a server-retained state on the physics thread. Settled transforms are absolute world
+    // coordinates, so a player arriving later sees the already-resting pose.
     public void applyAuthoritativeState(RagdollTransform[] transforms, int ageTicks, boolean settledPose) {
         ticksExisted = Math.max(ticksExisted, Math.max(0, ageTicks));
         if (!settledPose || transforms == null) return;
+
+        // The stream ends at the settled pose. Hand the body back to normal bookkeeping so it
+        // ages, validates its support, and can be woken by clicks or block changes like any
+        // other settled ragdoll.
+        setReplicated(false);
+        // Locally simulated bodies (mobs) have their own diverged pose here, and this is a
+        // hard transform write. Ease the render state so the correction reads as the body
+        // settling rather than as a teleport.
+        if (hasPrevTransforms) correctionEaseUntilNanos = System.nanoTime() + CORRECTION_EASE_NANOS;
 
         if (bodiesFrozen) unfreezeBodies();
         for (int i = 0; i < ragdollParts.size() && i < transforms.length; i++) {
@@ -1771,15 +2385,50 @@ public class ClientRagdoll {
 
     private void applyCenteredDeathImpulse(Vec3 impulse) {
         float centerScale = Math.max(0.75f,
-                (float) RagdollifiedConfig.get(RagdollifiedConfig.HIT_CENTER_DISTRIBUTION_SCALE));
-        for (int i = 0; i < ragdollParts.size() && i < 6; i++) {
+                (float) RagdollifiedConfig.get(RagdollifiedConfig.HIT_CENTER_DISTRIBUTION_SCALE))
+                * modelSizeVelocityScale();
+        for (int i = 0; i < ragdollParts.size() && i < RagdollTransform.MAX_PARTS; i++) {
             RagdollPart part = RagdollPart.byIndex(i);
             if (part == null) continue;
             RigidBody body = ragdollParts.get(i);
             body.activate(true);
-            body.applyCentralImpulse(scaledImpulse(impulse,
+            applyOffCentreImpulse(body, scaledImpulse(impulse,
                     centerScale * RagdollifiedConfig.getDeathPartKnockbackMultiplier(part)));
         }
+    }
+
+    // Apply an impulse at the recorded impact point rather than through the centre of mass.
+    // applyCentralImpulse is torque-free by definition, so it could only translate a body — a
+    // pig took a full sword hit and slid away upright, since the only rotation came from joint
+    // drag on a struck head. Offsetting by r supplies the r x J needed to tip it over. The arm
+    // is clamped to the part's own bounding radius: an impulse cannot land outside the body it
+    // hit, and an unclamped arm to a distant limb would spin that limb absurdly fast.
+    private void applyOffCentreImpulse(RigidBody body, Vector3f impulse) {
+        if (deathHitPoint == null) {
+            body.applyCentralImpulse(impulse);
+            return;
+        }
+        body.getWorldTransform(tempTransform);
+        scratchLever.set(deathHitPoint.x - tempTransform.origin.x,
+                deathHitPoint.y - tempTransform.origin.y,
+                deathHitPoint.z - tempTransform.origin.z);
+
+        float radius = partBoundingRadius(body);
+        float arm = scratchLever.length();
+        if (arm < 1.0e-4f) {
+            body.applyCentralImpulse(impulse);
+            return;
+        }
+        if (arm > radius) scratchLever.scale(radius / arm);
+        body.applyImpulse(impulse, scratchLever);
+    }
+
+    private float partBoundingRadius(RigidBody body) {
+        if (body.getCollisionShape() instanceof BoxShape box) {
+            box.getHalfExtentsWithMargin(scratchHalfExtents);
+            return scratchHalfExtents.length();
+        }
+        return 0.25f;
     }
 
     private void applyGlobalVelocityKick(Vec3 velocityKick) {
@@ -1803,11 +2452,8 @@ public class ClientRagdoll {
                 (float) impulse.z * scale);
     }
 
-    /**
-     * Manual ray test against this ragdoll's cached part positions.
-     * Used to detect clicks on settled ragdolls whose bodies are not in the physics world.
-     * Returns the closest hit RagdollPart within reach, or null if nothing is close enough.
-     */
+    // Manual ray test against the cached part positions, for clicks on settled ragdolls whose
+    // bodies have left the physics world. Closest RagdollPart within reach, or null.
     public RagdollPart findHitPart(Vector3f from, Vector3f to) {
         // Read from the published snapshot — runs on render thread (click handler),
         // so we can't touch the physics-thread-owned cachedTransforms directly.
@@ -1822,7 +2468,7 @@ public class ClientRagdoll {
         RagdollPart bestPart = null;
         float bestDist = 0.5f; // max distance from ray to part center (blocks)
 
-        for (int i = 0; i < snap.positions.length && i < 6; i++) {
+        for (int i = 0; i < snap.positions.length && i < RagdollTransform.MAX_PARTS; i++) {
             if (snap.positions[i] == null) continue;
             Vector3f partPos = snap.positions[i];
 
@@ -1848,7 +2494,7 @@ public class ClientRagdoll {
     }
 
     private void updateCachedTransforms() {
-        for (int i = 0; i < ragdollParts.size() && i < 6; i++) {
+        for (int i = 0; i < ragdollParts.size() && i < RagdollTransform.MAX_PARTS; i++) {
             ragdollParts.get(i).getMotionState().getWorldTransform(tempTransform);
 
             if (cachedTransforms[i] != null) {
@@ -1881,13 +2527,10 @@ public class ClientRagdoll {
         publishSnapshot();
     }
 
-    /**
-     * Build an immutable copy of the current cached transforms and publish it for
-     * the render thread to consume. Allocates fresh Vector3f/Quat4f instances so
-     * the render thread never sees a vector that's about to be mutated by physics.
-     */
+    // Publish an immutable copy of the current cached transforms for the render thread. Fresh
+    // Vector3f/Quat4f instances, so the render thread never holds one physics is about to mutate.
     private void publishSnapshot() {
-        int count = Math.min(ragdollParts.size(), 6);
+        int count = Math.min(ragdollParts.size(), RagdollTransform.MAX_PARTS);
         Vector3f[] pos = new Vector3f[count];
         Quat4f[] rot = new Quat4f[count];
         Vector3f[] halfExtents = new Vector3f[count];
@@ -1910,17 +2553,14 @@ public class ClientRagdoll {
                 new Vector3f(cachedTorsoPos),
                 new Vector3f(prevTorsoPos),
                 hasPrevTransforms,
-                destroyed
+                destroyed, settled, bodiesFrozen, ticksExisted
         );
     }
 
-    /**
-     * Returns a transform interpolated between the previous and current physics tick,
-     * using partialTick (0.0 = previous tick, 1.0 = current tick) for smooth rendering
-     * at frame rates higher than 20 Hz.
-     */
+    // Transform interpolated between the previous and current physics tick by partialTick, 0
+    // being the previous tick and 1 the current, so frame rates above 20 Hz stay smooth.
     public RagdollTransform getInterpolatedTransform(RagdollPart part, float partialTick) {
-        if (part.index >= ragdollParts.size() || part.index >= 6) return null;
+        if (part.index >= ragdollParts.size() || part.index >= RagdollTransform.MAX_PARTS) return null;
         RagdollTransform curr = cachedTransforms[part.index];
         if (curr == null) return null;
         if (!hasPrevTransforms || prevPositions[part.index] == null) return curr;
@@ -1979,7 +2619,8 @@ public class ClientRagdoll {
         if (prev != null) {
             publishedSnapshot = new TransformSnapshot(
                     prev.positions, prev.rotations, prev.halfExtents, prev.prevPositions, prev.prevRotations,
-                    prev.cachedTorsoPos, prev.prevTorsoPos, prev.hasPrev, true);
+                    prev.cachedTorsoPos, prev.prevTorsoPos, prev.hasPrev, true,
+                    prev.settled, prev.frozen, prev.ageTicks);
         }
 
         releaseCurrentCollisionGeometry();
@@ -1994,6 +2635,10 @@ public class ClientRagdoll {
         }
         // Queue this ragdoll's rebuilt blood textures for release on the render thread.
         com.raiiiden.ragdollified.client.compat.BetterBloodOverlayCompat.evict(originalEntityId);
+        // Drop the Visual Health snapshot (and its reference to the dead entity).
+        com.raiiiden.ragdollified.client.compat.VisualHealthCompat.evict(originalEntityId);
+        // Worn curios are not handed to the corpse — it carries its own persistent snapshot.
+        com.raiiiden.ragdollified.client.compat.CuriosRenderCompat.evict(originalEntityId);
 
         ragdollParts.clear();
         ragdollJoints.clear();
@@ -2033,18 +2678,57 @@ public class ClientRagdoll {
     }
 
     public RagdollTransform getTransform(RagdollPart part) {
-        if (part.index >= ragdollParts.size() || part.index >= 6) return null;
+        if (part.index >= ragdollParts.size() || part.index >= RagdollTransform.MAX_PARTS) return null;
         return cachedTransforms[part.index];
     }
     public RagdollTransform[] getAllTransforms() { return cachedTransforms; }
     public Vector3f getTorsoPosition() { return cachedTorsoPos; }
     public int getId() { return id; }
     public boolean isDestroyed() { return destroyed; }
+    public boolean isPersistent() { return persistent; }
+    public void setPersistent(boolean persistent) { this.persistent = persistent; }
+
+    // Restart death bookkeeping for a body an integration owned until now. The pose is untouched;
+    // only the lifetime and the one-shot pose and corpse reports are re-armed, so a body that
+    // spent minutes alive still gets a full death lifetime and still reports the rest pose its
+    // corpse is built from. Physics thread only.
+    public void restartDeathLifetime() {
+        ticksExisted = 0;
+        // The server's pending corpse for this death starts counting pushes at zero. A body that
+        // was shoved around while its owner was still alive would otherwise report a revision
+        // that pending can never match, and its corpse would never be built from this pose.
+        lastImpulseRevision = 0;
+        // A body an integration held for a while has almost certainly settled and frozen already,
+        // because it spent that whole time lying still. Handing it over in that state produces a
+        // corpse that looks like it hit the floor the instant it died. Clear the settle result so
+        // the death lifetime it is being given is actually simulated and comes to rest on its own.
+        settled = false;
+        settledOnLiquid = false;
+        settledTicks = 0;
+        settleGraceTicks = HANDOVER_SETTLE_GRACE_TICKS;
+        pendingTerrainValidation = false;
+        hasSettledTerrainSignature = false;
+        settledGroundSupportBlocks.clear();
+        if (bodiesFrozen) {
+            unfreezeBodies();
+        } else {
+            // Already in the world, but Bullet may have slept them while they were settled.
+            for (RigidBody body : ragdollParts) {
+                body.forceActivationState(CollisionObject.DISABLE_DEACTIVATION);
+                body.activate(true);
+            }
+        }
+        markSettledPoseDirty();
+    }
+    // True while a body handed back as a fresh death ragdoll is still owed its active window.
+    // Blocks the settle and the corpse report both, since a corpse built during the grace would
+    // replace the body before it ever moved.
+    public boolean isAwaitingSettleGrace() { return settleGraceTicks > 0; }
     public boolean isSettled() { return settled; }
     public boolean isSettledOnLiquid() { return settledOnLiquid; }
     public boolean isFrozen() { return bodiesFrozen; }
 
-    /** True if any body is moving fast enough to be a valid cascade-wake source (> 0.3 m/s). */
+    // True if any body is moving fast enough to be a valid cascade-wake source (> 0.3 m/s).
     public boolean isMovingSignificantly() {
         for (RigidBody r : ragdollParts) {
             r.getLinearVelocity(scratchVel);
@@ -2071,15 +2755,31 @@ public class ClientRagdoll {
     public int getDyeColorId() { return dyeColorId; }
     public boolean isChargedCreeper() { return chargedCreeper; }
     public boolean isSaddledPig() { return saddledPig; }
+    public boolean isSaddledEquine() { return modelType == MobModelHelper.ModelType.EQUINE && chargedCreeper; }
+    public boolean hasEquineChest() { return modelType == MobModelHelper.ModelType.EQUINE && wasSheared; }
+    public int getHorseMarkingsId() { return modelType == MobModelHelper.ModelType.EQUINE ? dyeColorId : 0; }
     public boolean isBaby() { return isBaby; }
     public boolean isBabyCow() {
-        return isBaby && (mobType.contains("cow") || mobType.contains("mooshroom"));
+        return isBaby && (isMobPath("cow") || isMobPath("mooshroom"));
     }
-    public boolean isBabyPig() { return isBaby && mobType.contains("pig"); }
-    public boolean isBabySheep() { return isBaby && mobType.contains("sheep"); }
-    public boolean isBabyChicken() { return isBaby && mobType.contains("chicken"); }
-    public boolean isBabyCat() { return isBaby && (mobType.contains("cat") || mobType.contains("ocelot")); }
-    public boolean isBabyBee() { return isBaby && mobType.contains("bee"); }
+    public boolean isBabyPig() { return isBaby && isMobPath("pig"); }
+    public boolean isBabySheep() { return isBaby && isMobPath("sheep"); }
+    public boolean isBabyChicken() { return isBaby && isMobPath("chicken"); }
+    public boolean isBabyCat() { return isBaby && (isMobPath("cat") || isMobPath("ocelot")); }
+    public boolean isBabyWolf() { return isBaby && isMobPath("wolf"); }
+    public boolean isBabyFox() { return isBaby && isMobPath("fox"); }
+    public boolean isBabyPanda() { return isBaby && isMobPath("panda"); }
+    public boolean isBabyGoat() { return isBaby && isMobPath("goat"); }
+    public boolean isBabyPolarBear() { return isBaby && isMobPath("polar_bear"); }
+    public boolean isBabyTurtle() { return isBaby && isMobPath("turtle"); }
+    public boolean isBabyCamel() { return isBaby && isMobPath("camel"); }
+    public boolean isBabyLlama() { return isBaby && (isMobPath("llama") || isMobPath("trader_llama")); }
+    public boolean isBabyRabbit() { return isBaby && isMobPath("rabbit"); }
+    public boolean isBabyHoglin() { return isBaby && (isMobPath("hoglin") || isMobPath("zoglin")); }
+    public boolean isBabySniffer() { return isBaby && isMobPath("sniffer"); }
+    public boolean isBabyStrider() { return isBaby && isMobPath("strider"); }
+    public boolean isBabyBee() { return isBaby && isMobPath("bee"); }
+    public boolean isBabyEquine() { return isBaby && modelType == MobModelHelper.ModelType.EQUINE; }
     // Baby humanoid (baby zombie/husk/piglin/zombie-villager, …) — scaled-down body + model.
     public boolean isBabyHumanoid() {
         return isBaby && MobModelHelper.isHumanoidModelType(modelType);
@@ -2099,15 +2799,62 @@ public class ClientRagdoll {
         return true;
     }
     public boolean usesBabyBodyScale() {
-        return isBabyCow() || isBabyPig() || isBabySheep() || isBabyChicken() || isBabyCat();
+        return isBabyCow() || isBabyPig() || isBabySheep() || isBabyChicken() || isBabyCat()
+                || isBabyWolf() || isBabyFox() || isBabyPanda() || isBabyGoat()
+                || isBabyPolarBear() || isBabyTurtle() || isBabyCamel() || isBabyLlama()
+                || isBabyRabbit() || isBabyHoglin() || isBabySniffer() || isBabyStrider();
     }
     public RagdollBodyFactory.BodyProfile getBodyProfile() {
-        if (mobType.contains("cow") || mobType.contains("mooshroom")) return RagdollBodyFactory.BodyProfile.COW;
-        if (mobType.contains("pig")) return RagdollBodyFactory.BodyProfile.PIG;
-        if (mobType.contains("sheep")) return RagdollBodyFactory.BodyProfile.SHEEP;
-        if (mobType.contains("cat") || mobType.contains("ocelot")) return RagdollBodyFactory.BodyProfile.CAT;
-        if (mobType.contains("chicken")) return RagdollBodyFactory.BodyProfile.CHICKEN;
+        if (isMobPath("cow") || isMobPath("mooshroom")) return RagdollBodyFactory.BodyProfile.COW;
+        if (isMobPath("pig")) return RagdollBodyFactory.BodyProfile.PIG;
+        if (isMobPath("sheep")) return RagdollBodyFactory.BodyProfile.SHEEP;
+        if (isMobPath("cat") || isMobPath("ocelot")) return RagdollBodyFactory.BodyProfile.CAT;
+        if (isMobPath("wolf")) return RagdollBodyFactory.BodyProfile.WOLF;
+        if (isMobPath("fox")) return RagdollBodyFactory.BodyProfile.FOX;
+        if (isMobPath("panda")) return RagdollBodyFactory.BodyProfile.PANDA;
+        if (isMobPath("goat")) return RagdollBodyFactory.BodyProfile.GOAT;
+        if (isMobPath("polar_bear")) return RagdollBodyFactory.BodyProfile.POLAR_BEAR;
+        if (isMobPath("turtle")) return RagdollBodyFactory.BodyProfile.TURTLE;
+        if (isMobPath("camel")) return RagdollBodyFactory.BodyProfile.CAMEL;
+        if (isMobPath("llama") || isMobPath("trader_llama")) return RagdollBodyFactory.BodyProfile.LLAMA;
+        if (isMobPath("rabbit")) return RagdollBodyFactory.BodyProfile.RABBIT;
+        if (isMobPath("frog")) return RagdollBodyFactory.BodyProfile.FROG;
+        if (isMobPath("hoglin") || isMobPath("zoglin")) return RagdollBodyFactory.BodyProfile.HOGLIN;
+        if (isMobPath("sniffer")) return RagdollBodyFactory.BodyProfile.SNIFFER;
+        if (isMobPath("ravager")) return RagdollBodyFactory.BodyProfile.RAVAGER;
+        if (isMobPath("phantom")) return RagdollBodyFactory.BodyProfile.PHANTOM;
+        if (isMobPath("parrot")) return RagdollBodyFactory.BodyProfile.PARROT;
+        if (isMobPath("magma_cube")) return RagdollBodyFactory.BodyProfile.MAGMA_CUBE;
+        if (isMobPath("slime")) return RagdollBodyFactory.BodyProfile.SLIME;
+        if (isMobPath("silverfish")) return RagdollBodyFactory.BodyProfile.SILVERFISH;
+        if (isMobPath("endermite")) return RagdollBodyFactory.BodyProfile.ENDERMITE;
+        if (isMobPath("allay")) return RagdollBodyFactory.BodyProfile.ALLAY;
+        if (isMobPath("strider")) return RagdollBodyFactory.BodyProfile.STRIDER;
+        if (isMobPath("snow_golem")) return RagdollBodyFactory.BodyProfile.SNOW_GOLEM;
+        if (isMobPath("blaze")) return RagdollBodyFactory.BodyProfile.BLAZE;
+        if (isMobPath("cave_spider")) return RagdollBodyFactory.BodyProfile.CAVE_SPIDER;
+        if (isMobPath("spider")) return RagdollBodyFactory.BodyProfile.SPIDER;
+        if (isMobPath("shulker")) return RagdollBodyFactory.BodyProfile.SHULKER;
+        if (isMobPath("ghast")) return RagdollBodyFactory.BodyProfile.GHAST;
+        if (isMobPath("vex")) return RagdollBodyFactory.BodyProfile.VEX;
+        if (isMobPath("warden")) return RagdollBodyFactory.BodyProfile.WARDEN;
+        if (isMobPath("chicken")) return RagdollBodyFactory.BodyProfile.CHICKEN;
+        if (isMobPath("horse")) return RagdollBodyFactory.BodyProfile.HORSE;
+        if (isMobPath("donkey")) return RagdollBodyFactory.BodyProfile.DONKEY;
+        if (isMobPath("mule")) return RagdollBodyFactory.BodyProfile.MULE;
         return RagdollBodyFactory.BodyProfile.DEFAULT;
+    }
+
+    // Exact registry path match; avoids treating piglins as pigs or vindicators as cats.
+    private boolean isMobPath(String expectedPath) {
+        int separator = mobType.indexOf(':');
+        int pathStart = separator >= 0 ? separator + 1 : 0;
+        return mobType.length() - pathStart == expectedPath.length()
+                && mobType.regionMatches(pathStart, expectedPath, 0, expectedPath.length());
+    }
+    public float getPhantomRenderScale() {
+        int phantomSize = Math.max(0, Math.round((scale * 3.6f - 1f) * 4.5f));
+        return 1f + .15f * phantomSize;
     }
     public String getVillagerType() { return villagerType; }
     public String getVillagerProfession() { return villagerProfession; }
