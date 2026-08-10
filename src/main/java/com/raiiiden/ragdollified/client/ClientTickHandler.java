@@ -33,11 +33,10 @@ public class ClientTickHandler {
             ClientRagdollManager.tickCorpseClient();
             ClientRagdollManager.tickRagdollSyncClient();
 
-            // In-flight pose frames for player ragdolls this client owns. 10 Hz — dense
-            // enough for observers to interpolate, sparse enough to stay cheap.
-            if ((tickCounter & 1) == 0) {
-                ClientRagdollManager.tickRagdollStreamClient();
-            }
+            // In-flight pose frames for player ragdolls this client owns at 20 Hz.
+            // Player bodies are rare enough to publish every game tick, so observers receive
+            // every authoritative physics step instead of reconstructing a missing one.
+            ClientRagdollManager.tickRagdollStreamClient();
 
             // Cleanup every 5 seconds (still on render thread — cheap)
             if (tickCounter >= 100) {

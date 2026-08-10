@@ -42,8 +42,7 @@ public final class ServerRagdollSyncManager {
     private static final Map<UUID, Set<Integer>> NEARBY_SENT = new HashMap<>();
     private static int lastCleanupTick = Integer.MIN_VALUE;
     private static int lastOwnerElectionTick = Integer.MIN_VALUE;
-    // A second of stale ownership costs at most a second of frozen playback on observers,
-    // which their stream-timeout fallback already covers.
+    // Ownership is re-evaluated promptly when the current simulator leaves the streamed body.
     private static final int OWNER_ELECTION_INTERVAL_TICKS = 20;
 
     private static final class RetainedRagdoll {
@@ -56,10 +55,14 @@ public final class ServerRagdollSyncManager {
         final UUID victim;
         volatile RagdollTransform[] settledTransforms;
         volatile int impulseRevision;
-        // Owner-streamed in-flight pose. Only player bodies get an owner; a mob's null owner
-        // is what keeps every client simulating it locally.
+        // Owner-streamed pose. Only player bodies get an owner; a mob's null owner is what
+        // keeps every client simulating it locally. The input and relay sequences are separate:
+        // a replacement owner starts its own counter wherever it left off, while observers need
+        // one monotonically increasing server sequence across every ownership handoff.
         volatile UUID streamOwner;
         volatile Vec3 streamAnchor;
+        volatile RagdollTransform[] latestStreamTransforms;
+        volatile int ownerInputSequence;
         volatile int streamSequence;
 
         RetainedRagdoll(LivingEntity entity, RagdollSpawnPacket spawnPacket, int createdTick) {
@@ -73,7 +76,10 @@ public final class ServerRagdollSyncManager {
         }
 
         boolean streamable() {
-            return victim != null && settledTransforms == null;
+            // Keep the authority assignment after settling. If terrain changes or the body is
+            // pushed, the same owner can resume streaming immediately and observers never need
+            // to start an independent simulation.
+            return victim != null;
         }
 
         Vec3 anchor() {
@@ -95,11 +101,14 @@ public final class ServerRagdollSyncManager {
         RetainedRagdoll retained = new RetainedRagdoll(entity, packet, now);
         RETAINED.put(entity.getId(), retained);
 
-        // Elect before the first send so every recipient learns its role in the same batch
-        // and no client simulates a body it is about to be told it does not own.
+        // Elect one simulator first. A player observer is deliberately not spawned until that
+        // owner supplies the complete initial part pose; this removes the last window in which
+        // different clients could construct and advance their own versions of the body.
         electStreamOwner(server, retained);
         for (ServerPlayer player : server.getPlayerList().getPlayers()) {
-            if (isNear(player, retained, syncRadius(server))) {
+            if (isNear(player, retained, syncRadius(server))
+                    && (!retained.streamable()
+                    || player.getUUID().equals(retained.streamOwner))) {
                 sendRetained(player, retained, now);
                 NEARBY_SENT.computeIfAbsent(player.getUUID(), ignored -> new HashSet<>())
                         .add(retained.entityId);
@@ -119,6 +128,9 @@ public final class ServerRagdollSyncManager {
         double bestDistanceSq = Double.MAX_VALUE;
         for (ServerPlayer player : server.getPlayerList().getPlayers()) {
             if (!isNear(player, retained, radius)) continue;
+            // An optional-channel/vanilla client cannot run or publish our physics. Never elect
+            // one, otherwise every modded observer waits forever for an initial pose.
+            if (!ModNetwork.CHANNEL.isRemotePresent(player.connection.connection)) continue;
             if (player.getUUID().equals(retained.victim)) {
                 elected = player;
                 break;
@@ -133,6 +145,10 @@ public final class ServerRagdollSyncManager {
         UUID next = elected != null ? elected.getUUID() : null;
         if (next == null ? previous == null : next.equals(previous)) return false;
         retained.streamOwner = next;
+        // Client sequence numbers only order frames from one owner. The new owner may have a
+        // lower counter than the old one, so compare it against a fresh per-owner baseline while
+        // preserving streamSequence as the continuous observer-facing sequence.
+        retained.ownerInputSequence = 0;
 
         if (previous != null) {
             ServerPlayer old = server.getPlayerList().getPlayer(previous);
@@ -154,23 +170,41 @@ public final class ServerRagdollSyncManager {
         if (transforms == null || transforms.length == 0 || transforms[0] == null) return;
 
         double radius = syncRadius(sender.server);
-        // Sequence numbers are the only ordering guarantee: a frame that arrives out of
-        // order is stale by definition and replaying it would rewind every observer.
+        int relaySequence;
+        RagdollTransform[] relayedTransforms;
         synchronized (retained) {
-            if (sequence <= retained.streamSequence) return;
+            // Reject stale/replayed input from the current owner, then assign a server-owned
+            // sequence that remains monotonic even when ownership changes.
+            if (sequence <= retained.ownerInputSequence) return;
             RagdollTransform[] validated = validateAndCopyPose(retained, transforms, radius);
             if (validated == null) return;
-            retained.streamSequence = sequence;
+            relayedTransforms = validated;
+            retained.latestStreamTransforms = validated;
+            retained.ownerInputSequence = sequence;
+            retained.streamSequence = retained.streamSequence == Integer.MAX_VALUE
+                    ? 1 : retained.streamSequence + 1;
+            relaySequence = retained.streamSequence;
             Vector3f torso = validated[0].position;
             retained.streamAnchor = new Vec3(torso.x, torso.y, torso.z);
+            // A frame after a prior settle means the authoritative body woke. Clear the old
+            // terminal pose so the owner's next settle report can become authoritative again.
+            retained.settledTransforms = null;
         }
 
-        RagdollStreamPacket frame = new RagdollStreamPacket(entityId, sequence, transforms);
+        RagdollStreamPacket frame = new RagdollStreamPacket(entityId, relaySequence, relayedTransforms);
         for (ServerPlayer player : sender.server.getPlayerList().getPlayers()) {
             if (player.getUUID().equals(retained.streamOwner)) continue;
             if (isNear(player, retained, radius)
                     && ModNetwork.CHANNEL.isRemotePresent(player.connection.connection)) {
-                ModNetwork.CHANNEL.send(PacketDistributor.PLAYER.with(() -> player), frame);
+                Set<Integer> sent = NEARBY_SENT.computeIfAbsent(
+                        player.getUUID(), ignored -> new HashSet<>());
+                if (sent.add(retained.entityId)) {
+                    // First sight of a player body: spawn, observer role, age, and the owner's
+                    // exact full-part pose are sent in-order as one authoritative batch.
+                    sendRetained(player, retained, sender.server.getTickCount());
+                } else {
+                    ModNetwork.CHANNEL.send(PacketDistributor.PLAYER.with(() -> player), frame);
+                }
             }
         }
     }
@@ -207,6 +241,12 @@ public final class ServerRagdollSyncManager {
         Set<Integer> currentlyNear = new HashSet<>();
         for (RetainedRagdoll retained : RETAINED.values()) {
             if (now >= retained.expiresTick || !isNear(player, retained, radius)) continue;
+            boolean isOwner = player.getUUID().equals(retained.streamOwner);
+            boolean hasOwnerPose = retained.latestStreamTransforms != null
+                    || retained.settledTransforms != null;
+            // Defer a player observer until the owner has published every part transform. Mobs
+            // still use the immediate independent-client path.
+            if (retained.streamable() && !isOwner && !hasOwnerPose) continue;
             currentlyNear.add(retained.entityId);
             if (!previous.contains(retained.entityId)) {
                 sendRetained(player, retained, now);
@@ -222,6 +262,9 @@ public final class ServerRagdollSyncManager {
         RetainedRagdoll retained = RETAINED.get(entityId);
         if (retained == null || retained.impulseRevision > impulseRevision) return;
         if (!sender.level().dimension().equals(retained.dimension)) return;
+        // A player ragdoll has exactly one physics authority. An observer must never be able to
+        // turn a timeout or accidental local simulation into the resting pose seen by everyone.
+        if (retained.victim != null && !sender.getUUID().equals(retained.streamOwner)) return;
 
         double radius = syncRadius(sender.server);
         if (sender.position().distanceToSqr(retained.anchor()) > radius * radius) return;
@@ -252,6 +295,7 @@ public final class ServerRagdollSyncManager {
         if (retained == null || !retained.dimension.equals(source.level().dimension())) return;
         synchronized (retained) {
             retained.settledTransforms = null;
+            retained.latestStreamTransforms = null;
             retained.impulseRevision = Math.max(retained.impulseRevision, revision);
         }
     }
@@ -266,8 +310,9 @@ public final class ServerRagdollSyncManager {
         ModNetwork.CHANNEL.send(PacketDistributor.PLAYER.with(() -> player), retained.spawnPacket);
         // Tell every recipient its role, including "you are not the owner", so an observer
         // never runs its own divergent simulation that would have to be corrected later.
-        if (retained.streamable()) {
-            sendOwnership(player, retained.entityId, player.getUUID().equals(retained.streamOwner));
+        if (retained.victim != null) {
+            sendOwnership(player, retained.entityId,
+                    player.getUUID().equals(retained.streamOwner));
         }
         ModNetwork.CHANNEL.send(PacketDistributor.PLAYER.with(() -> player),
                 new RagdollStatePacket(
@@ -276,6 +321,12 @@ public final class ServerRagdollSyncManager {
                         retained.impulseRevision,
                         Math.max(0, now - retained.createdTick),
                         retained.settledTransforms != null));
+        RagdollTransform[] latest = retained.latestStreamTransforms;
+        if (retained.settledTransforms == null && latest != null) {
+            ModNetwork.CHANNEL.send(PacketDistributor.PLAYER.with(() -> player),
+                    new RagdollStreamPacket(
+                            retained.entityId, retained.streamSequence, copyPose(latest)));
+        }
     }
 
     private static boolean isNear(ServerPlayer player, RetainedRagdoll retained, double radius) {

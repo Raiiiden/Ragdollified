@@ -13,7 +13,6 @@ import net.minecraft.client.Camera;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.model.*;
-import net.minecraft.client.model.geom.ModelLayers;
 import net.minecraft.client.model.geom.ModelPart;
 import net.minecraft.client.model.geom.builders.CubeDeformation;
 import net.minecraft.client.model.geom.builders.LayerDefinition;
@@ -201,9 +200,6 @@ public class ClientRagdollRenderer {
     private static void initModels() {
         if (initialized) return;
         try {
-            Minecraft mc = Minecraft.getInstance();
-            var bakery = mc.getEntityModels();
-
             // Fresh vanilla player trees, deliberately bypassing EntityModelSet/bakeLayer.
             // EMF/Fresh Moves can replace or mutate the registered PLAYER/PLAYER_SLIM layers;
             // taking those baked trees lets its animation geometry corrupt physics-part pivots.
@@ -242,16 +238,20 @@ public class ClientRagdollRenderer {
                     ZombieVillagerModel.createBodyLayer().bakeRoot());
             drownedModel = new DrownedModel<>(DrownedModel.createBodyLayer(CubeDeformation.NONE).bakeRoot());
             creeperModel = new CreeperModel<>(CreeperModel.createBodyLayer(CubeDeformation.NONE).bakeRoot());
-            // Use the bakery's already-baked PIGLIN layer so we share the same ModelPart
-            // tree (and the same cube inflations) as the live PiglinRenderer.
+            // All ragdoll trees must come directly from vanilla definitions. EMF/Fresh
+            // Animations can replace EntityModelSet definitions with animated geometry;
+            // baking those registered layers makes a physics-driven corpse animate again.
             piglinModel = new net.minecraft.client.model.PiglinModel<>(
-                    bakery.bakeLayer(net.minecraft.client.model.geom.ModelLayers.PIGLIN));
+                    LayerDefinition.create(net.minecraft.client.model.PiglinModel.createMesh(
+                            CubeDeformation.NONE), 64, 64).bakeRoot());
 
-            // Overlay models — baked from the same vanilla layer-definition keys the
-            // entity renderer uses, so the per-cube inflation matches exactly.
-            drownedOuterModel = new DrownedModel<>(bakery.bakeLayer(ModelLayers.DROWNED_OUTER_LAYER));
-            strayClothingModel = new SkeletonModel<>(bakery.bakeLayer(ModelLayers.STRAY_OUTER_LAYER));
-            creeperPoweredModel = new CreeperModel<>(bakery.bakeLayer(ModelLayers.CREEPER_ARMOR));
+            // Private overlay trees use the same vanilla inflation as the live renderer.
+            drownedOuterModel = new DrownedModel<>(
+                    DrownedModel.createBodyLayer(new CubeDeformation(0.25F)).bakeRoot());
+            strayClothingModel = new SkeletonModel<>(LayerDefinition.create(
+                    HumanoidModel.createMesh(new CubeDeformation(0.25F), 0.0F), 64, 32).bakeRoot());
+            creeperPoweredModel = new CreeperModel<>(
+                    CreeperModel.createBodyLayer(new CubeDeformation(2.0F)).bakeRoot());
 
             cowRoot = net.minecraft.client.model.CowModel.createBodyLayer().bakeRoot();
             sheepRoot = net.minecraft.client.model.SheepModel.createBodyLayer().bakeRoot();
@@ -263,55 +263,55 @@ public class ClientRagdollRenderer {
             // Pig saddle — vanilla SaddleLayer uses ModelLayers.PIG_SADDLE which is an
             // inflated copy of the pig's body shape. Same child names as the base pig
             // model so the same setPos calls work for both.
-            pigSaddleRoot = bakery.bakeLayer(ModelLayers.PIG_SADDLE);
+            pigSaddleRoot = PigModel.createBodyLayer(new CubeDeformation(0.5F)).bakeRoot();
             chickenRoot = ChickenModel.createBodyLayer().bakeRoot();
-            catRoot = bakery.bakeLayer(ModelLayers.CAT);
-            catCollarRoot = bakery.bakeLayer(ModelLayers.CAT_COLLAR);
-            batRoot = bakery.bakeLayer(ModelLayers.BAT);
-            beeRoot = bakery.bakeLayer(ModelLayers.BEE);
-            witchRoot = bakery.bakeLayer(ModelLayers.WITCH);
-            horseRoot = bakery.bakeLayer(ModelLayers.HORSE);
-            donkeyRoot = bakery.bakeLayer(ModelLayers.DONKEY);
-            muleRoot = bakery.bakeLayer(ModelLayers.MULE);
-            skeletonHorseRoot = bakery.bakeLayer(ModelLayers.SKELETON_HORSE);
-            zombieHorseRoot = bakery.bakeLayer(ModelLayers.ZOMBIE_HORSE);
-            wolfRoot = bakery.bakeLayer(ModelLayers.WOLF);
-            foxRoot = bakery.bakeLayer(ModelLayers.FOX);
-            pandaRoot = bakery.bakeLayer(ModelLayers.PANDA);
-            ironGolemRoot = bakery.bakeLayer(ModelLayers.IRON_GOLEM);
-            goatRoot = bakery.bakeLayer(ModelLayers.GOAT);
-            polarBearRoot = bakery.bakeLayer(ModelLayers.POLAR_BEAR);
-            turtleRoot = bakery.bakeLayer(ModelLayers.TURTLE);
-            endermanRoot = bakery.bakeLayer(ModelLayers.ENDERMAN);
-            camelRoot = bakery.bakeLayer(ModelLayers.CAMEL);
-            llamaRoot = bakery.bakeLayer(ModelLayers.LLAMA);
-            llamaDecorRoot = bakery.bakeLayer(ModelLayers.LLAMA_DECOR);
-            rabbitRoot = bakery.bakeLayer(ModelLayers.RABBIT);
-            frogRoot = bakery.bakeLayer(ModelLayers.FROG);
-            hoglinRoot = bakery.bakeLayer(ModelLayers.HOGLIN);
-            snifferRoot = bakery.bakeLayer(ModelLayers.SNIFFER);
-            ravagerRoot = bakery.bakeLayer(ModelLayers.RAVAGER);
-            phantomRoot = bakery.bakeLayer(ModelLayers.PHANTOM);
-            parrotRoot = bakery.bakeLayer(ModelLayers.PARROT);
-            slimeInnerRoot = bakery.bakeLayer(ModelLayers.SLIME);
-            slimeOuterRoot = bakery.bakeLayer(ModelLayers.SLIME_OUTER);
-            magmaCubeRoot = bakery.bakeLayer(ModelLayers.MAGMA_CUBE);
-            silverfishRoot = bakery.bakeLayer(ModelLayers.SILVERFISH);
-            endermiteRoot = bakery.bakeLayer(ModelLayers.ENDERMITE);
-            allayRoot = bakery.bakeLayer(ModelLayers.ALLAY);
-            striderRoot = bakery.bakeLayer(ModelLayers.STRIDER);
-            striderSaddleRoot = bakery.bakeLayer(ModelLayers.STRIDER_SADDLE);
-            snowGolemRoot = bakery.bakeLayer(ModelLayers.SNOW_GOLEM);
-            blazeRoot = bakery.bakeLayer(ModelLayers.BLAZE);
-            spiderRoot = bakery.bakeLayer(ModelLayers.SPIDER);
-            caveSpiderRoot = bakery.bakeLayer(ModelLayers.CAVE_SPIDER);
-            shulkerRoot = bakery.bakeLayer(ModelLayers.SHULKER);
-            ghastRoot = bakery.bakeLayer(ModelLayers.GHAST);
-            vexRoot = bakery.bakeLayer(ModelLayers.VEX);
-            wardenRoot = bakery.bakeLayer(ModelLayers.WARDEN);
+            catRoot = freshOcelotRoot(CubeDeformation.NONE);
+            catCollarRoot = freshOcelotRoot(new CubeDeformation(0.01F));
+            batRoot = BatModel.createBodyLayer().bakeRoot();
+            beeRoot = BeeModel.createBodyLayer().bakeRoot();
+            witchRoot = WitchModel.createBodyLayer().bakeRoot();
+            horseRoot = freshHorseRoot();
+            donkeyRoot = ChestedHorseModel.createBodyLayer().bakeRoot();
+            muleRoot = ChestedHorseModel.createBodyLayer().bakeRoot();
+            skeletonHorseRoot = freshHorseRoot();
+            zombieHorseRoot = freshHorseRoot();
+            wolfRoot = WolfModel.createBodyLayer().bakeRoot();
+            foxRoot = FoxModel.createBodyLayer().bakeRoot();
+            pandaRoot = PandaModel.createBodyLayer().bakeRoot();
+            ironGolemRoot = IronGolemModel.createBodyLayer().bakeRoot();
+            goatRoot = GoatModel.createBodyLayer().bakeRoot();
+            polarBearRoot = PolarBearModel.createBodyLayer().bakeRoot();
+            turtleRoot = TurtleModel.createBodyLayer().bakeRoot();
+            endermanRoot = EndermanModel.createBodyLayer().bakeRoot();
+            camelRoot = CamelModel.createBodyLayer().bakeRoot();
+            llamaRoot = LlamaModel.createBodyLayer(CubeDeformation.NONE).bakeRoot();
+            llamaDecorRoot = LlamaModel.createBodyLayer(new CubeDeformation(0.5F)).bakeRoot();
+            rabbitRoot = RabbitModel.createBodyLayer().bakeRoot();
+            frogRoot = FrogModel.createBodyLayer().bakeRoot();
+            hoglinRoot = HoglinModel.createBodyLayer().bakeRoot();
+            snifferRoot = SnifferModel.createBodyLayer().bakeRoot();
+            ravagerRoot = RavagerModel.createBodyLayer().bakeRoot();
+            phantomRoot = PhantomModel.createBodyLayer().bakeRoot();
+            parrotRoot = ParrotModel.createBodyLayer().bakeRoot();
+            slimeInnerRoot = SlimeModel.createInnerBodyLayer().bakeRoot();
+            slimeOuterRoot = SlimeModel.createOuterBodyLayer().bakeRoot();
+            magmaCubeRoot = LavaSlimeModel.createBodyLayer().bakeRoot();
+            silverfishRoot = SilverfishModel.createBodyLayer().bakeRoot();
+            endermiteRoot = EndermiteModel.createBodyLayer().bakeRoot();
+            allayRoot = AllayModel.createBodyLayer().bakeRoot();
+            striderRoot = StriderModel.createBodyLayer().bakeRoot();
+            striderSaddleRoot = StriderModel.createBodyLayer().bakeRoot();
+            snowGolemRoot = SnowGolemModel.createBodyLayer().bakeRoot();
+            blazeRoot = BlazeModel.createBodyLayer().bakeRoot();
+            spiderRoot = SpiderModel.createSpiderBodyLayer().bakeRoot();
+            caveSpiderRoot = SpiderModel.createSpiderBodyLayer().bakeRoot();
+            shulkerRoot = ShulkerModel.createBodyLayer().bakeRoot();
+            ghastRoot = GhastModel.createBodyLayer().bakeRoot();
+            vexRoot = VexModel.createBodyLayer().bakeRoot();
+            wardenRoot = WardenModel.createBodyLayer().bakeRoot();
 
-            mobArmorInner = new HumanoidModel<>(bakery.bakeLayer(ModelLayers.PLAYER_INNER_ARMOR));
-            mobArmorOuter = new HumanoidModel<>(bakery.bakeLayer(ModelLayers.PLAYER_OUTER_ARMOR));
+            mobArmorInner = freshMobArmor(0.5F);
+            mobArmorOuter = freshMobArmor(1.0F);
 
             // Set all model parts visible once — no need to do this every frame
             setAllPartsVisible(normalModel);
@@ -377,6 +377,21 @@ public class ClientRagdollRenderer {
         LayerDefinition definition = LayerDefinition.create(
                 HumanoidModel.createMesh(new CubeDeformation(deformation), 0.0F), 64, 32);
         return new HumanoidModel<>(definition.bakeRoot());
+    }
+
+    private static HumanoidModel<?> freshMobArmor(float deformation) {
+        LayerDefinition definition = LayerDefinition.create(
+                HumanoidArmorModel.createBodyLayer(new CubeDeformation(deformation)), 64, 32);
+        return new HumanoidModel<>(definition.bakeRoot());
+    }
+
+    private static ModelPart freshOcelotRoot(CubeDeformation deformation) {
+        return LayerDefinition.create(OcelotModel.createBodyMesh(deformation), 64, 32).bakeRoot();
+    }
+
+    private static ModelPart freshHorseRoot() {
+        return LayerDefinition.create(HorseModel.createBodyMesh(CubeDeformation.NONE), 64, 64)
+                .bakeRoot();
     }
 
     private static void setAllPartsVisible(HumanoidModel<?> model) {
@@ -1283,7 +1298,7 @@ public class ClientRagdollRenderer {
                     if(ragdoll.isSaddledPig()) renderStrider(ragdoll,striderSaddleRoot,poseStack,buffer.getBuffer(RenderType.entityCutoutNoCull(STRIDER_SADDLE_TEXTURE)),light,torso,lleg,rleg);
                     break;
                 case SNOW_GOLEM: renderSnowGolem(ragdoll,poseStack,buffer,vc,light,torso,head,larm,rarm,lleg); break;
-                case BLAZE: renderBlaze(poseStack,vc,15728880,torso,head,larm,rarm,lleg,rleg); break;
+                case BLAZE: renderBlaze(poseStack, vc, 15728880, torso); break;
                 case SPIDER:
                     renderSpider(ragdoll,poseStack,vc,light,torso,head,larm,rarm,lleg,rleg);
                     renderSpider(ragdoll,poseStack,buffer.getBuffer(RenderType.eyes(SPIDER_EYES_TEXTURE)),15728880,torso,head,larm,rarm,lleg,rleg);
@@ -2304,10 +2319,10 @@ public class ClientRagdollRenderer {
         }
     }
 
-    private static void renderBlaze(PoseStack ps,VertexConsumer vc,int light,RagdollTransform torso,RagdollTransform g0,RagdollTransform g1,RagdollTransform g2,RagdollTransform g3,RagdollTransform g4){
-        blazeRoot.getAllParts().forEach(ModelPart::resetPose);ModelPart hp=blazeRoot.getChild("head");org.joml.Vector3f hc=cubeBoxCenter(hp);float bx=hp.x+hc.x,by=hp.y+hc.y,bz=hp.z+hc.z;
-        renderCentered(ps,vc,hp,torso,torso,light);
-        for(int i=0;i<12;i++) renderPropPart(ps,vc,blazeRoot.getChild("part"+i),torso,torso,bx,by,bz,1,0,0,0,light);
+    private static void renderBlaze(PoseStack ps, VertexConsumer vc, int light,
+                                    RagdollTransform torso) {
+        blazeRoot.getAllParts().forEach(ModelPart::resetPose);
+        renderCentered(ps, vc, blazeRoot.getChild("head"), torso, torso, light);
     }
 
     private static void renderSpider(ClientRagdoll r,PoseStack ps,VertexConsumer vc,int light,RagdollTransform torso,RagdollTransform head,RagdollTransform lf,RagdollTransform rf,RagdollTransform lh,RagdollTransform rh){

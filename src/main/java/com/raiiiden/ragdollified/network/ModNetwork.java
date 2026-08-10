@@ -7,7 +7,7 @@ import net.minecraftforge.network.NetworkDirection;
 import net.minecraftforge.network.simple.SimpleChannel;
 
 public class ModNetwork {
-    private static final String PROTOCOL_VERSION = "6";
+    private static final String PROTOCOL_VERSION = "7";
     public static final SimpleChannel CHANNEL = NetworkRegistry.newSimpleChannel(
             new ResourceLocation(Ragdollified.MODID, "main"),
             () -> PROTOCOL_VERSION,
@@ -23,7 +23,7 @@ public class ModNetwork {
 
     private static boolean acceptsVersion(String version) {
         // Keep the channel optional for vanilla servers/clients while rejecting a different
-        // mod packet layout (v6 expands poses to ten parts for native spider/Ghast anatomy).
+        // mod packet layout (v7 carries full-precision owner-streamed player poses).
         return PROTOCOL_VERSION.equals(version)
                 || NetworkRegistry.ABSENT.equals(version)
                 || NetworkRegistry.ACCEPTVANILLA.equals(version);

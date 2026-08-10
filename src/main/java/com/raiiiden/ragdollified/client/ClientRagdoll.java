@@ -139,18 +139,13 @@ public class ClientRagdoll {
     // interpolated stream pose into them instead. That is what removes the correction snap:
     // an observer never builds a divergent trajectory that has to be overwritten later.
     private boolean replicated;
+    private boolean hasReceivedStreamPose;
     private final ArrayDeque<StreamedPose> streamPoses = new ArrayDeque<>(STREAM_MAX_BUFFERED);
     private int lastStreamSequence = Integer.MIN_VALUE;
-    private int ticksSinceStreamPose;
     private int streamClock;
-    // Set when playback gave up on a silent owner; cleared by the next frame that arrives.
-    private boolean streamTimedOut;
     // Playback runs this far behind the newest sample so ordinary network jitter has slack
     // to absorb rather than showing up as a stutter.
-    private static final int STREAM_BUFFER_TICKS = 3;
-    // Owner disconnected, lagged out, or unloaded the area: take the body over locally rather
-    // than leaving it frozen mid-air. This is the same independent simulation mobs always use.
-    private static final int STREAM_TIMEOUT_TICKS = 40;
+    private static final int STREAM_BUFFER_TICKS = 2;
     private static final int STREAM_MAX_BUFFERED = 12;
     // Separate from scratchInterpPos/scratchInterpRot, which belong to the render thread —
     // stream playback runs on the physics worker and must not share their storage.
@@ -296,7 +291,11 @@ public class ClientRagdoll {
     // read freely by the render thread. Volatile, so every read sees a consistent snapshot.
     private volatile TransformSnapshot publishedSnapshot = null;
 
-    public TransformSnapshot getSnapshot() { return publishedSnapshot; }
+    public TransformSnapshot getSnapshot() {
+        // Do not render a server-coordinated observer from its locally constructed placeholder.
+        // It becomes visible only after an owner frame or authoritative settled pose is applied.
+        return replicated && !hasReceivedStreamPose ? null : publishedSnapshot;
+    }
 
     // ============================
     // Render-thread-only smoothed state — DO NOT touch from any other thread.
@@ -996,7 +995,7 @@ public class ClientRagdoll {
 
     // True if this ragdoll is actively being simulated (not destroyed, settled, or frozen).
     public boolean isActivelySimulating() {
-        return !destroyed && !settled && !bodiesFrozen;
+        return !destroyed && !replicated && !settled && !bodiesFrozen;
     }
 
     // Returns false while the ragdoll has no confirmed ground or surface support.
@@ -1376,6 +1375,10 @@ public class ClientRagdoll {
             }
         }
 
+        // An observer never owns the response to terrain changes. Keep displaying the last
+        // authoritative pose until the owner streams the awakened body.
+        if (replicated) return;
+
         // Wake up if settled / distance-frozen and torso is near
         if (settled || bodiesFrozen) {
             double dx = changedPos.getX() + 0.5 - cachedTorsoPos.x;
@@ -1407,6 +1410,7 @@ public class ClientRagdoll {
     // piles while leaving margin for ~0.5 blocks of movement per tick.
     // Returns true if this ragdoll was woken, false if it was already active or out of range.
     public boolean wakeIfNearRagdoll(Vector3f otherTorsoPos) {
+        if (replicated) return false;
         if (!settled) return false; // distance-frozen bodies are too far to matter
         // Water-settled corpses don't need cascade-wake. Bodies are removed from the world
         // anyway (frozen), so other active ragdolls pass through them visually instead of
@@ -1917,6 +1921,9 @@ public class ClientRagdoll {
 
     public void applyImpulse(RagdollPart part, Vector3f impulse) {
         if (part == null || part.index >= ragdollParts.size()) return;
+        // The server broadcasts impulses to every client for ordering, but only the elected
+        // owner is allowed to feed one into Bullet. Observers move when its streamed pose lands.
+        if (replicated) return;
         if (settled || bodiesFrozen) {
             settled = false;
             pendingTerrainValidation = false;
@@ -2203,9 +2210,6 @@ public class ClientRagdoll {
 
     public boolean isReplicated() { return replicated; }
 
-    // True while this body has taken over from a silent owner and should be left alone.
-    public boolean hasStreamTimedOut() { return streamTimedOut; }
-
     // Switch between local simulation and stream playback, physics thread only. Entering
     // playback pulls the bodies out of the dynamics world entirely, so a replicated ragdoll
     // costs nothing in the solver and cannot collide with or shove a live one.
@@ -2213,8 +2217,8 @@ public class ClientRagdoll {
         if (this.replicated == replicated || destroyed) return;
         this.replicated = replicated;
         if (replicated) {
+            hasReceivedStreamPose = false;
             if (!bodiesFrozen) freezeBodies();
-            ticksSinceStreamPose = 0;
         } else {
             streamPoses.clear();
             lastStreamSequence = Integer.MIN_VALUE;
@@ -2231,29 +2235,48 @@ public class ClientRagdoll {
         if (transforms[0] == null) return; // no torso anchor — nothing to place the rest against
         if (sequence <= lastStreamSequence) return;
         lastStreamSequence = sequence;
-        ticksSinceStreamPose = 0;
-        streamTimedOut = false;
         // A frame arriving before the first replicated tick still needs a sane stamp, and
         // the clock only advances while replicated, so stamping with it is consistent.
         if (streamPoses.size() >= STREAM_MAX_BUFFERED) streamPoses.pollFirst();
         streamPoses.addLast(new StreamedPose(transforms, streamClock));
     }
 
+    // Seed a newly elected owner that entered after the death. Unlike an observer it must resume
+    // Bullet, so write the server-retained owner pose directly and keep its spawn velocities as
+    // the best available continuation until fresh contact forces take over.
+    public void applyOwnerHandoffPose(RagdollTransform[] transforms) {
+        if (destroyed || transforms == null || transforms.length == 0 || transforms[0] == null) return;
+        if (replicated) setReplicated(false);
+        settled = false;
+        pendingTerrainValidation = false;
+        settledOnLiquid = false;
+        settledTicks = 0;
+
+        for (int i = 0; i < ragdollParts.size() && i < transforms.length; i++) {
+            RagdollTransform pose = transforms[i];
+            if (pose == null || pose.partId != i) continue;
+            tempTransform.setIdentity();
+            tempTransform.origin.set(pose.position);
+            tempTransform.setRotation(pose.rotation);
+            RigidBody body = ragdollParts.get(i);
+            body.setWorldTransform(tempTransform);
+            if (body.getMotionState() != null) body.getMotionState().setWorldTransform(tempTransform);
+            body.activate(true);
+        }
+        updateCachedTransforms();
+        updateLocalWorldCollision();
+    }
+
     private void tickReplicated() {
         ticksExisted++;
         streamClock++;
-        ticksSinceStreamPose++;
         if (!persistent && ticksExisted >= lifetime) {
             destroy();
             return;
         }
-        if (ticksSinceStreamPose > STREAM_TIMEOUT_TICKS) {
-            // Latch the takeover so the manager's standing ownership assignment does not
-            // immediately push this body back into playback it is receiving nothing for.
-            streamTimedOut = true;
-            setReplicated(false);
-            return;
-        }
+        // Never fall back to an independent observer simulation when the stream pauses. Holding
+        // the last authoritative frame may briefly freeze a body during packet loss, but it
+        // cannot produce a second trajectory or a different final resting place.
         if (streamPoses.isEmpty()) return;
 
         int playbackTick = streamClock - STREAM_BUFFER_TICKS;
@@ -2281,6 +2304,7 @@ public class ClientRagdoll {
         while (streamPoses.size() > 1 && streamPoses.peekFirst() != from) streamPoses.pollFirst();
 
         updateCachedTransforms();
+        hasReceivedStreamPose = true;
     }
 
     private void writeStreamedPose(StreamedPose from, StreamedPose to, float alpha) {
@@ -2310,10 +2334,8 @@ public class ClientRagdoll {
         ticksExisted = Math.max(ticksExisted, Math.max(0, ageTicks));
         if (!settledPose || transforms == null) return;
 
-        // The stream ends at the settled pose. Hand the body back to normal bookkeeping so it
-        // ages, validates its support, and can be woken by clicks or block changes like any
-        // other settled ragdoll.
-        setReplicated(false);
+        // Observers remain playback-only after settling. Keeping them out of Bullet prevents a
+        // local support check or block notification from forking the authoritative final pose.
         // Locally simulated bodies (mobs) have their own diverged pose here, and this is a
         // hard transform write. Ease the render state so the correction reads as the body
         // settling rather than as a teleport.
@@ -2340,6 +2362,19 @@ public class ClientRagdoll {
 
         updateCachedTransforms();
         updateLocalWorldCollision();
+
+        if (isPlayer) {
+            hasReceivedStreamPose = true;
+            settled = true;
+            settledOnLiquid = false;
+            settledTicks = 2;
+            pendingTerrainValidation = false;
+            settledGroundSupportBlocks.clear();
+            hasSettledTerrainSignature = false;
+            freezeBodies();
+            settledPoseReported = true;
+            return;
+        }
 
         BlockPos torsoBlock = currentTorsoBlock();
         if (!isSupportAreaLoaded()) {
