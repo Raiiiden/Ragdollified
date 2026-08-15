@@ -8,9 +8,7 @@ import net.minecraftforge.network.NetworkEvent;
 
 import java.util.function.Supplier;
 
-// Tells one client whether it owns the simulation of a player ragdoll. Owner streams pose
-// frames, non-owner plays them back. Both answers are sent explicitly; a client told nothing
-// (vanilla/older server, or a mob ragdoll) keeps simulating locally as a fallback.
+// Owners simulate; observers play back the owner's poses.
 public class RagdollStreamOwnerPacket {
     private final int entityId;
     private final boolean owner;

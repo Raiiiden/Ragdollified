@@ -35,11 +35,7 @@ public class ClientDeathHandler {
         // Skip if either spawn path has already queued or constructed this entity.
         if (ClientRagdollManager.hasPendingOrActiveRagdoll(entity.getId())) return;
 
-        // On a modded server, player ragdolls are server-coordinated. Waiting for its spawn and
-        // ownership packets prevents every observer from constructing a different local body
-        // during the gap before the authoritative owner's first full-part pose arrives. Keep the
-        // local path for vanilla servers, where no such packets exist.
-        if (isPlayer && RagdollifiedConfig.hasServerSnapshot()) return;
+        if (RagdollifiedConfig.hasServerSnapshot()) return;
 
         MobModelHelper.ModelType modelType = isPlayer
                 ? MobModelHelper.ModelType.HUMANOID_STANDARD

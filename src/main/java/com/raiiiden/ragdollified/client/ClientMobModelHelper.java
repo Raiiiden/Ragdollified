@@ -100,6 +100,19 @@ public final class ClientMobModelHelper {
     private static boolean hasHumanoidParts(EntityModel<?> model) {
         Set<String> found = new HashSet<>();
 
+        // Mesh child names first. These survive reobfuscation, so on a production jar this is
+        // the only branch that can match a model whose class is vanilla-mapped — the field and
+        // method scans below see "f_102808_"/"m_102854_" there and match nothing.
+        if (model instanceof net.minecraft.client.model.HierarchicalModel<?> hierarchical) {
+            ModelPartTree.forEachNamed(hierarchical.root(), (name, part) -> {
+                String n = ModelPartTree.normalize(name);
+                if (HUMANOID_PART_NAMES.contains(n)) found.add(n);
+            });
+            if (found.containsAll(HUMANOID_PART_NAMES)) return true;
+        }
+
+        // Java field and method names. Correct only for classes that ship unobfuscated, which
+        // in production means third-party models — exactly what still reaches this fallback.
         Class<?> cls = model.getClass();
         while (cls != null && cls != Object.class) {
             for (Field f : cls.getDeclaredFields()) {

@@ -587,8 +587,8 @@ public class ClientRagdollRenderer {
             // Visual Health composites its wounds into the skin itself rather than drawing a
             // layer, so swapping the texture here covers the base body and the second skin layer
             // at once. No-op without Visual Health, or when this body died undamaged.
-            VertexConsumer vc = buffer.getBuffer(
-                    RenderType.entityTranslucent(VisualHealthCompat.texture(damageKey, skin)));
+            ResourceLocation renderedBodyTexture = VisualHealthCompat.texture(damageKey, skin);
+            VertexConsumer vc = buffer.getBuffer(RenderType.entityTranslucent(renderedBodyTexture));
 
             renderHumanoidPartPhysics(poseStack, vc, model.body,     torso, torso, light, RagdollPart.TORSO);
             renderHumanoidPartPhysics(poseStack, vc, model.head,     head,  torso, light, RagdollPart.HEAD);
@@ -598,8 +598,7 @@ public class ClientRagdollRenderer {
             renderHumanoidPartPhysics(poseStack, vc, model.rightArm, rarm,  torso, light, RagdollPart.RIGHT_ARM);
 
             // Second skin layer (hat / jacket / sleeves / pants). PlayerModel keeps these as
-            // separate sibling parts, so the base-part passes above don't draw them; render
-            // each over its matching base part so the player's outer skin layer shows.
+            // separate sibling parts, so the head/body passes do not draw them.
             renderHumanoidPartPhysics(poseStack, vc, model.hat,         head,  torso, light, RagdollPart.HEAD);
             renderHumanoidPartPhysics(poseStack, vc, model.jacket,      torso, torso, light, RagdollPart.TORSO);
             renderHumanoidPartPhysics(poseStack, vc, model.leftPants,   lleg,  torso, light, RagdollPart.LEFT_LEG);
@@ -1478,6 +1477,21 @@ public class ClientRagdollRenderer {
         }
 
         List<OverlayPart> out = new java.util.ArrayList<>();
+
+        // Vanilla's second skin layer. PlayerModel hangs these off the root as siblings of the
+        // limbs they cover, and in a production jar their field names are SRG — the name scan
+        // below cannot see them, so they have to be read through the typed fields, which the
+        // compiler remaps correctly for both runtimes.
+        if (model instanceof PlayerModel<?> player) {
+            addOverlay(out, drawn, player.jacket, RagdollPart.TORSO);
+            addOverlay(out, drawn, player.leftSleeve, RagdollPart.LEFT_ARM);
+            addOverlay(out, drawn, player.rightSleeve, RagdollPart.RIGHT_ARM);
+            addOverlay(out, drawn, player.leftPants, RagdollPart.LEFT_LEG);
+            addOverlay(out, drawn, player.rightPants, RagdollPart.RIGHT_LEG);
+        }
+
+        // Modded humanoids keep their own field names in production, so the scan still finds
+        // their wear/overlay parts. Vanilla types are already covered above.
         for (Class<?> cls = model.getClass(); cls != null && cls != Object.class; cls = cls.getSuperclass()) {
             for (Field field : cls.getDeclaredFields()) {
                 if (field.getType() != ModelPart.class) continue;
@@ -1494,6 +1508,11 @@ public class ClientRagdollRenderer {
             }
         }
         return List.copyOf(out);
+    }
+
+    private static void addOverlay(List<OverlayPart> out, Set<ModelPart> drawn,
+                                   ModelPart part, RagdollPart anchor) {
+        if (part != null && drawn.add(part)) out.add(new OverlayPart(part, anchor));
     }
 
     private static void renderHumanoidMob(PoseStack poseStack, VertexConsumer vc, int light,
@@ -3315,45 +3334,69 @@ public class ClientRagdollRenderer {
     private static final java.util.Map<ModelPart, org.joml.Vector3f> CUBE_CENTER_CACHE =
             new java.util.WeakHashMap<>();
 
-    // Geometric centre of a part's own cubes, children excluded, in part-local pixel coords.
-    // The renderer overrides each pivot via setPos, so this centre is what has to be inverted
-    // and rotated to land the cube on its physics body. ModelPart.cubes is private, so it is
-    // read reflectively and cached after the first read.
+    // Geometric centre of a part's cubes in part-local pixel coords. The renderer overrides each
+    // pivot via setPos, so this centre is what has to be inverted and rotated to land the cube on
+    // its physics body. ModelPart.cubes is private, so it is read reflectively and cached.
     private static org.joml.Vector3f cubeBoxCenter(ModelPart part) {
         org.joml.Vector3f cached = CUBE_CENTER_CACHE.get(part);
         if (cached != null) return cached;
 
+        // minX, minY, minZ, maxX, maxY, maxZ
+        float[] bounds = {Float.POSITIVE_INFINITY, Float.POSITIVE_INFINITY, Float.POSITIVE_INFINITY,
+                Float.NEGATIVE_INFINITY, Float.NEGATIVE_INFINITY, Float.NEGATIVE_INFINITY};
+        accumulateCubeBounds(part, 0f, 0f, 0f, bounds, 0);
+
+        org.joml.Vector3f center = bounds[0] > bounds[3]
+                ? new org.joml.Vector3f()
+                : new org.joml.Vector3f(
+                        (bounds[0] + bounds[3]) * 0.5f,
+                        (bounds[1] + bounds[4]) * 0.5f,
+                        (bounds[2] + bounds[5]) * 0.5f);
+        CUBE_CENTER_CACHE.put(part, center);
+        return center;
+    }
+
+    // A part's own cubes when it has any — children stay excluded, because a limb's centre must
+    // not drift toward whatever hangs off it. A part with no cubes of its own is a different
+    // case: CEM packs (Fresh Animations, Reanimated) routinely leave the vanilla-named part
+    // empty and hang every cube off submodels, and reporting a zero centre there drops the limb
+    // onto its pivot. Those descendants are the part's geometry, so they are what gets measured.
+    //
+    // Child pivots are folded in as a translation; any baked-in child rotation is ignored, which
+    // is close enough for a centring offset and keeps this a cheap one-time walk.
+    private static void accumulateCubeBounds(ModelPart part, float ox, float oy, float oz,
+                                             float[] bounds, int depth) {
         java.util.List<ModelPart.Cube> cubes;
         try {
             cubes = net.minecraftforge.fml.util.ObfuscationReflectionHelper.getPrivateValue(
                     ModelPart.class, part, "f_104212_");
         } catch (Exception e) {
-            Ragdollified.LOGGER.warn("Could not access ModelPart cubes via reflection — falling back to zero offset", e);
-            org.joml.Vector3f zero = new org.joml.Vector3f();
-            CUBE_CENTER_CACHE.put(part, zero);
-            return zero;
+            if (!warnedCubes) {
+                warnedCubes = true;
+                Ragdollified.LOGGER.warn("Could not access ModelPart cubes via reflection — falling back to zero offset", e);
+            }
+            return;
         }
 
-        if (cubes == null || cubes.isEmpty()) {
-            org.joml.Vector3f zero = new org.joml.Vector3f();
-            CUBE_CENTER_CACHE.put(part, zero);
-            return zero;
+        if (cubes != null && !cubes.isEmpty()) {
+            for (ModelPart.Cube c : cubes) {
+                bounds[0] = Math.min(bounds[0], ox + c.minX); bounds[3] = Math.max(bounds[3], ox + c.maxX);
+                bounds[1] = Math.min(bounds[1], oy + c.minY); bounds[4] = Math.max(bounds[4], oy + c.maxY);
+                bounds[2] = Math.min(bounds[2], oz + c.minZ); bounds[5] = Math.max(bounds[5], oz + c.maxZ);
+            }
+            return;
         }
 
-        float minX = Float.POSITIVE_INFINITY, minY = Float.POSITIVE_INFINITY, minZ = Float.POSITIVE_INFINITY;
-        float maxX = Float.NEGATIVE_INFINITY, maxY = Float.NEGATIVE_INFINITY, maxZ = Float.NEGATIVE_INFINITY;
-        for (ModelPart.Cube c : cubes) {
-            minX = Math.min(minX, c.minX); maxX = Math.max(maxX, c.maxX);
-            minY = Math.min(minY, c.minY); maxY = Math.max(maxY, c.maxY);
-            minZ = Math.min(minZ, c.minZ); maxZ = Math.max(maxZ, c.maxZ);
+        if (depth >= MAX_CUBE_SEARCH_DEPTH) return;
+        for (ModelPart child : ModelPartTree.childrenOf(part).values()) {
+            accumulateCubeBounds(child, ox + child.x, oy + child.y, oz + child.z, bounds, depth + 1);
         }
-        org.joml.Vector3f center = new org.joml.Vector3f(
-                (minX + maxX) * 0.5f,
-                (minY + maxY) * 0.5f,
-                (minZ + maxZ) * 0.5f);
-        CUBE_CENTER_CACHE.put(part, center);
-        return center;
     }
+
+    // Submodel nesting in a .jem is untrusted data; bound the descent.
+    private static final int MAX_CUBE_SEARCH_DEPTH = 16;
+
+    private static boolean warnedCubes = false;
 
     private static org.joml.Vector3f setPosForPart(ModelPart part, float defaultXRot) {
         org.joml.Vector3f c = cubeBoxCenter(part);

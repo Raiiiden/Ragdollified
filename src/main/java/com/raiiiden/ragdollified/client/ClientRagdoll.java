@@ -36,6 +36,7 @@ import org.joml.Quaternionf;
 import javax.vecmath.Quat4f;
 import javax.vecmath.Vector3f;
 import java.util.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 @OnlyIn(Dist.CLIENT)
 public class ClientRagdoll {
@@ -127,26 +128,33 @@ public class ClientRagdoll {
 
 
     // Lifecycle
-    private int ticksExisted = 0;
+    private volatile int ticksExisted = 0;
     private final int lifetime;
     // External integrations can keep a downed body alive until they explicitly remove it.
     // This is read and written only on the physics worker through ClientRagdollManager.
     private boolean persistent;
-    private boolean destroyed = false;
+    private volatile boolean destroyed = false;
 
-    // Owner-streamed playback (player bodies on a modded server). A replicated body runs no
+    // Owner-streamed playback. A replicated body runs no
     // solver at all — its rigid bodies are out of the dynamics world and every tick writes an
     // interpolated stream pose into them instead. That is what removes the correction snap:
     // an observer never builds a divergent trajectory that has to be overwritten later.
-    private boolean replicated;
-    private boolean hasReceivedStreamPose;
+    private volatile boolean replicated;
+    private volatile boolean hasReceivedStreamPose;
     private final ArrayDeque<StreamedPose> streamPoses = new ArrayDeque<>(STREAM_MAX_BUFFERED);
     private int lastStreamSequence = Integer.MIN_VALUE;
-    private int streamClock;
+    private double streamPlaybackTick;
+    private boolean streamPlaybackInitialized;
     // Playback runs this far behind the newest sample so ordinary network jitter has slack
     // to absorb rather than showing up as a stutter.
-    private static final int STREAM_BUFFER_TICKS = 2;
+    private static final int STREAM_BUFFER_TICKS = 1;
     private static final int STREAM_MAX_BUFFERED = 12;
+    private static final int STATIONARY_HARD_SYNC_TICKS = 100;
+    private static final float HARD_SYNC_LINEAR_SPEED_SQ = 0.0004f;
+    private static final float HARD_SYNC_ANGULAR_SPEED_SQ = 0.0025f;
+    private int stationaryHardSyncTicks;
+    private boolean stationaryHardSyncLatched;
+    private final AtomicBoolean stationaryHardSyncRequested = new AtomicBoolean();
     // Separate from scratchInterpPos/scratchInterpRot, which belong to the render thread —
     // stream playback runs on the physics worker and must not share their storage.
     private final Vector3f streamScratchPos = new Vector3f();
@@ -162,10 +170,10 @@ public class ClientRagdoll {
     private static final class StreamedPose {
         final Vector3f[] positions = new Vector3f[RagdollTransform.MAX_PARTS];
         final Quat4f[] rotations = new Quat4f[RagdollTransform.MAX_PARTS];
-        final int arrivalTick;
+        final int sampleTick;
 
-        StreamedPose(RagdollTransform[] transforms, int arrivalTick) {
-            this.arrivalTick = arrivalTick;
+        StreamedPose(RagdollTransform[] transforms, int sampleTick) {
+            this.sampleTick = sampleTick;
             for (int i = 0; i < RagdollTransform.MAX_PARTS && i < transforms.length; i++) {
                 RagdollTransform transform = transforms[i];
                 if (transform == null || transform.partId != i) continue;
@@ -183,7 +191,7 @@ public class ClientRagdoll {
     private static final int HANDOVER_SETTLE_GRACE_TICKS = 20;
     // Written on the physics worker, read from the client tick by the corpse bridge.
     private volatile int settleGraceTicks = 0;
-    private boolean settled = false;
+    private volatile boolean settled = false;
     private boolean pendingTerrainValidation = false;
     // Set alongside `settled` when the resting surface was fluid (water/lava) instead of
     // solid ground. Renderer reads this to apply a sin-based bob offset so frozen bodies
@@ -192,7 +200,7 @@ public class ClientRagdoll {
     private static final float SETTLED_VELOCITY_THRESHOLD = 0.05f;
     private static final float SETTLED_ANG_VELOCITY_THRESHOLD = 0.15f;
     private static final int SETTLED_CHECKS_REQUIRED = 4; // 4 checks × 5 ticks = 20 ticks to settle
-    private boolean bodiesFrozen = false;
+    private volatile boolean bodiesFrozen = false;
 
     // Displacement-based settle: ragdolls in piles often vibrate above the velocity
     // threshold (contact-induced jitter) but don't actually move anywhere. Without this,
@@ -238,11 +246,13 @@ public class ClientRagdoll {
         public final boolean settled;
         public final boolean frozen;
         public final int ageTicks;
+        public final int sampleTick;
 
         TransformSnapshot(Vector3f[] positions, Quat4f[] rotations, Vector3f[] halfExtents,
                           Vector3f[] prevPositions, Quat4f[] prevRotations,
                           Vector3f cachedTorsoPos, Vector3f prevTorsoPos,
-                          boolean hasPrev, boolean destroyed, boolean settled, boolean frozen, int ageTicks) {
+                          boolean hasPrev, boolean destroyed, boolean settled, boolean frozen,
+                          int ageTicks, int sampleTick) {
             this.positions = positions;
             this.rotations = rotations;
             this.halfExtents = halfExtents;
@@ -255,6 +265,7 @@ public class ClientRagdoll {
             this.settled = settled;
             this.frozen = frozen;
             this.ageTicks = ageTicks;
+            this.sampleTick = sampleTick;
         }
 
         // Interpolated transform for the given part — for use on render thread.
@@ -290,6 +301,7 @@ public class ClientRagdoll {
     // Latest published transform state: written by the physics thread in publishSnapshot(),
     // read freely by the render thread. Volatile, so every read sees a consistent snapshot.
     private volatile TransformSnapshot publishedSnapshot = null;
+    private int snapshotSampleTick;
 
     public TransformSnapshot getSnapshot() {
         // Do not render a server-coordinated observer from its locally constructed placeholder.
@@ -297,33 +309,10 @@ public class ClientRagdoll {
         return replicated && !hasReceivedStreamPose ? null : publishedSnapshot;
     }
 
-    // ============================
-    // Render-thread-only smoothed state — DO NOT touch from any other thread.
-    // ============================
-    // Physics produces jitter under heavy contact pressure (the solver oscillates
-    // bodies a few mm/tick when piles compress). The raw snapshot interpolation shows
-    // every wiggle. We low-pass-filter on the render side: each frame, exponentially
-    // blend the displayed transform toward the interpolated snapshot value.
-    //
-    // alpha = 1 - exp(-dt * SMOOTHING_RATE) — dt-aware so it works at any FPS.
-    // SMOOTHING_RATE = 25 → half-life ~28ms, enough to kill 50ms-period jitter
-    // (the typical tick-to-tick wobble) without visible lag on real motion.
-    private static final float SMOOTHING_RATE = 25f;
-    // A settled pose from the server is a hard transform write onto a body this client had
-    // simulated independently. At the normal rate the resulting correction crosses the gap in
-    // ~85 ms, which reads as a pop; this rate (~115 ms half-life) spreads it over the ease
-    // window instead. Only used while correctionEaseUntilNanos is in the future.
-    private static final float CORRECTION_SMOOTHING_RATE = 6f;
-    private static final long CORRECTION_EASE_NANOS = 350_000_000L;
-    // Written on the physics worker, read on the render thread.
-    private volatile long correctionEaseUntilNanos = 0L;
     private final Vector3f[] smoothPositions = new Vector3f[RagdollTransform.MAX_PARTS];
     private final Quat4f[] smoothRotations = new Quat4f[RagdollTransform.MAX_PARTS];
     private final Vector3f smoothTorsoPos = new Vector3f();
-    private boolean smoothInitialized = false;
-    private long smoothLastFrameNanos = 0;
     private long smoothRenderFrame = Long.MIN_VALUE;
-    // Reusable scratch for per-frame interpolation (render thread only)
     private final Vector3f scratchInterpPos = new Vector3f();
     private final Quat4f scratchInterpRot = new Quat4f();
 
@@ -339,46 +328,20 @@ public class ClientRagdoll {
         if (snap == null || snap.destroyed) return;
         if (renderFrame != Long.MIN_VALUE && smoothRenderFrame == renderFrame) return;
 
-        long now = System.nanoTime();
-        // First call after a long gap (or initial frame) → snap to current value
-        // instead of blending in from stale state.
-        boolean needInit = !smoothInitialized
-                || smoothLastFrameNanos == 0
-                || now - smoothLastFrameNanos > 250_000_000L; // 250ms gap = re-init
-        float dt = needInit ? 0f : (now - smoothLastFrameNanos) / 1_000_000_000f;
-        smoothLastFrameNanos = now;
-
-        float rate = now < correctionEaseUntilNanos ? CORRECTION_SMOOTHING_RATE : SMOOTHING_RATE;
-        float alpha = needInit ? 1f : (float) (1.0 - Math.exp(-dt * rate));
-
-        // Smooth each part
         for (int i = 0; i < snap.positions.length && i < RagdollTransform.MAX_PARTS; i++) {
             if (snap.positions[i] == null) continue;
-            // Compute the snapshot-interpolated target for this part
             interpolateInto(snap, i, partialTick, scratchInterpPos, scratchInterpRot);
 
             if (smoothPositions[i] == null) {
                 smoothPositions[i] = new Vector3f(scratchInterpPos);
                 smoothRotations[i] = new Quat4f(scratchInterpRot);
             } else {
-                smoothPositions[i].x += (scratchInterpPos.x - smoothPositions[i].x) * alpha;
-                smoothPositions[i].y += (scratchInterpPos.y - smoothPositions[i].y) * alpha;
-                smoothPositions[i].z += (scratchInterpPos.z - smoothPositions[i].z) * alpha;
-                slerpInto(smoothRotations[i], scratchInterpRot, alpha, smoothRotations[i]);
+                smoothPositions[i].set(scratchInterpPos);
+                smoothRotations[i].set(scratchInterpRot);
             }
         }
 
-        // Smooth torso pos (used for distance culling — keep it consistent with parts)
-        if (!smoothInitialized) {
-            smoothTorsoPos.set(snap.getInterpolatedTorsoPosition(partialTick));
-        } else {
-            Vector3f targetTorso = snap.getInterpolatedTorsoPosition(partialTick);
-            smoothTorsoPos.x += (targetTorso.x - smoothTorsoPos.x) * alpha;
-            smoothTorsoPos.y += (targetTorso.y - smoothTorsoPos.y) * alpha;
-            smoothTorsoPos.z += (targetTorso.z - smoothTorsoPos.z) * alpha;
-        }
-
-        smoothInitialized = true;
+        smoothTorsoPos.set(snap.getInterpolatedTorsoPosition(partialTick));
         smoothRenderFrame = renderFrame;
     }
 
@@ -908,6 +871,8 @@ public class ClientRagdoll {
             unfreezeBodies();
             PHASE_STATS.unfrozenThisTick++;
         }
+
+        updateStationaryHardSync();
 
         // Actively simulating now — advance the lifetime clock (skipped while paused above).
         ticksExisted++;
@@ -2218,10 +2183,13 @@ public class ClientRagdoll {
         this.replicated = replicated;
         if (replicated) {
             hasReceivedStreamPose = false;
+            streamPlaybackInitialized = false;
+            resetStationaryHardSync();
             if (!bodiesFrozen) freezeBodies();
         } else {
             streamPoses.clear();
             lastStreamSequence = Integer.MIN_VALUE;
+            streamPlaybackInitialized = false;
             // Resume from wherever playback left the body rather than from the original
             // spawn pose, so taking over a stream mid-flight is continuous.
             if (bodiesFrozen && !settled) unfreezeBodies();
@@ -2230,15 +2198,64 @@ public class ClientRagdoll {
 
     // Buffer one frame from the owner, physics thread only, drained by ClientRagdollManager.
     // Out-of-order frames are dropped — they are stale by definition and would rewind playback.
-    public void applyStreamedPose(RagdollTransform[] transforms, int sequence) {
+    public void applyStreamedPose(RagdollTransform[] transforms, int sequence, int sampleTick,
+                                  boolean hardSync) {
         if (destroyed || transforms == null || transforms.length == 0) return;
         if (transforms[0] == null) return; // no torso anchor — nothing to place the rest against
         if (sequence <= lastStreamSequence) return;
         lastStreamSequence = sequence;
-        // A frame arriving before the first replicated tick still needs a sane stamp, and
-        // the clock only advances while replicated, so stamping with it is consistent.
+        if (hardSync) {
+            streamPoses.clear();
+            StreamedPose pose = new StreamedPose(transforms, sampleTick);
+            streamPoses.addLast(pose);
+            streamPlaybackTick = sampleTick;
+            streamPlaybackInitialized = true;
+            writeStreamedPose(pose, null, 0f);
+            updateCachedTransforms();
+            for (int i = 0; i < cachedTransforms.length; i++) {
+                if (cachedTransforms[i] == null) continue;
+                prevPositions[i].set(cachedTransforms[i].position);
+                prevRotations[i].set(cachedTransforms[i].rotation);
+            }
+            prevTorsoPos.set(cachedTorsoPos);
+            publishSnapshot();
+            hasReceivedStreamPose = true;
+            return;
+        }
         if (streamPoses.size() >= STREAM_MAX_BUFFERED) streamPoses.pollFirst();
-        streamPoses.addLast(new StreamedPose(transforms, streamClock));
+        streamPoses.addLast(new StreamedPose(transforms, sampleTick));
+    }
+
+    private void updateStationaryHardSync() {
+        boolean stationary = true;
+        for (RigidBody body : ragdollParts) {
+            body.getLinearVelocity(scratchVel);
+            body.getAngularVelocity(scratchAng);
+            if (scratchVel.lengthSquared() > HARD_SYNC_LINEAR_SPEED_SQ
+                    || scratchAng.lengthSquared() > HARD_SYNC_ANGULAR_SPEED_SQ) {
+                stationary = false;
+                break;
+            }
+        }
+        if (!stationary) {
+            resetStationaryHardSync();
+            return;
+        }
+        if (!stationaryHardSyncLatched
+                && ++stationaryHardSyncTicks >= STATIONARY_HARD_SYNC_TICKS) {
+            stationaryHardSyncLatched = true;
+            stationaryHardSyncRequested.set(true);
+        }
+    }
+
+    private void resetStationaryHardSync() {
+        stationaryHardSyncTicks = 0;
+        stationaryHardSyncLatched = false;
+        stationaryHardSyncRequested.set(false);
+    }
+
+    public boolean consumeStationaryHardSyncRequest() {
+        return stationaryHardSyncRequested.compareAndSet(true, false);
     }
 
     // Seed a newly elected owner that entered after the death. Unlike an observer it must resume
@@ -2269,7 +2286,6 @@ public class ClientRagdoll {
 
     private void tickReplicated() {
         ticksExisted++;
-        streamClock++;
         if (!persistent && ticksExisted >= lifetime) {
             destroy();
             return;
@@ -2279,11 +2295,21 @@ public class ClientRagdoll {
         // cannot produce a second trajectory or a different final resting place.
         if (streamPoses.isEmpty()) return;
 
-        int playbackTick = streamClock - STREAM_BUFFER_TICKS;
+        StreamedPose newest = streamPoses.peekLast();
+        double targetTick = newest.sampleTick - STREAM_BUFFER_TICKS;
+        if (!streamPlaybackInitialized) {
+            streamPlaybackTick = targetTick;
+            streamPlaybackInitialized = true;
+        } else {
+            streamPlaybackTick += 1.0;
+            double error = targetTick - streamPlaybackTick;
+            streamPlaybackTick += Math.max(-0.05, Math.min(0.25, error * 0.1));
+        }
+
         StreamedPose from = null;
         StreamedPose to = null;
         for (StreamedPose pose : streamPoses) {
-            if (pose.arrivalTick <= playbackTick) {
+            if (pose.sampleTick <= streamPlaybackTick) {
                 from = pose;
             } else {
                 to = pose;
@@ -2295,8 +2321,11 @@ public class ClientRagdoll {
         if (from == null) from = streamPoses.peekFirst();
         float alpha = 0f;
         if (to != null) {
-            int span = to.arrivalTick - from.arrivalTick;
-            if (span > 0) alpha = Math.min(1f, Math.max(0f, (playbackTick - from.arrivalTick) / (float) span));
+            int span = to.sampleTick - from.sampleTick;
+            if (span > 0) {
+                alpha = Math.min(1f, Math.max(0f,
+                        (float) ((streamPlaybackTick - from.sampleTick) / span)));
+            }
         }
         writeStreamedPose(from, to, alpha);
 
@@ -2334,14 +2363,7 @@ public class ClientRagdoll {
         ticksExisted = Math.max(ticksExisted, Math.max(0, ageTicks));
         if (!settledPose || transforms == null) return;
 
-        // Observers remain playback-only after settling. Keeping them out of Bullet prevents a
-        // local support check or block notification from forking the authoritative final pose.
-        // Locally simulated bodies (mobs) have their own diverged pose here, and this is a
-        // hard transform write. Ease the render state so the correction reads as the body
-        // settling rather than as a teleport.
-        if (hasPrevTransforms) correctionEaseUntilNanos = System.nanoTime() + CORRECTION_EASE_NANOS;
-
-        if (bodiesFrozen) unfreezeBodies();
+        if (bodiesFrozen && !replicated) unfreezeBodies();
         for (int i = 0; i < ragdollParts.size() && i < transforms.length; i++) {
             RagdollTransform authoritative = transforms[i];
             if (authoritative == null || authoritative.partId != i) continue;
@@ -2361,10 +2383,23 @@ public class ClientRagdoll {
         }
 
         updateCachedTransforms();
+
+        if (replicated) {
+            hasReceivedStreamPose = true;
+            settled = true;
+            settledOnLiquid = false;
+            settledTicks = 2;
+            pendingTerrainValidation = false;
+            settledGroundSupportBlocks.clear();
+            hasSettledTerrainSignature = false;
+            if (!bodiesFrozen) freezeBodies();
+            settledPoseReported = true;
+            return;
+        }
+
         updateLocalWorldCollision();
 
         if (isPlayer) {
-            hasReceivedStreamPose = true;
             settled = true;
             settledOnLiquid = false;
             settledTicks = 2;
@@ -2412,7 +2447,7 @@ public class ClientRagdoll {
         settledPoseReported = true;
     }
 
-    private int lastImpulseRevision = 0;
+    private volatile int lastImpulseRevision = 0;
     public int getLastImpulseRevision() { return lastImpulseRevision; }
     public void acknowledgeImpulseRevision(int revision) {
         if (revision > lastImpulseRevision) lastImpulseRevision = revision;
@@ -2588,7 +2623,7 @@ public class ClientRagdoll {
                 new Vector3f(cachedTorsoPos),
                 new Vector3f(prevTorsoPos),
                 hasPrevTransforms,
-                destroyed, settled, bodiesFrozen, ticksExisted
+                destroyed, settled, bodiesFrozen, ticksExisted, ++snapshotSampleTick
         );
     }
 
@@ -2655,7 +2690,7 @@ public class ClientRagdoll {
             publishedSnapshot = new TransformSnapshot(
                     prev.positions, prev.rotations, prev.halfExtents, prev.prevPositions, prev.prevRotations,
                     prev.cachedTorsoPos, prev.prevTorsoPos, prev.hasPrev, true,
-                    prev.settled, prev.frozen, prev.ageTicks);
+                    prev.settled, prev.frozen, prev.ageTicks, prev.sampleTick);
         }
 
         releaseCurrentCollisionGeometry();
@@ -2901,12 +2936,12 @@ public class ClientRagdoll {
 
     // Corpse feature — per-client one-shot guard so each observer reports this ragdoll's
     // settle at most once. The server de-duplicates reports from multiple observers.
-    private boolean corpseSettleReported = false;
+    private volatile boolean corpseSettleReported = false;
     public boolean isCorpseSettleReported() { return corpseSettleReported; }
     public void markCorpseSettleReported() { corpseSettleReported = true; }
 
     // Generic server-retained pose report used for late area entrants.
-    private boolean settledPoseReported = false;
+    private volatile boolean settledPoseReported = false;
     public boolean isSettledPoseReported() { return settledPoseReported; }
     public void markSettledPoseReported() { settledPoseReported = true; }
 

@@ -201,9 +201,7 @@ public class ClientRagdollManager {
             return end == null || target == null ? null : new DragRequest(Map.of(), end, target);
         }
     }
-    // Owner-streamed player ragdolls. The server assigns exactly one owner per player body;
-    // TRUE means "this client simulates and streams it", FALSE means "play back the stream".
-    // No entry at all means simulate locally — mobs, singleplayer, and vanilla/older servers.
+    // No entry means local-only simulation, such as on a vanilla server.
     private static final ConcurrentHashMap<Integer, Boolean> streamOwnership = new ConcurrentHashMap<>();
     private static final ConcurrentLinkedQueue<StreamedPoseUpdate> streamPoseQueue = new ConcurrentLinkedQueue<>();
     // A spawn packet and its first owner pose can land in the same client tick. Input queues are
@@ -212,8 +210,11 @@ public class ClientRagdollManager {
     private static final ConcurrentHashMap<Integer, StreamedPoseUpdate> pendingStreamPoses =
             new ConcurrentHashMap<>();
     private static final ConcurrentHashMap<Integer, Integer> streamSendSequences = new ConcurrentHashMap<>();
+    private static final ConcurrentHashMap<Integer, Integer> lastStreamSampleTicks =
+            new ConcurrentHashMap<>();
 
-    private record StreamedPoseUpdate(int entityId, RagdollTransform[] transforms, int sequence) {}
+    private record StreamedPoseUpdate(int entityId, RagdollTransform[] transforms,
+                                      int sequence, int sampleTick, boolean hardSync) {}
 
     private static final ConcurrentHashMap<Integer, DragRequest> dragTargets = new ConcurrentHashMap<>();
     private static final ConcurrentLinkedQueue<Integer> endedDragIds = new ConcurrentLinkedQueue<>();
@@ -229,6 +230,7 @@ public class ClientRagdollManager {
     // API spawns deliberately bypass the user's automatic-death enable list, but still
     // require a model type Ragdollified can actually construct and render.
     private static final Set<Integer> forcedSpawnIds = ConcurrentHashMap.newKeySet();
+    private static final Set<Integer> coordinatedSpawnIds = ConcurrentHashMap.newKeySet();
     private static final Set<Integer> persistentRagdollIds = ConcurrentHashMap.newKeySet();
     private static final ConcurrentHashMap<Integer, Boolean> pendingPersistenceUpdates = new ConcurrentHashMap<>();
 
@@ -355,12 +357,14 @@ public class ClientRagdollManager {
         dragTargets.remove(entityId);
         pendingSpawns.remove(entityId);
         forcedSpawnIds.remove(entityId);
+        coordinatedSpawnIds.remove(entityId);
         persistentRagdollIds.remove(entityId);
         pendingPersistenceUpdates.remove(entityId);
         authoritativeStates.remove(entityId);
         streamOwnership.remove(entityId);
         pendingStreamPoses.remove(entityId);
         streamSendSequences.remove(entityId);
+        lastStreamSampleTicks.remove(entityId);
         removeByRagdollIdQueue.offer(entityId);
     }
 
@@ -566,6 +570,8 @@ public class ClientRagdollManager {
         // first matching report, so every nearby observer can safely participate.
         for (ClientRagdoll r : ragdolls.values()) {
             if (!r.isPlayer() || r.getPlayerUUID() == null || r.isCorpseSettleReported()) continue;
+            if (RagdollifiedConfig.hasServerSnapshot()
+                    && !Boolean.TRUE.equals(streamOwnership.get(r.getOriginalEntityId()))) continue;
 
             // A towed body is not a stuck one. Its pose changes every tick, and the drag itself
             // re-arms the report every tick, so the give-up branch below fires continuously for
@@ -649,20 +655,24 @@ public class ClientRagdollManager {
         }
     }
 
-    // Server→client ownership assignment for a player ragdoll. Main thread.
+    // Server→client ownership assignment. Main thread.
     public static void enqueueStreamOwnership(int entityId, boolean owner) {
-        streamOwnership.put(entityId, owner);
-        if (!owner) streamSendSequences.remove(entityId);
+        Boolean previous = streamOwnership.put(entityId, owner);
+        if (!owner || !Boolean.TRUE.equals(previous)) {
+            streamSendSequences.remove(entityId);
+            lastStreamSampleTicks.remove(entityId);
+        }
     }
 
     // Server→client relayed pose frame from the owning client. Main thread.
-    public static void enqueueStreamedPose(int entityId, RagdollTransform[] transforms, int sequence) {
+    public static void enqueueStreamedPose(int entityId, RagdollTransform[] transforms,
+                                           int sequence, int sampleTick, boolean hardSync) {
         if (transforms == null) return;
-        streamPoseQueue.offer(new StreamedPoseUpdate(entityId, transforms, sequence));
+        streamPoseQueue.offer(new StreamedPoseUpdate(
+                entityId, transforms, sequence, sampleTick, hardSync));
     }
 
-    // Stream this client's owned player ragdolls to the server while they are still moving. At
-    // 20 Hz: one frame per game tick, so an observer follows every authoritative physics step.
+    // Players stream at 20 Hz and mobs at 10 Hz.
     public static void tickRagdollStreamClient() {
         if (streamOwnership.isEmpty()) return;
         Minecraft mc = Minecraft.getInstance();
@@ -679,6 +689,9 @@ public class ClientRagdollManager {
 
             ClientRagdoll.TransformSnapshot snap = ragdoll.getSnapshot();
             if (snap == null || snap.destroyed) continue;
+            Integer lastSampleTick = lastStreamSampleTicks.get(entry.getKey());
+            int interval = 1;
+            if (lastSampleTick != null && snap.sampleTick - lastSampleTick < interval) continue;
             RagdollTransform[] transforms = new RagdollTransform[RagdollTransform.MAX_PARTS];
             for (int i = 0; i < transforms.length && i < snap.positions.length; i++) {
                 if (snap.positions[i] == null || snap.rotations[i] == null) continue;
@@ -686,9 +699,12 @@ public class ClientRagdollManager {
             }
             if (transforms[0] == null) continue; // no torso anchor to encode the rest against
 
+            boolean hardSync = ragdoll.consumeStationaryHardSyncRequest();
             int sequence = streamSendSequences.merge(entry.getKey(), 1, Integer::sum);
             ModNetwork.CHANNEL.sendToServer(
-                    new RagdollStreamPacket(entry.getKey(), sequence, transforms));
+                    new RagdollStreamPacket(
+                            entry.getKey(), sequence, snap.sampleTick, hardSync, transforms));
+            lastStreamSampleTicks.put(entry.getKey(), snap.sampleTick);
         }
     }
 
@@ -701,11 +717,7 @@ public class ClientRagdollManager {
 
         for (ClientRagdoll ragdoll : ragdolls.values()) {
             if (!ragdoll.isSettled() || ragdoll.isSettledPoseReported() || ragdoll.isDestroyed()) continue;
-            // Only the elected physics owner may finalize a player ragdoll. The server enforces
-            // this too, but suppressing observer reports avoids letting a stale/local pose even
-            // reach the network during an ownership transition.
-            if (ragdoll.isPlayer()
-                    && !Boolean.TRUE.equals(streamOwnership.get(ragdoll.getOriginalEntityId()))) {
+            if (Boolean.FALSE.equals(streamOwnership.get(ragdoll.getOriginalEntityId()))) {
                 continue;
             }
             ClientRagdoll.TransformSnapshot snap = ragdoll.getSnapshot();
@@ -719,7 +731,6 @@ public class ClientRagdollManager {
             ModNetwork.CHANNEL.sendToServer(new RagdollStatePacket(
                     ragdoll.getOriginalEntityId(), transforms,
                     ragdoll.getLastImpulseRevision(), 0, true));
-            ragdoll.markSettledPoseReported();
         }
     }
 
@@ -784,7 +795,9 @@ public class ClientRagdollManager {
                 r.applyOwnerHandoffPose(streamed.transforms());
             } else {
                 r.setReplicated(true);
-                r.applyStreamedPose(streamed.transforms(), streamed.sequence());
+                r.applyStreamedPose(
+                        streamed.transforms(), streamed.sequence(), streamed.sampleTick(),
+                        streamed.hardSync());
             }
         }
         for (Map.Entry<Integer, Boolean> entry : pendingPersistenceUpdates.entrySet()) {
@@ -984,6 +997,7 @@ public class ClientRagdollManager {
                 // the rest of the session.
                 streamOwnership.remove(entry.getKey());
                 streamSendSequences.remove(entry.getKey());
+                lastStreamSampleTicks.remove(entry.getKey());
             }
         }
         lastPostTickNanos = System.nanoTime() - t0;
@@ -1349,6 +1363,7 @@ public class ClientRagdollManager {
             ClientRagdoll.SpawnData data = pendingSpawns.remove(entityId);
             if (data == null) continue; // stale order entry after replacement/drop
             boolean forced = forcedSpawnIds.remove(entityId);
+            boolean coordinated = coordinatedSpawnIds.remove(entityId);
             if (!isSupportedSpawn(data, forced)) {
                 continue;
             }
@@ -1365,7 +1380,8 @@ public class ClientRagdollManager {
             // Apply a known observer role at construction. drainInputQueues runs before this
             // method, so waiting for its next pass would leak one tick of local simulation
             // into a body this client is only supposed to play back.
-            if (Boolean.FALSE.equals(streamOwnership.get(data.originalEntityId))) {
+            if (coordinated
+                    && !Boolean.TRUE.equals(streamOwnership.get(data.originalEntityId))) {
                 ragdoll.setReplicated(true);
             }
             AuthoritativeState retainedState = authoritativeStates.remove(data.originalEntityId);
@@ -1379,7 +1395,9 @@ public class ClientRagdollManager {
                     ragdoll.applyOwnerHandoffPose(initialPose.transforms());
                 } else {
                     ragdoll.setReplicated(true);
-                    ragdoll.applyStreamedPose(initialPose.transforms(), initialPose.sequence());
+                    ragdoll.applyStreamedPose(
+                            initialPose.transforms(), initialPose.sequence(), initialPose.sampleTick(),
+                            initialPose.hardSync());
                 }
             }
             enforceMaxRagdolls();
@@ -1400,6 +1418,12 @@ public class ClientRagdollManager {
     // processSpawnQueue.
     public static void enqueueSpawn(ClientRagdoll.SpawnData data) {
         enqueueSpawn(data, false);
+    }
+
+    public static void enqueueCoordinatedSpawn(ClientRagdoll.SpawnData data) {
+        if (data == null) return;
+        coordinatedSpawnIds.add(data.originalEntityId);
+        if (!enqueueSpawn(data, false)) coordinatedSpawnIds.remove(data.originalEntityId);
     }
 
     // Queue a spawn from an integration. Forced spawns skip the automatic-death config filters,
@@ -1550,7 +1574,9 @@ public class ClientRagdollManager {
         streamPoseQueue.clear();
         pendingStreamPoses.clear();
         streamSendSequences.clear();
+        lastStreamSampleTicks.clear();
         forcedSpawnIds.clear();
+        coordinatedSpawnIds.clear();
         persistentRagdollIds.clear();
         pendingPersistenceUpdates.clear();
         explicitlyHiddenEntityIds.clear();

@@ -11,32 +11,39 @@ import net.minecraftforge.network.NetworkEvent;
 
 import java.util.function.Supplier;
 
-// Live pose frames for a ragdoll still in flight: owner client, to server, to nearby observers.
-// Where RagdollStatePacket reconciles one settled pose, this carries the body mid-tumble so
-// observers never guess a trajectory and get corrected. Players only — a wrong tumble on a mob
-// costs nothing and the bandwidth does.
-//
-// Player bodies are rare, so this deliberately carries full-precision absolute position and
-// quaternion floats for every part at 20 Hz. Observers receive the owner's actual Bullet
-// transforms; no offset or rotation quantization can create a different endpoint or angle.
+// Owner pose relayed through the server to observers.
 public class RagdollStreamPacket {
     private final int entityId;
     private final int sequence;
+    private final int sampleTick;
+    private final boolean hardSync;
     private final RagdollTransform[] transforms;
 
-    public RagdollStreamPacket(int entityId, int sequence, RagdollTransform[] transforms) {
+    public RagdollStreamPacket(int entityId, int sequence, int sampleTick,
+                               RagdollTransform[] transforms) {
+        this(entityId, sequence, sampleTick, false, transforms);
+    }
+
+    public RagdollStreamPacket(int entityId, int sequence, int sampleTick, boolean hardSync,
+                               RagdollTransform[] transforms) {
         this.entityId = entityId;
         this.sequence = sequence;
+        this.sampleTick = sampleTick;
+        this.hardSync = hardSync;
         this.transforms = transforms;
     }
 
     public int entityId() { return entityId; }
     public int sequence() { return sequence; }
+    public int sampleTick() { return sampleTick; }
+    public boolean hardSync() { return hardSync; }
     public RagdollTransform[] transforms() { return transforms; }
 
     public static void encode(RagdollStreamPacket msg, FriendlyByteBuf buf) {
         buf.writeVarInt(msg.entityId);
         buf.writeVarInt(msg.sequence);
+        buf.writeVarInt(msg.sampleTick);
+        buf.writeBoolean(msg.hardSync);
 
         int mask = 0;
         if (part(msg.transforms, 0) != null) {
@@ -65,9 +72,13 @@ public class RagdollStreamPacket {
     public static RagdollStreamPacket decode(FriendlyByteBuf buf) {
         int entityId = buf.readVarInt();
         int sequence = buf.readVarInt();
+        int sampleTick = buf.readVarInt();
+        boolean hardSync = buf.readBoolean();
         int mask = buf.readVarInt();
         RagdollTransform[] transforms = new RagdollTransform[RagdollTransform.MAX_PARTS];
-        if ((mask & 1) == 0) return new RagdollStreamPacket(entityId, sequence, transforms);
+        if ((mask & 1) == 0) {
+            return new RagdollStreamPacket(entityId, sequence, sampleTick, hardSync, transforms);
+        }
 
         for (int i = 0; i < RagdollTransform.MAX_PARTS; i++) {
             if ((mask & (1 << i)) == 0) continue;
@@ -75,7 +86,7 @@ public class RagdollStreamPacket {
                     buf.readFloat(), buf.readFloat(), buf.readFloat(),
                     buf.readFloat(), buf.readFloat(), buf.readFloat(), buf.readFloat());
         }
-        return new RagdollStreamPacket(entityId, sequence, transforms);
+        return new RagdollStreamPacket(entityId, sequence, sampleTick, hardSync, transforms);
     }
 
     public static void handle(RagdollStreamPacket msg, Supplier<NetworkEvent.Context> contextSupplier) {
@@ -84,11 +95,13 @@ public class RagdollStreamPacket {
             ServerPlayer sender = context.getSender();
             if (sender != null) {
                 ServerRagdollSyncManager.handleStreamFrame(
-                        sender, msg.entityId, msg.transforms, msg.sequence);
+                        sender, msg.entityId, msg.transforms, msg.sequence,
+                        msg.sampleTick, msg.hardSync);
             } else {
                 DistExecutor.unsafeRunWhenOn(Dist.CLIENT, () -> () ->
                         ClientRagdollManager.enqueueStreamedPose(
-                                msg.entityId, msg.transforms, msg.sequence));
+                                msg.entityId, msg.transforms, msg.sequence,
+                                msg.sampleTick, msg.hardSync));
             }
         });
         context.setPacketHandled(true);

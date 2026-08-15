@@ -232,7 +232,6 @@ public class RagdollSpawnPacket {
         this.villagerLevel = villagerLevel;
     }
 
-    // Player bodies are owner-streamed while in flight; mobs simulate locally per client.
     public boolean isPlayer() { return isPlayer; }
 
     // Pack wasSheared (bit 0) + dyeColorId (bits 1..4, 0..15) into one byte.
@@ -429,6 +428,6 @@ public class RagdollSpawnPacket {
         // Enqueue for the physics worker to construct. processSpawnQueue handles the
         // case where a local death-event spawn already exists for this entity ID —
         // it'll destroy the old one first (on the physics thread, no race).
-        ClientRagdollManager.enqueueSpawn(data);
+        ClientRagdollManager.enqueueCoordinatedSpawn(data);
     }
 }

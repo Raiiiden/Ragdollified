@@ -65,7 +65,7 @@ minecraft {
             if (project.hasProperty('mc_accessToken')) {
                 args '--accessToken', project.getProperty('mc_accessToken')
             }
-            args '--username', 'PlayerTwo'
+            //args '--username', 'PlayerTwo'
         }
 
         server {
@@ -141,9 +141,10 @@ dependencies {
     //implementation fg.deobf("curse.maven:visual-health-1473785:8368722")
     //implementation fg.deobf("curse.maven:curios-309927:6418456")
     //implementation fg.deobf("curse.maven:timeless-and-classics-zero-1028108:6654541")
-    //implementation fg.deobf("curse.maven:entity-texture-features-fabric-568563:7249541")
+    // EMF 3.0.7 has a hard runtime dependency on ETF 7+. CurseForge keeps both loader files
+    // under this historical project slug; file 7249541 is the Forge ETF 7.0.6 jar for 1.20.1.
+    runtimeOnly fg.deobf("curse.maven:entity-texture-features-fabric-568563:7249541")
     runtimeOnly fg.deobf("curse.maven:entity-model-features-844662:7260324")
-    compileOnly fg.deobf("curse.maven:entity-model-features-844662:7260324")
     //implementation fg.deobf("curse.maven:geckolib-388172:7553267")
     //implementation fg.deobf("curse.maven:fracture-point-1207137:7215903")
     //implementation fg.deobf("curse.maven:spark-361579:4738952")

@@ -286,6 +286,7 @@ public class CorpseManager {
         if (p == null) return; // already spawned or timed out
         if (observed && p.deathEntityId != ragdollEntityId) return;
         if (observed && p.impulseRevision != impulseRevision) return;
+        if (observed && !ServerRagdollSyncManager.isStreamOwner(sender, ragdollEntityId)) return;
 
         ServerLevel level = sender.server.getLevel(p.dimension);
         if (level == null) return;
@@ -295,8 +296,6 @@ public class CorpseManager {
 
         if (observed) {
             if (!sender.level().dimension().equals(p.dimension)) return;
-            double reportRange = RagdollifiedConfig.get(RagdollifiedConfig.PHYSICS_DISTANCE) + 16.0;
-            if (sender.position().distanceToSqr(origin) > reportRange * reportRange) return;
         }
 
         if (!isSanePose(transforms)) return;
