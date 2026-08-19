@@ -35,9 +35,8 @@ public class RagdollClickHandler {
         Vector3f from = new Vector3f((float) eyePos.x, (float) eyePos.y, (float) eyePos.z);
         Vector3f to = new Vector3f((float) endPos.x, (float) endPos.y, (float) endPos.z);
 
-        // Pure snapshot-based raycast — no jbullet calls from the render thread.
-        // findHitPart reads the published TransformSnapshot, so it's race-free.
-        // We pick the closest-by-torso ragdoll among those whose findHitPart returned a hit.
+        // Snapshot-based raycast with no jbullet call from the render thread: findHitPart reads the
+        // published TransformSnapshot, and the closest-by-torso ragdoll among the hits wins.
         ClientRagdoll hitRagdoll = null;
         RagdollPart hitPart = null;
         double bestDistSq = Double.MAX_VALUE;
@@ -82,9 +81,8 @@ public class RagdollClickHandler {
         dir.normalize();
         dir.scale(baseStrength);
 
-        // On a modded server, wait for its sequenced broadcast so every observer applies
-        // simultaneous pushes in exactly the same order. On a vanilla server there is no
-        // broadcast, so retain the local-only interaction behavior.
+        // On a modded server, wait for its sequenced broadcast so every observer applies simultaneous
+        // pushes in the same order. A vanilla server has none, so the local-only behaviour stays.
         if (!com.raiiiden.ragdollified.config.RagdollifiedConfig.hasServerSnapshot()) {
             ClientRagdollManager.enqueueImpulse(
                     hitRagdoll.getId(), hitPart.index, dir.x, dir.y, dir.z);

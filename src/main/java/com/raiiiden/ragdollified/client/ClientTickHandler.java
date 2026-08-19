@@ -23,9 +23,8 @@ public class ClientTickHandler {
         if (event.phase == TickEvent.Phase.END) {
             tickCounter++;
 
-            // Submit physics tick to the worker thread — non-blocking. If the previous
-            // physics tick is still running, this submission is dropped (we'd rather
-            // skip a tick than backlog and double up later).
+            // Submit a physics tick to the worker, non-blocking. A submission made while the previous
+            // tick still runs is dropped: skipping a tick beats doubling up later.
             ClientRagdollManager.submitTick();
 
             // Corpse bridge — report the local player's ragdoll settle to the server and
@@ -34,6 +33,9 @@ public class ClientTickHandler {
             ClientRagdollManager.tickRagdollSyncClient();
 
             ClientRagdollManager.tickRagdollStreamClient();
+
+            // Hand the physics worker's queued contacts to API listeners on this thread.
+            RagdollCollisionTracker.dispatchPending();
 
             // Cleanup every 5 seconds (still on render thread — cheap)
             if (tickCounter >= 100) {
@@ -47,19 +49,13 @@ public class ClientTickHandler {
     public static void onWorldUnload(LevelEvent.Unload event) {
         if (event.getLevel().isClientSide()) {
             ClientRagdollManager.onWorldUnload();
+            RagdollCollisionTracker.clear();
             GeckoLibArmorHelper.onWorldUnload();
         }
     }
 
-    // A corpse carries the blood and damage captured from the ragdoll it replaced, keyed by its
-    // own UUID. Free its wound textures when it goes away — an unbounded number of out-of-range
-    // corpses each holding a set would leak GL memory — but keep the capture itself so walking
-    // back into range rebuilds them.
-    //
-    // Deliberately not branching on the removal reason: the client removes an entity that simply
-    // left tracking range with RemovalReason.DISCARDED, the same reason a looted corpse gets, so
-    // "gone for good" is not distinguishable here. The captures are small and are dropped
-    // wholesale on disconnect (ClientRagdollManager#onWorldUnload).
+    // A corpse keeps the blood and damage of the ragdoll it replaced, so free its wound textures when it
+    // goes but keep the capture. The removal reason cannot distinguish gone from merely out of range.
     @SubscribeEvent
     public static void onCorpseLeaveLevel(EntityLeaveLevelEvent event) {
         if (!event.getLevel().isClientSide()) return;

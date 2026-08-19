@@ -58,10 +58,8 @@ public class BetterBloodOverlayCompat {
     // Rebuilt, render-ready decals for a ragdoll, plus the ClientWounds to release later.
     private record Built(List<Decal> decals, List<Object> clientWounds) {}
 
-    // Keyed by whatever currently owns the blood: the source entity's id (an Integer) while a
-    // physics ragdoll is the visible body, then the corpse entity's UUID once the corpse takes
-    // over. transferTo re-keys an entry at that handoff so the blood does not blink out with the
-    // ragdoll it was captured for.
+    // Keyed by whatever owns the blood: the source entity id while a ragdoll is the visible body, then
+    // the corpse UUID. transferTo re-keys at that handoff so the blood does not blink out.
     private static final Map<Object, Captured> CAPTURED = new ConcurrentHashMap<>();
     private static final Map<Object, Built> BUILT = new ConcurrentHashMap<>();
     // ClientWounds whose owning ragdoll is gone; drained + GL-released on the render thread.
@@ -173,9 +171,8 @@ public class BetterBloodOverlayCompat {
         return out != null ? out : Collections.emptyList();
     }
 
-    // The raw capture is deliberately kept after building: a corpse that leaves render range has
-    // its wound textures freed (releaseTextures) and must be able to rebuild them from scratch
-    // when it comes back, long after the entity it was captured from is gone.
+    // The raw capture is kept after building: a corpse leaving render range frees its wound textures
+    // and must rebuild them later, long after the entity it was captured from is gone.
     private static Built build(Object key) {
         Captured cap = CAPTURED.get(key);
         if (cap == null) return null;
@@ -230,9 +227,8 @@ public class BetterBloodOverlayCompat {
         return parts;
     }
 
-    // Hand a body's blood over to a new owner, used when a settled ragdoll is replaced by its
-    // corpse entity. The ragdoll is destroyed right after, and its evict() would otherwise take
-    // the blood with it.
+    // Hand a body's blood to a new owner when a settled ragdoll is replaced by its corpse; the ragdoll
+    // is destroyed right after and its evict() would otherwise take the blood with it.
     public static void transferTo(Object fromKey, Object toKey) {
         if (!available || fromKey.equals(toKey)) return;
         Captured cap = CAPTURED.remove(fromKey);
@@ -241,9 +237,8 @@ public class BetterBloodOverlayCompat {
         if (built != null) BUILT.put(toKey, built);
     }
 
-    // Free the GL wound textures but keep the capture, so the body can rebuild them on demand.
-    // Used when a corpse unloads with the chunk: holding its textures for an unbounded number of
-    // out-of-range corpses would leak, and rebuilding on return is cheap.
+    // Free the GL wound textures but keep the capture so a body can rebuild on demand. Used when a
+    // corpse unloads with its chunk, where holding textures for unbounded corpses would leak.
     public static void releaseTextures(Object key) {
         if (!available) return;
         Built built = BUILT.remove(key);

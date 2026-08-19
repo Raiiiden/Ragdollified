@@ -37,14 +37,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
-// Server-side corpse lifecycle.
-//
-// On death the inventory, and optionally XP, is captured into a PendingCorpse, the inventory is
-// cleared so vanilla drops nothing, and the pending is persisted through PendingCorpseStore. No
-// corpse entity exists yet. Once a nearby client reports its ragdoll settled, the corpse spawns
-// directly at the rest position in the settled pose, so it never visibly teleports. A timeout
-// from a stuck ragdoll or disconnect, or a restart after a crash, spawns it flat at the recorded
-// death position instead. Either way the loot is safe from the moment of death.
+// Server-side corpse lifecycle. Death captures the inventory into a persisted PendingCorpse and
+// clears it, then a client settle report spawns the corpse in its rest pose; a timeout spawns it flat.
 @Mod.EventBusSubscriber(modid = Ragdollified.MODID)
 public class CorpseManager {
 
@@ -94,9 +88,8 @@ public class CorpseManager {
 
         if (!hasLoot) return; // nothing to store; let vanilla handle drops/XP normally (no corpse)
 
-        // Suppress vanilla drops: copies are already held in the pending. Persisting the
-        // pending IS the safety net — the store autosaves with the world, so the cleared
-        // inventory and the captured loot are written together (no loss window on crash).
+        // Vanilla drops are suppressed because copies are already in the pending, and persisting the
+        // pending is the safety net: the store autosaves with the world, so there is no loss window.
         inv.clearContent();
         if (captured != null) CuriosCompat.clearCaptured(player, captured);
 
@@ -110,9 +103,8 @@ public class CorpseManager {
         store.pending.put(p.owner, p);
         store.lastDeaths.put(p.owner, p.corpseId);
 
-        // Queue a Corpse Compass for this player's next respawn, targeting the death position.
-        // If the corpse finishes settling before they respawn, finishSpawn refreshes this to the
-        // real resting position (see below).
+        // Queue a Corpse Compass for this player's next respawn, aimed at the death position; a settle
+        // finishing first refreshes it to the real resting place.
         if (RagdollifiedConfig.isCorpseCompassEnabled()) {
             store.deathTargets.put(p.owner, buildTarget(p, p.deathPos));
         }
@@ -121,18 +113,16 @@ public class CorpseManager {
         Ragdollified.LOGGER.debug("Captured pending corpse for {} at {}", p.name, p.deathPos);
     }
 
-    // Corpse capture replaces vanilla's inventory-drop path, so apply vanilla's vanishing rule
-    // explicitly. The original inventory is cleared below; EMPTY makes the cursed item disappear
-    // instead of becoming recoverable or remaining visible on the corpse.
+    // Corpse capture replaces vanilla's drop path, so vanilla's vanishing rule is applied explicitly:
+    // EMPTY makes the cursed item disappear rather than survive on the corpse.
     private static ItemStack corpseCopy(ItemStack stack) {
         return stack.isEmpty() || EnchantmentHelper.hasVanishingCurse(stack)
                 ? ItemStack.EMPTY
                 : stack.copy();
     }
 
-    // Hand over the Corpse Compass queued at death, when the feature is on and a corpse was
-    // actually made. Gated on the queued target rather than the respawn reason, so returning
-    // from the End never triggers it.
+    // Hand over the Corpse Compass queued at death, when the feature is on and a corpse was made.
+    // Gated on the queued target, not the respawn reason, so returning from the End never triggers it.
     @SubscribeEvent
     public static void onRespawn(net.minecraftforge.event.entity.player.PlayerEvent.PlayerRespawnEvent event) {
         if (!(event.getEntity() instanceof ServerPlayer player)) return;
@@ -223,12 +213,8 @@ public class CorpseManager {
                 continue;
             }
 
-            // While the owner is online but too far from the death position, their ragdoll is
-            // distance-frozen (paused) on their client and physically cannot report a settle
-            // yet. Keep pushing the deadline so we don't time out and freeze the corpse flat at
-            // the death position — once they return, the ragdoll finishes falling and the real
-            // resting place is reported. Only same-dimension owners count: a dimension change
-            // unloads the client ragdoll entirely, so there we must fall back to the timeout.
+            // An online owner too far from the death position has a distance-frozen ragdoll that cannot
+            // report, so the deadline is pushed. Only same-dimension owners count; elsewhere it times out.
             ServerPlayer owner = server.getPlayerList().getPlayer(p.owner);
             if (owner != null && owner.level().dimension().equals(p.dimension)
                     && owner.position().distanceToSqr(p.deathPos) > physDist * physDist) {
@@ -259,17 +245,15 @@ public class CorpseManager {
         Ragdollified.LOGGER.info("Restored {} corpse(s) from a previous session", restore.size());
     }
 
-    // Apply a client-reported settle, spawning the corpse at the rest position in its settled
-    // pose. Checks the reporter owns a pending and clamps the origin to a sane radius of the
-    // death position.
+    // Apply a client-reported settle, spawning the corpse at the rest position in its settled pose
+    // after checking the reporter owns a pending and clamping the origin near the death position.
     public static void handleSettle(ServerPlayer sender, double ox, double oy, double oz,
                                     RagdollTransform[] transforms) {
         handleSettleFor(sender, sender.getUUID(), -1, -1, false, ox, oy, oz, transforms);
     }
 
-    // Apply a settle seen by any nearby player. UUID plus death entity id keeps a stale or
-    // unrelated ragdoll from consuming the pending, and the proximity and dimension checks keep
-    // remote clients from choosing where it lands.
+    // Apply a settle seen by any nearby player. UUID plus death entity id stops a stale ragdoll
+    // consuming the pending, and proximity and dimension checks stop remote clients choosing where.
     public static void handleObservedSettle(ServerPlayer sender, UUID ownerUUID, int ragdollEntityId,
                                             int impulseRevision,
                                             double ox, double oy, double oz,
@@ -300,9 +284,8 @@ public class CorpseManager {
 
         if (!isSanePose(transforms)) return;
 
-        // Anti-cheat sanity on the client-reported rest position. Be generous vertically: a
-        // ragdoll legitimately falls a long way before settling (off a cliff, into a ravine),
-        // so only a large horizontal offset or ending up well ABOVE the death point is rejected.
+        // Sanity check on the reported rest position, generous vertically since a ragdoll can fall far
+        // before settling: only a large horizontal offset or ending well above the death point is rejected.
         double maxHoriz = Math.max(64.0, RagdollifiedConfig.get(RagdollifiedConfig.PHYSICS_DISTANCE));
         double dx = origin.x - p.deathPos.x;
         double dz = origin.z - p.deathPos.z;
@@ -311,10 +294,8 @@ public class CorpseManager {
             origin = p.deathPos; // reject implausible teleport
         }
 
-        // Do not materialize in the packet handler. A settle from another observer can race an
-        // impulse that is already travelling to the server; a short quiet window lets that
-        // impulse increment the revision and invalidate this candidate instead of teleporting
-        // the pushed ragdoll into a stale corpse pose.
+        // Not materialized in the packet handler: a settle can race an impulse already in flight, and a
+        // short quiet window lets that impulse invalidate this candidate instead of freezing a stale pose.
         if (p.settleOrigin == null || p.settleRevision != impulseRevision) {
             p.settleOrigin = origin;
             p.settleTransforms = transforms;
@@ -348,10 +329,8 @@ public class CorpseManager {
         return true;
     }
 
-    // Backs the OP retrieve command: find corpseId, give its contents and XP to the target, and
-    // erase it. Searches loaded corpse entities in every dimension first, then the pending store
-    // for one whose ragdoll has not settled yet. False when nothing matches, such as a corpse in
-    // an unloaded chunk.
+    // Backs the OP retrieve command: find corpseId, give its contents and XP to the target and erase
+    // it, searching loaded corpses then the pending store. False when nothing matches.
     public static boolean retrieveByCorpseId(MinecraftServer server, UUID corpseId, ServerPlayer target) {
         for (ServerLevel level : server.getAllLevels()) {
             for (net.minecraft.world.entity.Entity e : level.getAllEntities()) {
@@ -405,9 +384,7 @@ public class CorpseManager {
         }
     }
 
-    // ============================
     // Spawning
-    // ============================
 
     private static void spawnFlat(MinecraftServer server, PendingCorpse p) {
         ServerLevel level = server.getLevel(p.dimension);
@@ -440,10 +417,8 @@ public class CorpseManager {
         corpse.setOldPosAndRot();
         Vec3 settledAnchor = corpse.position();
 
-        // The reported origin is the already-settled torso center, while the corpse entity's
-        // position is the bottom of its interaction box. Grounding that box moves its origin
-        // downward. Offset the relative pose by the inverse movement so every rendered body
-        // part stays at exactly the world position reported by the observing client.
+        // The reported origin is the settled torso centre while the entity position is its box bottom,
+        // so grounding moves the origin down; the relative pose is offset back by that movement.
         if (reportedPose != null) {
             corpse.applyPose(translatePose(reportedPose, pos.subtract(settledAnchor)));
         } else {

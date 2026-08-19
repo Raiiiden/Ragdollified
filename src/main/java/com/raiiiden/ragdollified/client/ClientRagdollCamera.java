@@ -24,19 +24,16 @@ import net.minecraftforge.fml.common.Mod;
 import org.joml.Quaternionf;
 import org.joml.Vector3f;
 
-// Owns API and automatic death-camera attachments. Forge's camera-angle event is the frame
-// boundary for ragdoll rendering: the attached body's smoothed state is prepared here and reused
-// by the renderer later in the same frame, keeping the rendered head and the camera on one
-// transform.
+// Owns API and automatic death-camera attachments. Forge's camera-angle event is the frame boundary:
+// the body's smoothed state is prepared here and reused by the renderer, keeping head and camera one.
 @Mod.EventBusSubscriber(modid = Ragdollified.MODID, value = Dist.CLIENT)
 public final class ClientRagdollCamera {
     // Just outside the front face of a normal 0.5-block-wide player head.
     private static final float EYE_FORWARD_OFFSET = 0.325F;
     private static final float EYE_VERTICAL_OFFSET = 0.05F;
     private static final double CLIP_MARGIN = 0.05D;
-    // Half-size of the box kept clear around the eye. The near plane sits 0.05 blocks out, so
-    // anything closer is already inside the frustum and renders as see-through terrain. Same
-    // radius vanilla probes with for the third-person camera.
+    // Half-size of the box kept clear around the eye. The near plane is 0.05 blocks out, so anything
+    // closer renders as see-through terrain. Same radius vanilla probes for the third-person camera.
     private static final double NEAR_RADIUS = 0.1D;
     private static final double ESCAPE_STEP = 0.05D;
     private static final double MAX_ESCAPE = 0.75D;
@@ -78,9 +75,8 @@ public final class ClientRagdollCamera {
         return renderFrame;
     }
 
-    // Runs right after vanilla camera setup. Forge applies the returned yaw, pitch, and roll
-    // before building the world view, so this composes with other mods and needs no
-    // mapping-sensitive GameRenderer injection.
+    // Runs right after vanilla camera setup: Forge applies the returned yaw, pitch and roll before the
+    // world view is built, so this composes with other mods and needs no GameRenderer injection.
     @SubscribeEvent(priority = EventPriority.HIGHEST)
     public static void onComputeCameraAngles(ViewportEvent.ComputeCameraAngles event) {
         long frame = ++renderFrame;
@@ -190,10 +186,8 @@ public final class ClientRagdollCamera {
         event.setRoll(roll);
     }
 
-    // Sweep from the head centre out to the desired eye rather than popping between sampled
-    // blocks, then check the eye did not end up inside geometry. The sweep alone cannot fix a
-    // ragdoll: it only shortens the offset back toward the head centre, and a prone body already
-    // has that centre in the floor. The escape pass is what keeps the camera out of the ground.
+    // Sweep from the head centre out to the desired eye instead of popping between blocks, then check
+    // the eye is not inside geometry. The escape pass is what keeps a prone body's camera out of ground.
     private static Vec3 clipToClearPosition(Minecraft minecraft, Vec3 anchor, Vec3 desired) {
         Level level = minecraft.level;
         if (level == null) return desired;
@@ -203,9 +197,8 @@ public final class ClientRagdollCamera {
         double length = offset.length();
         Vec3 position = anchor;
         if (length >= 1.0E-6D) {
-            // Sweep the corners of the near plane, not just the center ray. A bare center ray
-            // reports "clear" while half the frustum is already buried in a wall, which is what
-            // let the world render through the edges of the screen.
+            // Sweep the near plane's corners, not just the centre ray: a centre ray reports clear while
+            // half the frustum is buried in a wall, which let the world render through the screen edges.
             double allowed = length;
             for (int corner = 0; corner < 8; corner++) {
                 Vec3 nudge = new Vec3(

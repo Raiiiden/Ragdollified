@@ -41,19 +41,16 @@ public final class RagdollSpawnState {
         }
     }
 
-    // Minecraft stores movement in blocks per tick, jBullet wants blocks per second. Prefer the
-    // pre-hit sample so knockback is not read as walking speed; damage recoil is applied
-    // separately after the bodies exist.
+    // Minecraft stores movement per tick and jBullet wants per second. The pre-hit sample is preferred
+    // so knockback is not read as walking speed; damage recoil is applied separately.
     public static Vec3 captureLinearVelocity(LivingEntity entity) {
         VelocitySample sample = PRE_HIT_VELOCITIES.remove(key(entity));
         Vec3 movement = sample != null ? sample.velocity : entity.getDeltaMovement();
         return movement.scale(TICKS_PER_SECOND);
     }
 
-    // A stationary victim has no inherited motion, so even a correctly directed limb impulse
-    // can make the body fold mostly in place. Give low-motion deaths a small whole-body carry
-    // in the attacker's facing direction. This is deliberately below normal mob running speed
-    // and only fills horizontal motion; real locomotion and vertical fall velocity are retained.
+    // A stationary victim has no inherited motion, so a limb impulse alone folds the body in place.
+    // Low-motion deaths get a small horizontal carry along the attacker's facing, below running speed.
     public static Vec3 applyAttackerDirectionFallback(LivingEntity victim,
                                                        @Nullable DamageSource damageSource,
                                                        Vec3 capturedVelocity) {
@@ -79,9 +76,8 @@ public final class RagdollSpawnState {
         if (direction.lengthSqr() < 1.0e-6) return velocity;
         direction = direction.normalize();
 
-        // Replace only the negligible horizontal component so the resulting carry reliably
-        // follows the attacker instead of retaining random AI/pathfinding drift. Preserve real
-        // vertical motion and add a slight lift so low bodies are not pinned into the floor.
+        // Replace only the negligible horizontal component, so the carry follows the attacker instead of
+        // keeping AI drift. Real vertical motion is preserved, plus a lift so bodies are not floor-pinned.
         return new Vec3(direction.x * minimumHorizontalSpeed,
                 velocity.y + minimumHorizontalSpeed * 0.144,
                 direction.z * minimumHorizontalSpeed);
@@ -91,9 +87,8 @@ public final class RagdollSpawnState {
         return ((entity.getId() & 0xffffffffL) << 1) | (entity.level().isClientSide ? 1L : 0L);
     }
 
-    // Vanilla adds explosion knockback after LivingEntity.hurt() returns, but the death event
-    // fires inside that call, so carry it separately and add it to the captured locomotion
-    // rather than replacing it.
+    // Vanilla adds explosion knockback after hurt() returns while the death event fires inside it, so
+    // it is carried separately and added to the captured locomotion rather than replacing it.
     @Nullable
     public static Vec3 captureExplosionVelocityKick(LivingEntity entity,
                                                      @Nullable DamageSource damageSource) {

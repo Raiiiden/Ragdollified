@@ -19,9 +19,8 @@ import net.minecraft.world.phys.Vec3;
 import javax.annotation.Nullable;
 import java.util.UUID;
 
-// Locator screen for CorpseCompassItem, opened by right-clicking it: bound corpse coordinates
-// and owner, a static body render with skin and baked death armor, and a clickable Corpse ID
-// that copies the OP retrieve command. Client-side and informational, with no server menu.
+// Locator screen for CorpseCompassItem: bound coordinates and owner, a static body render with skin
+// and death armor, and a clickable Corpse ID that copies the retrieve command. No server menu.
 public class CorpseCompassScreen extends Screen {
 
     private static final int PANEL_BG    = 0xFFC6C6C6;
@@ -139,11 +138,8 @@ public class CorpseCompassScreen extends Screen {
         if (this.minecraft == null || this.minecraft.player == null) return;
         LocalPlayer player = this.minecraft.player;
 
-        // Show the DEATH loadout, not the player's current gear: temporarily equip the baked armor
-        // (and clear hands) around the render, then restore in finally. Safe — the world already
-        // rendered this frame with the real gear, so there's no flicker, and setItemSlot is a
-        // client-only visual change (no packets). Vanilla's renderer handles lighting, the
-        // cast-shadow toggle, sizing, and mouse-follow correctly, which the hand-rolled path did not.
+        // Show the death loadout rather than current gear by equipping the baked armor around the
+        // render and restoring in finally. Client-only and post-render, so no packets and no flicker.
         ItemStack sHead = player.getItemBySlot(EquipmentSlot.HEAD);
         ItemStack sChest = player.getItemBySlot(EquipmentSlot.CHEST);
         ItemStack sLegs = player.getItemBySlot(EquipmentSlot.LEGS);
@@ -196,7 +192,7 @@ public class CorpseCompassScreen extends Screen {
         return false;
     }
 
-    // ---- vanilla-style panel drawing (shared look with CorpseScreen) ----
+    // Vanilla-style panel drawing, sharing the look of CorpseScreen.
 
     private static void drawPanel(GuiGraphics g, int x, int y, int w, int h) {
         g.fill(x, y, x + w, y + h, PANEL_BG);

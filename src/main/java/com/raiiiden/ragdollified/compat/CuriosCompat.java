@@ -19,19 +19,13 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
-// All Curios access is isolated here and done by reflection only: nothing else in the mod
-// names a Curios type and this file has no compile-time dependency either, so the integration
-// is a true soft dependency that builds and runs with no Curios jar. Same approach as
-// GeckoLibArmorHelper and the TACZ trackers.
-//
-// Every public method short-circuits when isLoaded() is false, and every reflective call is
-// lenient — failures degrade to a no-op or vanilla behaviour rather than crashing. isLoaded()
-// is true only when Curios is present and its API surface actually resolved.
+// All Curios access is isolated here and done purely by reflection, so the integration is a true soft
+// dependency: every method short-circuits when Curios is absent and every call degrades to a no-op.
 public final class CuriosCompat {
 
     private CuriosCompat() {}
 
-    // ----- cached reflection handles (resolved once in init()) -----
+    // Cached reflection handles, resolved once in init().
     private static Boolean loaded;
 
     private static Method mGetCuriosInventory; // CuriosApi.getCuriosInventory(LivingEntity)
@@ -109,9 +103,8 @@ public final class CuriosCompat {
         private final List<Integer> indices = new ArrayList<>();
     }
 
-    // Snapshot the curios that belong in the corpse: DropRule DEFAULT or ALWAYS_DROP. Anything
-    // marked ALWAYS_KEEP or DESTROY is left for Curios to handle. Does not touch the entity —
-    // hand the result to clearCaptured once the corpse exists.
+    // Snapshot the curios that belong in the corpse (DropRule DEFAULT or ALWAYS_DROP), leaving the
+    // rest to Curios. The entity is untouched: hand the result to clearCaptured once the corpse exists.
     public static Captured capture(LivingEntity entity, DamageSource source) {
         Captured out = new Captured();
         if (!isLoaded()) return out;
@@ -174,15 +167,12 @@ public final class CuriosCompat {
         }
     }
 
-    // One worn curio as the renderers need to see it: which slot type and index it sits in,
-    // whether the stack came from the cosmetic overlay, and whether the wearer has rendering
-    // switched on for that slot. Kept free of Curios types so it can be stored and passed around
-    // (corpse render data, ragdoll snapshots) with no Curios jar present.
+    // One worn curio as the renderers need it: slot type and index, cosmetic or not, and whether the
+    // wearer renders that slot. Free of Curios types so it can be stored with no Curios jar present.
     public record WornCurio(String slotId, int index, boolean cosmetic, boolean renderStatus, ItemStack stack) {}
 
-    // The curios a wearer is currently showing, resolved exactly the way Curios' own render layer
-    // resolves them: a cosmetic stack wins over the real one, and the real one is only shown when
-    // that slot's render toggle is on. Order follows the slot ids so repeated captures agree.
+    // The curios a wearer is showing, resolved as Curios' own render layer does: cosmetic wins over
+    // real, real only shows with its render toggle on, ordered by slot id so captures agree.
     public static List<WornCurio> captureWorn(LivingEntity entity) {
         List<WornCurio> out = new ArrayList<>();
         if (entity == null || !isLoaded()) return out;
@@ -254,9 +244,8 @@ public final class CuriosCompat {
         return false;
     }
 
-    // Swap worn curios with a corpse's parallel curio bag: each corpse stack at base + k, of
-    // slot type ids.get(k), trades with the wearer's next worn slot of that type. Entries with
-    // no matching slot stay on the corpse. Used by the corpse Swap button.
+    // Swap worn curios with a corpse's parallel bag: each corpse stack trades with the wearer's next
+    // worn slot of that type, and entries with no matching slot stay. Used by the corpse Swap button.
     public static void swapWorn(LivingEntity wearer, Container corpse, int base, List<String> ids) {
         if (!isLoaded()) return;
         Map<String, Object> curios = curiosMap(wearer);
@@ -289,9 +278,7 @@ public final class CuriosCompat {
         return !(r instanceof Boolean) || (Boolean) r; // null/error -> lenient true
     }
 
-    // ============================
     // Reflection plumbing
-    // ============================
 
     // CuriosApi.getCuriosInventory(entity).getCurios() as a raw Map<id, ICurioStacksHandler>.
     @SuppressWarnings("unchecked")

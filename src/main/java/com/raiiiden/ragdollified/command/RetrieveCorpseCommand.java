@@ -13,8 +13,7 @@ import net.minecraft.server.level.ServerPlayer;
 
 import java.util.UUID;
 
-// /ragdollified retrievecorpse <corpseId> [player] — OP failsafe (level 2) for an unreachable
-// corpse: gives its items and stored XP to the target player, defaulting to the runner, then
+// OP failsafe for an unreachable corpse: gives its items and stored XP to the target player, then
 // erases it. The Corpse Compass locator screen copies this command to the clipboard.
 public class RetrieveCorpseCommand {
 

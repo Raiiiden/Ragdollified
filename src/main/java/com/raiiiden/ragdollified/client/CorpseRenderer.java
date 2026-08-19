@@ -17,14 +17,12 @@ import javax.vecmath.Quat4f;
 import javax.vecmath.Vector3f;
 import java.util.UUID;
 
-// Draws a CorpseEntity in its frozen ragdoll pose, reusing ClientRagdollRenderer.renderPlayerBody
-// so body and armor match a live ragdoll exactly, leather and modded-armor fixes included.
-// Nothing renders until the corpse is posed; the physics ragdoll is the visual until then.
+// Draws a CorpseEntity in its frozen ragdoll pose through ClientRagdollRenderer.renderPlayerBody, so
+// body and armor match a live ragdoll. Nothing renders until posed; the physics ragdoll stands in.
 public class CorpseRenderer extends EntityRenderer<CorpseEntity> {
 
-    // The synthetic flat fallback is drawn from the torso pivot at the grounded entity origin.
-    // Half its thickness would extend below the floor, so lift that fallback only. Captured poses
-    // are already world-collision-correct and must not receive this adjustment.
+    // The synthetic flat fallback is drawn from the torso pivot at the grounded origin, so half its
+    // thickness would sink below the floor. Captured poses are already correct and are not lifted.
     private static final float GROUND_LIFT = 0.2f;
 
     public CorpseRenderer(EntityRendererProvider.Context context) {
@@ -41,10 +39,8 @@ public class CorpseRenderer extends EntityRenderer<CorpseEntity> {
         if (usesFallbackPose) pose = buildDefaultPose();
 
         UUID owner = corpse.getOwnerUUID();
-        // pe is only used for the GeckoLib armor proxy below; it may be null when the owner is
-        // out of render range (which is exactly when this bug used to show default skin). The
-        // skin itself is resolved range-independently via ClientPlayerSkinCache, and the
-        // GeckoLib path already falls back to its proxy ArmorStand when pe is null.
+        // pe only feeds the GeckoLib armor proxy and may be null with the owner out of range. The skin
+        // resolves range-independently through ClientPlayerSkinCache, and GeckoLib has its own fallback.
         AbstractClientPlayer pe = findPlayer(owner);
         ClientPlayerSkinCache.Skin resolved = ClientPlayerSkinCache.resolve(owner);
         ResourceLocation skin = resolved.texture;
@@ -55,17 +51,12 @@ public class CorpseRenderer extends EntityRenderer<CorpseEntity> {
         ItemStack legs   = corpse.getArmor("Legs");
         ItemStack boots  = corpse.getArmor("Boots");
 
-        // The EntityRenderer poseStack is already at the entity origin (camera-relative),
-        // and the stored transforms are entity-relative — renderPlayerBody translates to the
-        // torso for us, so we pass the transforms directly. distSq=0 -> always draw armor.
-        // Only the synthetic timeout/recovery pose needs a ground lift. A captured physics
-        // pose is already collision-correct in world space, so lifting it would introduce a
-        // visible upward snap during the ragdoll-to-corpse handoff.
+        // The pose stack is already at the entity origin and the transforms are entity-relative, so they
+        // pass straight through. Only the synthetic fallback is ground-lifted; a real pose would snap.
         poseStack.pushPose();
         if (usesFallbackPose) poseStack.translate(0.0, GROUND_LIFT, 0.0);
-        // The corpse entity's own UUID keys the blood and damage captured from the ragdoll it
-        // replaced (see ClientRagdollManager#tickCorpseClient), so the body keeps the wounds it
-        // died with instead of going clean at the handoff.
+        // The corpse's own UUID keys the blood and damage captured from the ragdoll it replaced, so the
+        // body keeps the wounds it died with instead of going clean at the handoff.
         ClientRagdollRenderer.renderPlayerBody(poseStack, buffer, packedLight, 0.0,
                 pose[RagdollPart.TORSO.index], pose[RagdollPart.HEAD.index],
                 pose[RagdollPart.LEFT_ARM.index], pose[RagdollPart.RIGHT_ARM.index],
@@ -87,9 +78,8 @@ public class CorpseRenderer extends EntityRenderer<CorpseEntity> {
         return null;
     }
 
-    // Entity-relative fallback pose for when no settle pose was reported: the standing humanoid
-    // layout from RagdollBodyFactory.buildHumanoid, pitched back 90 degrees about X so the body
-    // lies on its back rather than standing. Flip the pitch sign if it ever reads as face-down.
+    // Entity-relative fallback pose when no settle was reported: the standing humanoid layout from
+    // buildHumanoid, pitched back 90 degrees so the body lies on its back.
     private static RagdollTransform[] buildDefaultPose() {
         Quat4f lie = new Quat4f();
         lie.set(new javax.vecmath.AxisAngle4f(1f, 0f, 0f, -(float) (Math.PI / 2.0)));
@@ -109,10 +99,8 @@ public class CorpseRenderer extends EntityRenderer<CorpseEntity> {
         return new RagdollTransform(index, rotate(lie, x, y, z), new Quat4f(lie));
     }
 
-    // Rotate a vector by a unit quaternion: v' = v + 2w(u x v) + 2u x (u x v), u = q.xyz. Plain
-    // floats on purpose — going through Quat4f(x,y,z,0) turns the torso's (0,0,0) offset into a
-    // zero-length quaternion, which vecmath normalizes into a divide-by-zero NaN that collapses
-    // the model matrix and makes the body invisible. This form never normalizes.
+    // Rotate a vector by a unit quaternion in plain floats: going through Quat4f turns the torso's
+    // zero offset into a zero-length quaternion, which vecmath normalizes into NaN and hides the body.
     private static Vector3f rotate(Quat4f q, float x, float y, float z) {
         float ux = q.x, uy = q.y, uz = q.z, w = q.w;
         float tx = 2f * (uy * z - uz * y);

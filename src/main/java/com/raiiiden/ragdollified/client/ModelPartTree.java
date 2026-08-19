@@ -9,20 +9,13 @@ import java.util.Collections;
 import java.util.Map;
 import java.util.function.BiConsumer;
 
-// Part lookup by *mesh* child name rather than by Java field name.
-//
-// A model's Java field names ("head", "leftArm", "jacket") only read that way in a dev
-// workspace. In a production jar every vanilla-mapped class is reobfuscated, so the same
-// fields come back from reflection as "f_102808_" and every name comparison silently fails.
-// Mesh child names are plain strings stored in the LayerDefinition, are never remapped, and
-// are identical in both environments — so anything that has to identify a part by name has
-// to go through the tree, not through Field.getName().
+// Part lookup by mesh child name, not Java field name: fields are reobfuscated in a production jar,
+// while mesh names live in the LayerDefinition and read the same in both environments.
 @OnlyIn(Dist.CLIENT)
 public final class ModelPartTree {
 
-    // ModelPart.children is private with no accessor. ObfuscationReflectionHelper takes the
-    // SRG name and maps it back to "children" in dev, so one constant covers both runtimes —
-    // the same approach ClientRagdollRenderer already uses for the cubes list.
+    // ModelPart.children is private, so ObfuscationReflectionHelper maps the SRG name back in dev and
+    // one constant covers both runtimes, as the renderer already does for the cubes list.
     private static final String CHILDREN_SRG = "f_104213_";
 
     // CEM packs can nest submodels arbitrarily deep, and the .jem is untrusted data. Bound the

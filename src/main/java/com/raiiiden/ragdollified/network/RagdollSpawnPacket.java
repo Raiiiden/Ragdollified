@@ -43,23 +43,18 @@ public class RagdollSpawnPacket {
     // Sheep state (ignored for non-sheep mobs). Packed into a single byte:
     // bit 0 = wasSheared, bits 1..4 = dyeColorId (0..15). bit 5 reserved.
     private final byte sheepState;
-    // Server-authoritative directional hit info — server captures from
-    // ServerRagdollHitTracker (TACZ Pre + vanilla LivingHurtEvent) and bakes here so
-    // there's no client-side race against the death packet. -1 in hitPartIndex means
-    // "no hit info, don't apply an impulse".
+    // Server-authoritative directional hit info, captured from ServerRagdollHitTracker and baked here
+    // so no client races the death packet. hitPartIndex -1 means no hit info and no impulse.
     private final byte hitPartIndex;
     private final float hitImpulseX, hitImpulseY, hitImpulseZ;
     // Impact point relative to the entity origin. Zero means "no lever arm known", which
     // falls back to the old torque-free centre-of-mass application.
     private final float hitOffsetX, hitOffsetY, hitOffsetZ;
-    // Generic overlay-state bits for mob-specific extras the renderer needs to draw on
-    // top of the base model. bit 0 = creeper was charged (powered armor swirl),
-    // bit 1 = pig was saddled. Bits 2-7 reserved for future overlays. Zero = no overlay.
+    // Overlay-state bits for mob-specific extras drawn over the base model: bit0 charged creeper,
+    // bit1 saddled pig, bits 2-7 reserved, zero meaning no overlay.
     private final byte overlayState;
-    // Villager profession state — empty type means "not a villager / no profession".
-    // Use registry-key strings (e.g. "minecraft:plains", "minecraft:farmer") so
-    // mod-added biomes/professions survive without a registry-id remap. Level 1..5
-    // (vanilla VillagerData range), 0 means unknown.
+    // Villager profession state, empty type meaning no profession. Registry-key strings so mod-added
+    // biomes and professions survive without a remap; level 1..5, 0 unknown.
     private final String villagerType;
     private final String villagerProfession;
     private final byte villagerLevel;
@@ -181,9 +176,8 @@ public class RagdollSpawnPacket {
                 overlayState, villagerType, villagerProfession, villagerLevel);
     }
 
-    // Canonical form. hitOffset is the impact point relative to the entity origin — the lever
-    // arm that turns a hit into rotation. Without it every impulse runs through the centre of
-    // mass, which is torque-free, so bodies get pushed but never tip over.
+    // Canonical form. hitOffset is the impact point relative to the entity origin, the lever arm that
+    // turns a hit into rotation; without it every impulse is torque-free and bodies never tip.
     public RagdollSpawnPacket(int originalEntityId, boolean isPlayer, String mobType,
                               MobModelHelper.ModelType modelType, float scale,
                               String playerUUID, String playerName,
@@ -329,12 +323,8 @@ public class RagdollSpawnPacket {
 
         net.minecraft.world.entity.Entity worldEntity = level.getEntity(msg.originalEntityId);
         MobModelHelper.ModelType modelType = msg.modelType;
-        // The packet's type is resolved from the entity id alone, which is all the server can see.
-        // Where the client still has the entity, its real model class is the better answer and
-        // wins: a mod can give a humanoid-backed entity a villager-like id, and only the model
-        // knows which UVs its texture was drawn for. The
-        // id-based guess is kept whenever the model is one we do not recognise — vanilla villagers
-        // ride a VillagerModel this cannot identify, and their ILLAGER routing has to survive.
+        // The packet type comes from the entity id, all the server can see, so a client that still has
+        // the entity prefers its real model class — except for models we cannot identify, like villagers.
         if (!msg.isPlayer && worldEntity instanceof net.minecraft.world.entity.LivingEntity living) {
             MobModelHelper.ModelType actual = ClientMobModelHelper.getActualModelType(living);
             if (MobModelHelper.isSupportedModelType(actual)) {
@@ -352,9 +342,8 @@ public class RagdollSpawnPacket {
             return;
         }
 
-        // Snapshot the damage visuals (Better Blood Overlay wounds, Visual Health damage tier)
-        // while the dying entity is still around. This packet frequently beats the client's own
-        // LivingDeathEvent, and whichever of the two runs first is the one that has to do it.
+        // Snapshot the damage visuals while the dying entity is still around: this packet often beats
+        // the client's own LivingDeathEvent, and whichever runs first has to do it.
         if (worldEntity instanceof net.minecraft.world.entity.LivingEntity dying) {
             ClientRagdollManager.captureCompatVisuals(dying);
         }
@@ -367,10 +356,8 @@ public class RagdollSpawnPacket {
             try { uuid = UUID.fromString(msg.playerUUID); } catch (Exception ignored) {}
         }
 
-        // Hit info: prefer the server-baked values in the packet (no race against the
-        // hurt event), fall back to the client tracker only if the server didn't have
-        // a capture (e.g., dedicated server without our mod, where we wouldn't be
-        // receiving this packet anyway, or PhysicsHooks ran before the hit landed).
+        // Prefer the server-baked hit values, which cannot race the hurt event, falling back to the
+        // client tracker only when the server had no capture.
         int hitPartIndex;
         Vec3 hitImpulse;
         // Lever arm for the impulse. Zero means the server had no impact point (older server,
@@ -425,9 +412,8 @@ public class RagdollSpawnPacket {
                 msg.villagerType, msg.villagerProfession, msg.villagerLevel
         );
 
-        // Enqueue for the physics worker to construct. processSpawnQueue handles the
-        // case where a local death-event spawn already exists for this entity ID —
-        // it'll destroy the old one first (on the physics thread, no race).
+        // Enqueue for the physics worker. processSpawnQueue destroys any existing local death-event
+        // spawn for this entity id first, on that thread, so there is no race.
         ClientRagdollManager.enqueueCoordinatedSpawn(data);
     }
 }

@@ -87,9 +87,7 @@ public final class RagdollHitMapper {
         return Math.abs(rotX) <= centerBand;
     }
 
-    // ============================
     // Raytrace-based hit-part resolution
-    // ============================
 
     private record PartAABB(RagdollPart part,
                             double minX, double minY, double minZ,
@@ -100,10 +98,8 @@ public final class RagdollHitMapper {
         return new PartAABB(part, cx - hx, cy - hy, cz - hz, cx + hx, cy + hy, cz + hz);
     }
 
-    // AABB layout in entity-facing-local coords: X/Z origin at the entity, +Z forward, Y
-    // relative to the feet. Mirrors RagdollBodyFactory's buildHumanoid/buildQuadruped/
-    // buildChicken/buildCreeper layouts plus ClientRagdoll's spawnYOffset, so the raytrace
-    // tests against where the parts actually are.
+    // AABB layout in entity-facing-local coords: origin at the entity, +Z forward, Y from the feet.
+    // Mirrors the RagdollBodyFactory layouts plus spawnYOffset, so the raytrace hits the real parts.
     private static PartAABB[] aabbsFor(MobModelHelper.ModelType modelType, LivingEntity entity) {
         float scale = Math.max(0.001f, entity.getBbHeight() / 1.8f);
         switch (modelType) {
@@ -136,9 +132,8 @@ public final class RagdollHitMapper {
                 };
             }
             case QUADRUPED: {
-                // spawnYOffset = 0.7 * scale for quadrupeds. Head extends forward (-Z in
-                // entity local since entity faces -Z, but we work in entity-facing-local
-                // where +Z is forward — so head at +Z relative to torso center).
+                // spawnYOffset is 0.7 * scale for quadrupeds, and in this entity-facing-local frame the
+                // head sits at +Z relative to the torso centre.
                 double cy = 0.7 * scale;
                 float s = scale;
                 return new PartAABB[]{
@@ -345,9 +340,8 @@ public final class RagdollHitMapper {
         PartAABB[] aabbs = aabbsFor(modelType, entity);
         if (aabbs.length == 0) return null;
 
-        // Translate ray into entity-facing-local frame: entity X/Z at origin, Y relative
-        // to entity feet, +Z = entity forward. Same rotation matrix as the bbox-bucket
-        // path so the layout numbers above stay consistent.
+        // Translate the ray into the entity-facing-local frame with the same rotation matrix as the
+        // bbox-bucket path, so the layout numbers above stay consistent.
         double dx = hitPos.x - entity.getX();
         double dy = hitPos.y - entity.getY();
         double dz = hitPos.z - entity.getZ();
@@ -375,9 +369,8 @@ public final class RagdollHitMapper {
         return bestPart;
     }
 
-    // Slab-method ray/AABB intersection returning the entry t, or NEGATIVE_INFINITY on a miss.
-    // Negative t is accepted when the origin already sits inside the box — a bullet's xOld can
-    // land inside the hitbox after overshooting in one tick — and counts as a hit at t=0.
+    // Slab ray/AABB intersection returning entry t, or NEGATIVE_INFINITY on a miss. A negative t counts
+    // as a hit at 0, since a bullet's xOld can land inside the hitbox after overshooting in one tick.
     private static double rayAabb(double ox, double oy, double oz,
                                   double dx, double dy, double dz,
                                   double minX, double minY, double minZ,
@@ -423,9 +416,8 @@ public final class RagdollHitMapper {
         double localY = hitPos.y - entity.getY();
         double localZ = hitPos.z - entity.getZ();
 
-        // Rotate the XZ plane so +Z_local aligns with the entity's facing direction.
-        // MC convention: body yaw 0 → forward (0,0,1) = south. Limb positions are in
-        // body space, so use yBodyRot's public accessor rather than the entity's look yaw.
+        // Rotate the XZ plane so +Z_local aligns with facing: at body yaw 0 forward is south. Limb
+        // positions are in body space, so use yBodyRot rather than the look yaw.
         float yawRad = (float) Math.toRadians(entity.getVisualRotationYInDegrees());
         double cos = Math.cos(yawRad);
         double sin = Math.sin(yawRad);

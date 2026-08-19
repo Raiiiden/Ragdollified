@@ -17,10 +17,8 @@ import javax.annotation.Nullable;
 import javax.vecmath.Vector3f;
 import java.util.UUID;
 
-// Item-model "angle" property pointing the Corpse Compass needle at its bound corpse. Adapted
-// from vanilla CompassItemPropertyFunction with the same wobble smoothing and angle math, but
-// the target is read from the stack NBT rather than a lodestone GlobalPos, so it still works
-// with the corpse's chunk unloaded.
+// Item-model angle property pointing the Corpse Compass needle at its corpse, adapted from vanilla
+// with the same wobble maths but reading the stack NBT, so it works with that chunk unloaded.
 public class CorpseCompassAngle implements ClampedItemPropertyFunction {
 
     private final Wobble wobble = new Wobble();

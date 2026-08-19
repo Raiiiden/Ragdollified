@@ -21,9 +21,8 @@ import javax.annotation.Nullable;
 import java.util.List;
 import java.util.UUID;
 
-// Compass bound to one corpse. Id, position, dimension, and owner are baked into the stack NBT
-// at creation, so the needle and locator screen need no per-frame networking and work with the
-// corpse's chunk unloaded. Right-click opens the locator screen, wired client-side.
+// Compass bound to one corpse, with id, position, dimension and owner baked into the stack NBT, so
+// needle and locator need no networking and work with the corpse's chunk unloaded.
 public class CorpseCompassItem extends Item {
 
     // NBT contract shared by the server (who bakes the target) and the client (needle + screen).

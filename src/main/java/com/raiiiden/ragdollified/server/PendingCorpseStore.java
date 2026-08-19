@@ -11,9 +11,8 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
-// World-persistent registry of PendingCorpse entries: deaths whose corpse has not spawned
-// because the ragdoll is still settling. Kept on the overworld's data storage, with each entry
-// recording its own dimension, which is what makes the spawn-after-settle flow crash-safe.
+// World-persistent registry of PendingCorpse entries, deaths whose corpse has not spawned because
+// the ragdoll is still settling. Each entry records its dimension, which makes the flow crash-safe.
 public class PendingCorpseStore extends SavedData {
 
     private static final String NAME = "ragdollified_pending_corpses";
@@ -26,10 +25,8 @@ public class PendingCorpseStore extends SavedData {
     // Recovered/removed ids whose still-unloaded entity NBT must be discarded when loaded.
     public final Set<UUID> removedCorpseIds = new HashSet<>();
 
-    // Per-owner "give a Corpse Compass on next respawn" queue: recorded at death, consumed at
-    // respawn. Separate from pending because a ragdoll can settle and clear its pending before
-    // the player clicks respawn, and the compass still has to be handed out. Each value carries
-    // the target: corpse id, position, dimension, owner name.
+    // Per-owner queue of Corpse Compasses to hand out on the next respawn, kept separate from pending
+    // because a ragdoll can settle before the player clicks respawn. Each value carries its target.
     public final Map<UUID, CompoundTag> deathTargets = new HashMap<>();
 
     public PendingCorpseStore() {}

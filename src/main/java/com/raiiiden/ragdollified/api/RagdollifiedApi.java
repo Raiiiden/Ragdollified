@@ -4,6 +4,7 @@ import com.raiiiden.ragdollified.RagdollPart;
 import com.raiiiden.ragdollified.client.ClientRagdoll;
 import com.raiiiden.ragdollified.client.ClientRagdollCamera;
 import com.raiiiden.ragdollified.client.ClientRagdollManager;
+import com.raiiiden.ragdollified.client.RagdollCollisionTracker;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.phys.Vec3;
@@ -18,10 +19,8 @@ import java.util.function.IntPredicate;
 import org.joml.Quaternionf;
 import org.joml.Vector3f;
 
-// Client-side integration API for Ragdollified. Every mutating call is safe from the client or
-// render thread: they are queued and applied on the physics worker. Deliberately local only —
-// an integration needing multiplayer agreement sends its own packet and calls this on each
-// receiving client.
+// Client-side integration API. Every mutating call is safe from the client or render thread, being
+// queued onto the physics worker, and is deliberately local: multiplayer agreement is the caller's.
 @OnlyIn(Dist.CLIENT)
 public final class RagdollifiedApi {
     private RagdollifiedApi() {}
@@ -211,6 +210,27 @@ public final class RagdollifiedApi {
             if (enter > exit) return -1.0;
         }
         return enter;
+    }
+
+    // Listen for ragdoll contacts, called on the client thread once per contact formed that tick.
+    // Detection is off entirely until a listener registers, and resting contact is never reported.
+    public static void addCollisionListener(RagdollCollisionListener listener) {
+        addCollisionListener(listener, 0.0);
+    }
+
+    // As above, dropping contacts closing slower than minImpactSpeed (blocks per second) before they
+    // are queued. Prefer a non-zero value: a settling body makes many slow contacts.
+    public static void addCollisionListener(RagdollCollisionListener listener, double minImpactSpeed) {
+        RagdollCollisionTracker.addListener(listener, minImpactSpeed);
+    }
+
+    public static boolean removeCollisionListener(RagdollCollisionListener listener) {
+        return RagdollCollisionTracker.removeListener(listener);
+    }
+
+    // True while any listener is registered, i.e. while contact detection is doing work.
+    public static boolean isCollisionTrackingActive() {
+        return RagdollCollisionTracker.isActive();
     }
 
     // Snapshot of known active ragdoll entity ids.

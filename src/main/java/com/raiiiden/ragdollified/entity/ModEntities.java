@@ -17,9 +17,8 @@ public class ModEntities {
             () -> EntityType.Builder.<CorpseEntity>of(CorpseEntity::new, MobCategory.MISC)
                     .sized(1.0f, 0.8f)
                     .clientTrackingRange(8)
-                    // Sync position every tick. A resting corpse doesn't move, so tracking sends
-                    // nothing (no bandwidth cost); but while it's falling this makes the drop smooth
-                    // instead of the once-per-second jump that updateInterval(20) produced.
+                    // Sync position every tick: a resting corpse sends nothing anyway, while a falling one
+                    // drops smoothly instead of the once-per-second jump updateInterval(20) gave.
                     .updateInterval(1)
                     .build("corpse"));
 

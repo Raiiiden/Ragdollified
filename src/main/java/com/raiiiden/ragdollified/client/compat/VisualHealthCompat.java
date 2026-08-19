@@ -10,20 +10,8 @@ import java.lang.reflect.Method;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
-// Compatibility helper for Visual Health (win.demistorm.visual_health).
-//
-// Visual Health does not draw wounds as a separate layer the way Better Blood Overlay does: it
-// composites them into a copy of the entity's own texture and swaps that texture into the
-// RenderType from inside MultiBufferSource.getBuffer, keyed off a thread-local "entity currently
-// being rendered" its EntityRenderDispatcher mixin sets. Ragdollified resolves its own texture and
-// builds its own RenderTypes, and the source entity is hidden (HideDeadEntityMixin) or gone by the
-// time a ragdoll draws, so that swap never fires for us.
-//
-// So instead of intercepting anything, we ask VH's generator for the composited texture directly
-// and render the ragdoll with it. Using the same builder inputs VH uses on a live entity
-// (category "composite", the entity itself, its damage tier) means we hit the generator's own
-// cache: the usual case reuses the exact texture the mob was already wearing rather than baking a
-// new one.
+// Compatibility helper for Visual Health, which composites wounds into a copy of the entity texture
+// via a swap that never fires for ragdolls, so its generator is asked for that texture directly.
 public final class VisualHealthCompat {
     private static final Logger LOGGER = LogManager.getLogger();
     private static final String PKG = "win.demistorm.visual_health.";
@@ -41,14 +29,12 @@ public final class VisualHealthCompat {
     private static Method builder;
     private static Method bCategory, bEntity, bDamageTier, bTexture, bComposite, bGenerate;
 
-    // The entity is kept alive for the ragdoll's lifetime on purpose: the generator reads its
-    // UUID (wound placement seed) and type (tint) long after the entity left the level. Dropped
-    // in evict() when the ragdoll is destroyed.
+    // The entity is kept alive for the ragdoll's lifetime because the generator reads its UUID and
+    // type long after it left the level. Dropped in evict() when the ragdoll is destroyed.
     private record Captured(LivingEntity entity, int tier) {}
 
-    // Keyed by whatever currently owns the damage: the source entity's id (an Integer) while a
-    // physics ragdoll is the visible body, then the corpse entity's UUID once the corpse takes
-    // over — same handoff the blood compat does.
+    // Keyed by whatever owns the damage: the source entity id while a ragdoll is the visible body, then
+    // the corpse UUID once the corpse takes over, the same handoff the blood compat uses.
     private static final Map<Object, Captured> CAPTURED = new ConcurrentHashMap<>();
     // key -> (base texture -> composited texture). A base texture mapped to itself means VH
     // produced nothing for it, cached so we don't re-enter the generator every frame.
@@ -100,9 +86,8 @@ public final class VisualHealthCompat {
     public static void capture(Object key, LivingEntity entity) {
         if (!available || entity == null) return;
         try {
-            // VH updates the tier from its EntityRenderDispatcher mixin, which we cancel as soon
-            // as a ragdoll exists — so the killing blow may never have been folded in. Do it here
-            // while the entity still has its final health.
+            // Visual Health updates the tier from a mixin cancelled as soon as a ragdoll exists, so the
+            // killing blow may never have been folded in. Do it here, while health is still final.
             updateTier.invoke(null, entity);
 
             if (!(boolean) shouldRender.invoke(null, entity, allChecks)) return;
@@ -120,9 +105,8 @@ public final class VisualHealthCompat {
         }
     }
 
-    // The damaged version of a body's texture, or the texture unchanged when Visual Health is
-    // absent, disabled for this entity, or the entity died undamaged. Render thread only — the
-    // generator uploads a texture on a cache miss.
+    // The damaged version of a body's texture, or the texture unchanged when Visual Health is absent or
+    // the entity died undamaged. Render thread only: the generator uploads on a cache miss.
     public static ResourceLocation texture(Object key, ResourceLocation base) {
         if (!available || base == null || key == null) return base;
         Captured cap = CAPTURED.get(key);
@@ -160,10 +144,8 @@ public final class VisualHealthCompat {
         if (resolved != null) RESOLVED.put(toKey, resolved);
     }
 
-    // Called when a ragdoll or corpse is gone for good. The generated textures themselves belong
-    // to Visual Health's own cache (shared with the live-entity path), so there is nothing to free
-    // here — only our entity reference and the per-body lookup. A corpse that merely unloads with
-    // its chunk keeps its entry: it costs a reference, and there would be no way to rebuild it.
+    // Called when a ragdoll or corpse is gone for good. The textures belong to Visual Health's own
+    // cache, so only the entity reference and lookup are dropped; an unloading corpse keeps its entry.
     public static void evict(Object key) {
         if (!available) return;
         CAPTURED.remove(key);

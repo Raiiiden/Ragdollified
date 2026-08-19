@@ -8,10 +8,8 @@ import net.minecraft.network.chat.Component;
 import net.minecraft.world.entity.player.Inventory;
 import net.minecraft.world.inventory.Slot;
 
-// Corpse loot screen, drawn from the vanilla GUI palette rather than the chest texture so the
-// layout can absorb a variable number of curio slots and separate the equipment band, loot
-// grid, and player inventory. Frames are drawn under every menu slot, so they always line up
-// with whatever positions CorpseMenu chose.
+// Corpse loot screen drawn from the vanilla GUI palette rather than the chest texture, so it can
+// absorb any number of curio slots. Frames are drawn under every menu slot CorpseMenu placed.
 public class CorpseScreen extends AbstractContainerScreen<CorpseMenu> {
 
     // Vanilla inventory palette.
@@ -35,9 +33,9 @@ public class CorpseScreen extends AbstractContainerScreen<CorpseMenu> {
     @Override
     protected void init() {
         super.init();
-        // "Take All" / "Swap" buttons, right-aligned on the title row.
-        int h = 12;
-        int y = this.topPos + 4;
+        // "Take All" / "Swap" buttons, right-aligned on their own row under the title.
+        int h = this.menu.getButtonHeight();
+        int y = this.topPos + this.menu.getButtonRowY();
         Button swap = Button.builder(Component.literal("Swap"), b -> press(CorpseMenu.BTN_SWAP))
                 .bounds(0, y, this.font.width("Swap") + 10, h).build();
         Button takeAll = Button.builder(Component.literal("Take All"), b -> press(CorpseMenu.BTN_TAKE_ALL))
@@ -98,6 +96,18 @@ public class CorpseScreen extends AbstractContainerScreen<CorpseMenu> {
         g.fill(sx - 1, sy + 16, sx + 17, sy + 17, BEVEL_LIGHT); // bottom edge
         g.fill(sx + 16, sy - 1, sx + 17, sy + 17, BEVEL_LIGHT); // right edge
         g.fill(sx, sy, sx + 16, sy + 16, SLOT_BG);              // interior
+    }
+
+    // The title has the whole first line to itself; only a name wider than the panel is trimmed.
+    @Override
+    protected void renderLabels(GuiGraphics g, int mouseX, int mouseY) {
+        int max = this.imageWidth - this.titleLabelX * 2;
+        Component name = this.title;
+        if (this.font.width(name) > max) {
+            name = Component.literal(this.font.plainSubstrByWidth(name.getString(), max - this.font.width("...")) + "...");
+        }
+        g.drawString(this.font, name, this.titleLabelX, this.titleLabelY, 0x404040, false);
+        g.drawString(this.font, this.playerInventoryTitle, this.inventoryLabelX, this.inventoryLabelY, 0x404040, false);
     }
 
     @Override

@@ -100,9 +100,8 @@ public final class ClientMobModelHelper {
     private static boolean hasHumanoidParts(EntityModel<?> model) {
         Set<String> found = new HashSet<>();
 
-        // Mesh child names first. These survive reobfuscation, so on a production jar this is
-        // the only branch that can match a model whose class is vanilla-mapped — the field and
-        // method scans below see "f_102808_"/"m_102854_" there and match nothing.
+        // Mesh child names first: they survive reobfuscation, so on a production jar this is the only
+        // branch that can match a vanilla-mapped model, where the field and method scans see SRG names.
         if (model instanceof net.minecraft.client.model.HierarchicalModel<?> hierarchical) {
             ModelPartTree.forEachNamed(hierarchical.root(), (name, part) -> {
                 String n = ModelPartTree.normalize(name);

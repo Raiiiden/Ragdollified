@@ -18,19 +18,8 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 
-// Client half of the Curios integration: draws a dead body's worn curios.
-//
-// Curios renders worn items through CuriosLayer, a RenderLayer on the living entity's renderer,
-// which asks CuriosRendererRegistry for a per-item ICurioRenderer. A ragdoll is not an entity and
-// a corpse is not a LivingEntity, so neither ever gets that layer — this calls the same
-// ICurioRenderer instances by hand instead, with a RenderLayerParent shim standing in for the
-// player renderer.
-//
-// Only items whose mod registered an ICurioRenderer draw anything at all; a curio with no
-// renderer is invisible on a live player too, so it is invisible here.
-//
-// Reflection only, like the rest of the Curios integration — no compile-time dependency, and
-// every failure degrades to "no curios drawn" rather than breaking the body.
+// Client half of the Curios integration: a ragdoll gets no CuriosLayer, so the same ICurioRenderer
+// instances are called by hand through a shim. Reflection only, and any failure draws nothing.
 public final class CuriosRenderCompat {
 
     private static boolean available = false;
@@ -38,16 +27,12 @@ public final class CuriosRenderCompat {
     private static Method getRenderer;   // CuriosRendererRegistry.getRenderer(Item) -> Optional<ICurioRenderer>
     private static Method renderCurio;   // ICurioRenderer.render(...12 args...)
 
-    // Keyed the same way the damage-visual compats are: the source entity's id (an Integer) while
-    // a ragdoll is the visible body. Corpses do not appear here — they carry their own persistent
-    // curio snapshot in their render data, so they survive relogs and late joiners.
+    // Keyed like the damage-visual compats, by the source entity id while a ragdoll is the visible
+    // body. Corpses carry their own persistent curio snapshot instead, so they survive relogs.
     private static final Map<Object, List<CuriosCompat.WornCurio>> CAPTURED = new ConcurrentHashMap<>();
 
-    // Items whose renderer threw. A curio renderer is third-party code written against a live
-    // entity, so some will not survive being called on a dead body — GeckoLib-backed ones in
-    // particular reach for render context we cannot give them. Report the first failure loudly
-    // (silently drawing nothing is impossible to diagnose from the outside) and then stop calling
-    // that renderer, so one bad item neither spams the log nor costs a throw every frame.
+    // Items whose renderer threw. Curio renderers are third-party code written against a live entity,
+    // so the first failure is logged loudly and that renderer is never called again.
     private static final Map<Item, Boolean> FAILED = new ConcurrentHashMap<>();
 
     private CuriosRenderCompat() {}
@@ -80,9 +65,8 @@ public final class CuriosRenderCompat {
         return available;
     }
 
-    // Snapshot what the entity is wearing before it dies. The server empties the curio slots when
-    // it builds the corpse, and the player may respawn, so reading them at render time is far too
-    // late — this is the same reason the blood and damage compats capture at death.
+    // Snapshot what the entity wears before it dies: the server empties the curio slots when building
+    // the corpse, so reading at render time is far too late, exactly as for the blood compats.
     public static void capture(Object key, LivingEntity entity) {
         if (!available || entity == null) return;
         List<CuriosCompat.WornCurio> worn = CuriosCompat.captureWorn(entity);
@@ -109,12 +93,8 @@ public final class CuriosRenderCompat {
         FAILED.clear();
     }
 
-    // Draw one worn curio. The pose stack must already be at the body's model root, with the
-    // parent model's parts posed to the physics pose — see ClientRagdollRenderer#renderBodyCurios,
-    // which is what makes ICurioRenderer.followBodyRotations land items on the ragdoll rather
-    // than on a standing figure.
-    // Returns false when nothing was drawn — no registered renderer for this item, or its renderer
-    // threw — so the caller can try another way of drawing it.
+    // Draw one worn curio, with the pose stack at the model root and the parent model already posed,
+    // which is what lands items on the ragdoll. False when nothing was drawn, so the caller can retry.
     public static boolean render(CuriosCompat.WornCurio worn, LivingEntity wearer,
                                  PoseStack poseStack, MultiBufferSource buffer, int light,
                                  RenderLayerParent<?, ?> parent, float partialTick, float ageInTicks) {

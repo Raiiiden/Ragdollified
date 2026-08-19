@@ -10,13 +10,8 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
-// Range-independent player skin resolution and cache for corpses and ragdolls.
-//
-// A dead player's skin has to stay on their body for anyone standing near it, including after
-// the owner leaves render range or disconnects. Resolving from mc.level.players() breaks in
-// exactly that case — observer next to the body, owner far away, entity unloaded, skin falls
-// back to Steve. The connection's PlayerInfo (tab-list entry) survives at any range, so it is
-// the source here, with a per-UUID cache of the last real skin to survive a disconnect too.
+// Range-independent player skin resolution for corpses and ragdolls: mc.level.players() fails exactly
+// when the owner is far away, so the connection PlayerInfo is used, with a per-UUID cache behind it.
 public final class ClientPlayerSkinCache {
 
     public static final class Skin {
@@ -29,9 +24,8 @@ public final class ClientPlayerSkinCache {
 
     private ClientPlayerSkinCache() {}
 
-    // Resolve a player's skin at any range, never null. Tries the connection PlayerInfo first
-    // (good while connected, cached on hit), then the last cached real skin (survives a
-    // disconnect), then the default skin for the UUID.
+    // Resolve a player's skin at any range, never null: connection PlayerInfo first and cached on hit,
+    // then the last cached real skin, then the default for the UUID.
     public static Skin resolve(@Nullable UUID uuid) {
         if (uuid == null) {
             return new Skin(DefaultPlayerSkin.getDefaultSkin(), false);

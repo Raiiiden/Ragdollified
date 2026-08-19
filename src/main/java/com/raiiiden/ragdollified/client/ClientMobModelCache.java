@@ -5,11 +5,8 @@ import net.minecraft.client.model.HumanoidModel;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
-// Custom humanoid models supplied by optional client compatibility adapters. They are remembered
-// while the entity is alive so its ragdoll can use the same geometry after the entity is gone.
-//
-// Keyed by entity type id, not entity id: an EntityRenderer holds one model instance shared by
-// every mob of that type, so one entry serves them all and survives any individual death.
+// Custom humanoid models from optional compat adapters, remembered while the entity lives so its
+// ragdoll keeps the geometry. Keyed by entity type, since one model instance serves the type.
 public final class ClientMobModelCache {
     private static final Map<String, HumanoidModel<?>> MODEL_CACHE = new ConcurrentHashMap<>();
 

@@ -134,9 +134,8 @@ public final class ServerRagdollSyncManager {
         UUID next = elected != null ? elected.getUUID() : null;
         if (next == null ? previous == null : next.equals(previous)) return false;
         retained.streamOwner = next;
-        // Client sequence numbers only order frames from one owner. The new owner may have a
-        // lower counter than the old one, so compare it against a fresh per-owner baseline while
-        // preserving streamSequence as the continuous observer-facing sequence.
+        // Client sequence numbers only order one owner's frames, and a new owner may have a lower
+        // counter, so compare against a per-owner baseline while streamSequence stays continuous.
         retained.ownerInputSequence = 0;
         retained.ownerInputSampleTick = Integer.MIN_VALUE;
 
@@ -164,9 +163,8 @@ public final class ServerRagdollSyncManager {
                 && player.getUUID().equals(retained.streamOwner);
     }
 
-    // Relay one in-flight pose frame from the owner to every other nearby client. The server
-    // never simulates or corrects the pose; it only checks the sender is the elected owner and
-    // the frame is sane, so no client can puppet a body it does not own.
+    // Relay one in-flight pose frame to every other nearby client. The server never simulates or
+    // corrects it, only checking sender and sanity, so no client can puppet a body it does not own.
     public static void handleStreamFrame(ServerPlayer sender, int entityId,
                                          RagdollTransform[] transforms, int sequence,
                                          int sampleTick, boolean hardSync) {
@@ -221,9 +219,8 @@ public final class ServerRagdollSyncManager {
         }
     }
 
-    // Hand a body over when its owner walks away or disconnects, or when the victim returns to
-    // range. Observers are told nothing: the stream they play back is continuous across the
-    // handover, so the change is invisible.
+    // Hand a body over when its owner leaves or the victim returns to range. Observers are told
+    // nothing: the stream they play back is continuous across the handover.
     private static void reelectStreamOwners(MinecraftServer server, int now) {
         if (now - lastOwnerElectionTick < OWNER_ELECTION_INTERVAL_TICKS) return;
         lastOwnerElectionTick = now;

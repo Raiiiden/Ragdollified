@@ -32,9 +32,8 @@ public class EntityRenderCaptureHandler {
         try {
             captureRenderState(entity, event.getRenderer(), modelType);
 
-            // Snapshot the mob's current procedural blood so a ragdoll spawned on its death can
-            // reproduce it. BBO frees the wound textures when the mob leaves the level, so this
-            // has to happen while it's still alive — same reason we cache the texture here.
+            // Snapshot the mob's procedural blood while it is alive, since BBO frees the wound textures
+            // when it leaves the level — the same reason its texture is cached here.
             BetterBloodOverlayCompat.capture(entity.getId(), entity);
 
         } catch (Exception e) {
@@ -42,9 +41,8 @@ public class EntityRenderCaptureHandler {
         }
     }
 
-    // Capture on demand at death/spawn time as well as from RenderLivingEvent.Pre. Depending only
-    // on the render event leaves fast deaths, off-screen entities, and server-packet races without
-    // the entity's generated skin or custom model even though its renderer is still present.
+    // Capture on demand at death as well as from the render event: relying on the render event alone
+    // leaves fast deaths, off-screen entities and packet races without a generated skin or model.
     public static void captureRenderState(LivingEntity entity) {
         if (entity instanceof net.minecraft.world.entity.player.Player) return;
 

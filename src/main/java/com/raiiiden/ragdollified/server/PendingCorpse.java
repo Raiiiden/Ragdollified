@@ -16,22 +16,19 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 
-// Loot captured at a player's death, held until their ragdoll settles and a CorpseEntity spawns
-// at the rest position. Persisted through PendingCorpseStore so a crash in the pre-settle window
-// cannot lose the inventory: on the next start any leftover is spawned flat at the death spot.
+// Loot captured at a player's death, held until their ragdoll settles and a corpse spawns. Persisted,
+// so a crash in the pre-settle window cannot lose the inventory: it is spawned flat on the next start.
 public class PendingCorpse {
 
     public UUID owner;
     public String name = "";
-    // Stable handle for this death, generated at capture and threaded through to the CorpseEntity
-    // and the Corpse Compass, so the compass and retrieve command can name exactly this corpse
-    // without depending on the entity's later-assigned UUID.
+    // Stable handle for this death, threaded through to the CorpseEntity and Corpse Compass so both can
+    // name exactly this corpse without depending on the entity's later UUID.
     public UUID corpseId;
     public ResourceKey<Level> dimension;
     public Vec3 deathPos = Vec3.ZERO;
-    // The dying player's entity id at death, which equals the client ragdoll's originalEntityId
-    // because the spawn packet keys off entity.getId(). Carrying it to clients makes each corpse
-    // hand off from exactly the ragdoll it replaced, so a stale corpse cannot cull a newer one.
+    // The dying player's entity id, equal to the client ragdoll's originalEntityId, so each corpse hands
+    // off from exactly the ragdoll it replaced and a stale corpse cannot cull a newer one.
     public int deathEntityId = -1;
     public final List<ItemStack> items = new ArrayList<>();       // 41 vanilla slots (index-aligned)
     public final List<ItemStack> curioStacks = new ArrayList<>(); // parallel with curioIds

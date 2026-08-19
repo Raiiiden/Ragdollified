@@ -59,23 +59,20 @@ public class ClientRagdollRenderer {
     private static HumanoidModel<?> standardHumanoidModel;
     private static SkeletonModel<?> skeletonModel;
     private static IllagerModel<?> illagerModel;
-    // Villagers/wandering traders render on the vanilla VillagerModel (correct UVs for their
-    // textures). Its single combined "arms" part (both stubs + the connecting bar) is anchored
-    // to the torso body so the crossed-arms silhouette survives — see renderVillagerParts.
+    // Villagers and wandering traders render on the vanilla VillagerModel for correct UVs; its single
+    // combined arms part is anchored to the torso so the crossed-arms look survives.
     private static ModelPart villagerRoot;
     // Zombie villagers use the vanilla ZombieVillagerModel (a HumanoidModel with real
     // separate arms and matching UVs) so they render through the standard humanoid path.
     private static ZombieVillagerModel<?> zombieVillagerModel;
     private static DrownedModel<?> drownedModel;
     private static CreeperModel<?> creeperModel;
-    // PiglinModel extends PlayerModel/HumanoidModel with extra ear/nose/tusk cubes on the
-    // head — using it instead of the bare HumanoidModel for piglin/piglin_brute/zombified
-    // so the ears actually render. Without this they look like bald zombies.
+    // PiglinModel adds the ear, nose and tusk cubes on top of HumanoidModel, so piglins and
+    // zombified piglins use it — on the bare model they look like bald zombies.
     private static net.minecraft.client.model.PiglinModel<?> piglinModel;
 
-    // Overlay models — second-layer copies baked from inflated layer definitions.
-    // Mirror the base humanoid/quadruped part structure exactly so the same setPos /
-    // physics-driven rotations apply unchanged.
+    // Overlay models: second-layer copies baked from inflated layer definitions, mirroring the base
+    // part structure exactly so the same setPos and physics rotations apply unchanged.
     private static DrownedModel<?> drownedOuterModel;     // sea-grass over drowned body
     private static SkeletonModel<?> strayClothingModel;   // tattered clothes over stray
     private static CreeperModel<?> creeperPoweredModel;   // electric swirl on charged creepers
@@ -91,9 +88,8 @@ public class ClientRagdollRenderer {
     private static ModelPart sheepFurRoot; // wool overlay layer for non-sheared sheep
     private static ModelPart pigRoot;
     private static ModelPart chickenRoot;
-    // Cat/ocelot share the OcelotModel geometry (quadruped + tail). Bat and bee are winged.
-    // Baked ModelPart trees are used directly (parts are driven per-body by the renderer), so
-    // the EntityModel wrappers aren't needed — and BeeModel (AgeableListModel) has no root().
+    // Cat and ocelot share OcelotModel geometry; bat and bee are winged. Baked ModelPart trees are
+    // used directly, so the EntityModel wrappers are unnecessary and BeeModel has no root().
     private static ModelPart catRoot;
     private static ModelPart catCollarRoot; // dyed collar overlay for tamed cats
     private static ModelPart batRoot;
@@ -200,11 +196,8 @@ public class ClientRagdollRenderer {
     private static void initModels() {
         if (initialized) return;
         try {
-            // Fresh vanilla player trees, deliberately bypassing EntityModelSet/bakeLayer.
-            // EMF/Fresh Moves can replace or mutate the registered PLAYER/PLAYER_SLIM layers;
-            // taking those baked trees lets its animation geometry corrupt physics-part pivots.
-            // Direct LayerDefinitions match the isolated standard-zombie path below while
-            // retaining separate Steve (wide-arm) and Alex (slim-arm) geometry.
+            // Fresh vanilla player trees, bypassing EntityModelSet: EMF and Fresh Moves mutate the
+            // registered layers, and baking those corrupts physics-part pivots. Steve and Alex stay separate.
             LayerDefinition steveDef = LayerDefinition.create(
                     PlayerModel.createMesh(CubeDeformation.NONE, false), 64, 64);
             LayerDefinition alexDef = LayerDefinition.create(
@@ -226,21 +219,16 @@ public class ClientRagdollRenderer {
 
             skeletonModel = new SkeletonModel<>(SkeletonModel.createBodyLayer().bakeRoot());
             illagerModel = new IllagerModel<>(IllagerModel.createBodyLayer().bakeRoot());
-            // Villager base model (vanilla, correct UVs); its combined arms ride the torso.
-            // Zombie villagers get their own vanilla model which has real separate arms.
-            // Isolated from the bakery for the same reason the player trees above are: EMF /
-            // Fresh Animations replaces the registered VILLAGER and ZOMBIE_VILLAGER layers with
-            // its own animated geometry, and a ragdoll baked from those inherits the animation
-            // instead of lying still. Vanilla LayerDefinitions give each a private tree.
+            // Villager base model for correct UVs, its combined arms riding the torso, with zombie
+            // villagers on their own. Isolated from the bakery so EMF cannot animate a corpse.
             villagerRoot = LayerDefinition.create(
                     net.minecraft.client.model.VillagerModel.createBodyModel(), 64, 64).bakeRoot();
             zombieVillagerModel = new ZombieVillagerModel<>(
                     ZombieVillagerModel.createBodyLayer().bakeRoot());
             drownedModel = new DrownedModel<>(DrownedModel.createBodyLayer(CubeDeformation.NONE).bakeRoot());
             creeperModel = new CreeperModel<>(CreeperModel.createBodyLayer(CubeDeformation.NONE).bakeRoot());
-            // All ragdoll trees must come directly from vanilla definitions. EMF/Fresh
-            // Animations can replace EntityModelSet definitions with animated geometry;
-            // baking those registered layers makes a physics-driven corpse animate again.
+            // All ragdoll trees come straight from vanilla definitions: EMF and Fresh Animations replace
+            // registered EntityModelSet definitions, and baking those makes a physics corpse animate.
             piglinModel = new net.minecraft.client.model.PiglinModel<>(
                     LayerDefinition.create(net.minecraft.client.model.PiglinModel.createMesh(
                             CubeDeformation.NONE), 64, 64).bakeRoot());
@@ -255,14 +243,12 @@ public class ClientRagdollRenderer {
 
             cowRoot = net.minecraft.client.model.CowModel.createBodyLayer().bakeRoot();
             sheepRoot = net.minecraft.client.model.SheepModel.createBodyLayer().bakeRoot();
-            // SheepFurModel is the inflated wool-overlay layer that vanilla SheepFurLayer
-            // renders on top of the sheared body. Children mirror SheepModel exactly
-            // (body, head, four legs) so the same setPos values overlay correctly.
+            // SheepFurModel is the inflated wool overlay vanilla draws over the sheared body. Its children
+            // mirror SheepModel exactly, so the same setPos values overlay correctly.
             sheepFurRoot = net.minecraft.client.model.SheepFurModel.createFurLayer().bakeRoot();
             pigRoot = net.minecraft.client.model.PigModel.createBodyLayer(CubeDeformation.NONE).bakeRoot();
-            // Pig saddle — vanilla SaddleLayer uses ModelLayers.PIG_SADDLE which is an
-            // inflated copy of the pig's body shape. Same child names as the base pig
-            // model so the same setPos calls work for both.
+            // The pig saddle layer is an inflated copy of the pig body shape with the same child names,
+            // so the same setPos calls work for base model and saddle alike.
             pigSaddleRoot = PigModel.createBodyLayer(new CubeDeformation(0.5F)).bakeRoot();
             chickenRoot = ChickenModel.createBodyLayer().bakeRoot();
             catRoot = freshOcelotRoot(CubeDeformation.NONE);
@@ -407,9 +393,8 @@ public class ClientRagdollRenderer {
     public static void onRenderLevel(RenderLevelStageEvent event) {
         if (event.getStage() != RenderLevelStageEvent.Stage.AFTER_ENTITIES) return;
 
-        // Free wound textures released since the last frame (render thread only). Ahead of the
-        // no-ragdolls early-out on purpose: corpses release textures too, and a world holding
-        // only corpses would otherwise never drain the queue.
+        // Free wound textures released since the last frame, ahead of the no-ragdolls early-out:
+        // corpses release textures too, and a world holding only corpses would never drain the queue.
         com.raiiiden.ragdollified.client.compat.BetterBloodOverlayCompat.releasePending();
 
         var ragdolls = ClientRagdollManager.getAll();
@@ -433,16 +418,13 @@ public class ClientRagdollRenderer {
         int rendered = 0;
         int culled = 0;
         for (ClientRagdoll ragdoll : ragdolls) {
-            // Grab the snapshot once per ragdoll. Everything we render off this
-            // ragdoll uses the same snapshot for consistency — even if physics
-            // publishes a new one mid-frame, our render stays coherent.
+            // One snapshot per ragdoll per frame, so everything drawn off it stays coherent even if
+            // physics publishes a newer one mid-frame.
             ClientRagdoll.TransformSnapshot snap = ragdoll.getSnapshot();
             if (snap == null || snap.destroyed) continue;
 
-            // Update render-side EMA smoothing for this frame. Damps physics jitter
-            // (oscillation under contact pressure) without affecting real motion. An attached
-            // camera already prepared its ragdoll at camera-setup time with this same token,
-            // so this call cannot advance it a second time or pull a newer mid-frame snapshot.
+            // Advance render-side EMA smoothing, damping contact jitter without touching real motion.
+            // An attached camera prepared this same token earlier, so it cannot advance twice.
             ragdoll.updateSmoothedRenderState(
                     snap, partialTick, ClientRagdollCamera.currentRenderFrame());
 
@@ -505,14 +487,10 @@ public class ClientRagdollRenderer {
         return net.minecraft.client.renderer.LevelRenderer.getLightColor(level, blockPos);
     }
 
-    // ============================
     // Player ragdoll rendering
-    // ============================
 
-    // Y offset for ragdolls settled on a fluid surface. The body is frozen out of the dynamics
-    // world, so one floating on water would be perfectly static; a sin-driven bob at render time
-    // fakes surface motion without re-running physics. Phase varies per ragdoll so a row of
-    // corpses on a pond does not bob in lockstep.
+    // Y offset for a body settled on fluid. It is frozen out of the world, so a sin-driven bob fakes
+    // surface motion at render time; the phase varies per ragdoll so a row does not bob in lockstep.
     private static float liquidBobOffset(ClientRagdoll ragdoll) {
         if (!ragdoll.isSettledOnLiquid()) return 0f;
         long now = System.currentTimeMillis();
@@ -531,10 +509,8 @@ public class ClientRagdollRenderer {
                     ? DefaultPlayerSkin.getDefaultSkin(uuid)
                     : DefaultPlayerSkin.getDefaultSkin();
         }
-        // May be null if the player has despawned or moved out of render distance.
-        // Vanilla armor is cached on the ragdoll so it renders regardless.
-        // GeckoLib armor falls back to its internal proxy ArmorStand when null,
-        // same as the mob path — so armor stays visible at any distance.
+        // Null when the player despawned or left render distance. Vanilla armor is cached on the
+        // ragdoll, and GeckoLib armor falls back to its proxy ArmorStand, so armor stays visible.
         AbstractClientPlayer playerEntity = findPlayerEntity(uuid);
 
         RagdollTransform torso = ragdoll.getSmoothedTransform(RagdollPart.TORSO);
@@ -544,10 +520,8 @@ public class ClientRagdollRenderer {
         RagdollTransform lleg  = ragdoll.getSmoothedTransform(RagdollPart.LEFT_LEG);
         RagdollTransform rleg  = ragdoll.getSmoothedTransform(RagdollPart.RIGHT_LEG);
 
-        // Looking out of this head means we are sitting inside it, so the skull, hat layer, and
-        // helmet all render as inside-out geometry across the view. Dropping the transform is
-        // what skips them: every head-driven pass below already bails on a null. This is a local
-        // draw decision only — other clients render this same ragdoll with its head intact.
+        // Looking out of this head means sitting inside it, so skull, hat and helmet would draw
+        // inside-out. Dropping the transform skips them, and only on this client.
         if (ClientRagdollCamera.isHeadHidden(ragdoll.getId())) head = null;
 
         renderPlayerBody(poseStack, buffer, light, distSq, torso, head, larm, rarm, lleg, rleg,
@@ -557,12 +531,8 @@ public class ClientRagdollRenderer {
                 CuriosRenderCompat.wornFor(ragdoll.getOriginalEntityId()));
     }
 
-    // Render a humanoid body and armor at the given part transforms, shared by the live ragdoll
-    // path and the corpse renderer. The poseStack must already be camera-relative; this
-    // translates to the torso and draws each part at its torso-relative position with absolute
-    // rotation. distSq=0 always renders armor, skin must be non-null, and damageKey identifies the
-    // body in the damage-visual compats — the ragdoll's source entity id for a live ragdoll, the
-    // corpse entity's UUID for a corpse, or null to draw a clean body.
+    // Draw a humanoid body and armor at the given part transforms, shared by the ragdoll and corpse
+    // paths. damageKey identifies the body to the damage-visual compats; null draws a clean body.
     static void renderPlayerBody(PoseStack poseStack, MultiBufferSource buffer, int light, double distSq,
                                  RagdollTransform torso, RagdollTransform head,
                                  RagdollTransform larm, RagdollTransform rarm,
@@ -572,10 +542,8 @@ public class ClientRagdollRenderer {
                                  AbstractClientPlayer playerEntity, float bob, Object damageKey,
                                  java.util.List<CuriosCompat.WornCurio> curios) {
         if (torso == null) return;
-        // The corpse renderer calls this directly and can run before any live ragdoll has — e.g. a
-        // corpse loaded from disk on world (re)load with no ragdoll around, in which case
-        // onRenderLevel's lazy init never fired. Bake the models here too, and bail if they still
-        // aren't ready, so we never dereference a null model (was: NPE spam + invisible corpse).
+        // The corpse renderer can call this before any live ragdoll has, so onRenderLevel's lazy init
+        // may never have fired. Bake here too and bail if still unready, rather than NPE.
         initModels();
         PlayerModel<AbstractClientPlayer> model = isSlim ? slimModel : normalModel;
         if (model == null) return;
@@ -584,9 +552,8 @@ public class ClientRagdollRenderer {
         try {
             poseStack.translate(torso.position.x, torso.position.y + bob, torso.position.z);
 
-            // Visual Health composites its wounds into the skin itself rather than drawing a
-            // layer, so swapping the texture here covers the base body and the second skin layer
-            // at once. No-op without Visual Health, or when this body died undamaged.
+            // Visual Health composites wounds into the skin rather than drawing a layer, so swapping the
+            // texture covers the base body and second layer at once. No-op when it died undamaged.
             ResourceLocation renderedBodyTexture = VisualHealthCompat.texture(damageKey, skin);
             VertexConsumer vc = buffer.getBuffer(RenderType.entityTranslucent(renderedBodyTexture));
 
@@ -636,13 +603,10 @@ public class ClientRagdollRenderer {
         }
     }
 
-    // ============================
     // Curios
-    // ============================
 
-    // Pivot each part is given in its own physics frame by renderHumanoidPartPhysics. Curios are
-    // placed by reproducing those exact pivots relative to a single model root, so the two passes
-    // can never disagree about where a limb is.
+    // Curios are placed by reproducing, relative to one model root, the exact pivots each part gets
+    // in renderHumanoidPartPhysics, so the two passes can never disagree about where a limb is.
     private static final org.joml.Vector3f[] PART_PIVOTS = new org.joml.Vector3f[RagdollTransform.MAX_PARTS];
     static {
         PART_PIVOTS[RagdollPart.HEAD.index]      = new org.joml.Vector3f(0f, 4f, 0f);
@@ -653,14 +617,8 @@ public class ClientRagdollRenderer {
         PART_PIVOTS[RagdollPart.RIGHT_LEG.index] = new org.joml.Vector3f(0f, -6f, 0f);
     }
 
-    // Draw the curios a body was wearing when it died.
-    //
-    // Curio renderers are written against a live entity: they position themselves off the wearer's
-    // HumanoidModel, usually by calling ICurioRenderer.followBodyRotations/followHeadRotations,
-    // which copy pivots and rotations out of the model held by that entity's *renderer*. So rather
-    // than trying to anchor each curio to a body part ourselves — we have no idea which part any
-    // given curio wants — we pose that model to the physics pose and let each renderer place
-    // itself exactly as it would on a living player.
+    // Draw the curios a body wore at death. Curio renderers position themselves off the wearer's own
+    // model, so the model is posed to the physics pose and each renderer places itself as usual.
     private static void renderBodyCurios(java.util.List<CuriosCompat.WornCurio> curios,
                                          PoseStack poseStack, MultiBufferSource buffer, int light,
                                          RagdollTransform torso, RagdollTransform head,
@@ -672,23 +630,13 @@ public class ClientRagdollRenderer {
         // GeckoLib one still works when the ICurioRenderer registry failed to resolve.
         if (curios == null || curios.isEmpty() || torso == null) return;
 
-        // Curios needs a LivingEntity for the slot context and for the follow* helpers. The real
-        // player is gone once they respawn or leave range, so fall back to the same proxy
-        // ArmorStand the armor paths use.
+        // Curios needs a LivingEntity for slot context and the follow helpers, and the real player is
+        // gone after respawn, so fall back to the proxy ArmorStand the armor paths use.
         net.minecraft.world.entity.LivingEntity wearer = playerEntity != null ? playerEntity : GeckoLibArmorHelper.getProxyEntity();
         if (wearer == null) return;
 
-        // Two models have to carry the physics pose, because curio renderers reach for it two
-        // different ways:
-        //
-        //  - follow: whatever model the wearer's own renderer holds, because that is what
-        //    ICurioRenderer.followBodyRotations/followHeadRotations copy out of. On the proxy
-        //    ArmorStand fallback this is an ArmorStandModel.
-        //  - bodyModel: the PlayerModel this body was actually drawn with, handed out as the
-        //    RenderLayerParent's model. It must be a PlayerModel and not the proxy's
-        //    ArmorStandModel — renderers cast what getModel() returns, and GeckoLib-backed ones
-        //    pass it straight into GeoArmorRenderer.prepForRender as the base model to align
-        //    their bones against. An armor stand's model there is a bad cast or a bad alignment.
+        // Two models carry the pose: `follow` is whatever the wearer's renderer holds, which the follow
+        // helpers copy out of, and bodyModel must be the PlayerModel that renderers cast and align to.
         HumanoidModel<?> follow = liveHumanoidModelFor(wearer);
         BorrowedPose savedFollow = follow != null ? savePose(follow) : null;
 
@@ -723,26 +671,15 @@ public class ClientRagdollRenderer {
         }
     }
 
-    // Second way of drawing a worn curio, for the many GeckoLib-backed ones that never register an
-    // ICurioRenderer at all.
-    //
-    // Mods in this family (Fracture Point's backpacks are the reference case) add their own
-    // RenderLayer to the player renderer instead: it asks Curios which slots are filled, builds a
-    // GeoArmorRenderer for the item, copies the player model's pose into it, calls prepForRender,
-    // and draws. CuriosRendererRegistry knows nothing about any of it, which is exactly why these
-    // items came out invisible on a body. A ragdoll has no render layers, so we do the same work.
-    //
-    // The pose stack must already be at the model root with baseModel posed to the physics pose:
-    // GeoArmorRenderer.prepForRender copies each base part's pivot AND rotation onto the matching
-    // bone, so one pass places every bone on the right limb — no per-part pass needed.
+    // Second way of drawing a worn curio, for GeckoLib-backed ones that register no ICurioRenderer and
+    // instead add a render layer. A ragdoll has none, so the same work is done here with baseModel posed.
     private static void renderGeckoLibCurio(ItemStack stack, PoseStack poseStack, MultiBufferSource buffer,
                                             int light, net.minecraft.world.entity.LivingEntity wearer,
                                             HumanoidModel<?> baseModel) {
         if (stack.isEmpty() || !GeckoLibArmorHelper.isGeckoLibArmor(stack.getItem())) return;
 
-        // The slot decides which bones GeoArmorRenderer makes visible. Curio items are usually
-        // ArmorItems anyway (Fracture Point's backpack is a chestplate), so ask the item; anything
-        // else is treated as a torso attachment, which is where body-worn curios live.
+        // The slot decides which bones GeoArmorRenderer shows. Curio items are usually ArmorItems, so
+        // ask the item; anything else is treated as a torso attachment, where body-worn curios live.
         EquipmentSlot slot = stack.getItem() instanceof ArmorItem armor
                 ? armor.getEquipmentSlot() : EquipmentSlot.CHEST;
 
@@ -786,10 +723,8 @@ public class ClientRagdollRenderer {
         return null;
     }
 
-    // Express one physics part as a pivot and rotation in the model root frame, which is what
-    // ModelPart.translateAndRotate — and ModelPart.copyFrom, used by the follow* helpers —
-    // consume. Inverts exactly the transform chain renderHumanoidPartPhysics applies, so the
-    // resulting pivot sits on the drawn limb.
+    // Express one physics part as a pivot and rotation in the model root frame, what translateAndRotate
+    // and copyFrom consume. Inverts renderHumanoidPartPhysics, so the pivot lands on the drawn limb.
     private static void poseFromPhysics(ModelPart part, RagdollTransform transform,
                                         RagdollTransform torso, RagdollPart ragdollPart) {
         if (part == null) return;
@@ -832,9 +767,8 @@ public class ClientRagdollRenderer {
         part.zRot = euler.z;
     }
 
-    // Everything renderBodyCurios writes on the borrowed model — the pivots and rotations of the
-    // seven parts copyPropertiesTo touches, plus the flags — so one curio pass cannot leak into
-    // how that entity draws next frame.
+    // Everything renderBodyCurios writes on the borrowed model — seven parts of pivots and rotations
+    // plus the flags — so one curio pass cannot leak into how that entity draws next frame.
     private record BorrowedPose(float[] parts, boolean young, boolean riding, boolean crouching) {}
 
     private static ModelPart[] borrowedParts(HumanoidModel<?> model) {
@@ -908,17 +842,12 @@ public class ClientRagdollRenderer {
         // Mirror vanilla HumanoidArmorLayer: legs use the inner (less-inflated) model so
         // leggings sit under the chestplate; everything else uses the outer model.
         HumanoidModel<?> base = (slot == EquipmentSlot.LEGS) ? innerModel : outerModel;
-        // Resolve the actual model to render. Modded (non-GeckoLib) armor ships textures
-        // UV-mapped for its own custom armor model, exposed via the Forge
-        // IClientItemExtensions.getHumanoidArmorModel hook. Rendering its texture on the
-        // vanilla model is what made modded armor map to the wrong faces — so we ask the
-        // item for its model here, exactly like vanilla's HumanoidArmorLayer does.
+        // Modded armor ships textures UV-mapped for its own model, exposed through Forge's
+        // getHumanoidArmorModel, so ask the item rather than mapping its texture onto vanilla geometry.
         HumanoidModel<?> model = resolveArmorModel(stack, slot, entity, base);
 
-        // Leather (and any DyeableLeatherItem) renders in two passes, like vanilla:
-        // a base layer tinted by the dye color, then an untinted overlay (straps/buckles).
-        // Skipping the dye tint is what made undyed leather render as flat grey — i.e.
-        // look like iron/chainmail. Non-dyeable armor uses a single untinted pass.
+        // Dyeable armor renders in two vanilla passes, a dye-tinted base then an untinted overlay.
+        // Skipping the tint made undyed leather look like iron; other armor takes one untinted pass.
         boolean dyeable = item instanceof net.minecraft.world.item.DyeableLeatherItem;
         float r = 1f, g = 1f, b = 1f;
         if (dyeable) {
@@ -966,9 +895,8 @@ public class ClientRagdollRenderer {
         }
     }
 
-    // Ask the armor item which model it wants, via Forge's getHumanoidArmorModel. Vanilla armor
-    // returns base unchanged; modded armor returns its own so its texture UVs line up. Any error
-    // falls back to base.
+    // Ask the armor item which model it wants through Forge's getHumanoidArmorModel: vanilla returns
+    // base unchanged, modded armor returns its own so its UVs line up. Any error falls back to base.
     private static HumanoidModel<?> resolveArmorModel(ItemStack stack, EquipmentSlot slot,
                                                       net.minecraft.world.entity.LivingEntity entity,
                                                       HumanoidModel<?> base) {
@@ -1151,9 +1079,7 @@ public class ClientRagdollRenderer {
         }
     }
 
-    // ============================
     // Mob ragdoll rendering
-    // ============================
 
     private static void renderMobRagdoll(ClientRagdoll ragdoll, ClientRagdoll.TransformSnapshot snap,
                                          PoseStack poseStack,
@@ -1177,17 +1103,13 @@ public class ClientRagdollRenderer {
             ResourceLocation texture = getMobTexture(ragdoll);
             VertexConsumer vc = buffer.getBuffer(RenderType.entityCutoutNoCull(texture));
 
-            // Baby humanoids get their model + armor scaled to match the physics bodies built
-            // in RagdollBodyFactory.buildHumanoid. Whether the head is enlarged is decided
-            // per-mob to mirror vanilla (see ClientRagdoll#babyScalesHead) — big head for
-            // zombies/piglins/zombie-villagers, uniform shrink for plain villagers.
+            // Baby humanoids scale model and armor to match the bodies from buildHumanoid. Whether the
+            // head is enlarged is per-mob, mirroring vanilla (see ClientRagdoll#babyScalesHead).
             HumanoidScale humanoidScale = !ragdoll.isBabyHumanoid() ? HumanoidScale.ADULT
                     : (ragdoll.babyScalesHead() ? HumanoidScale.BABY : HumanoidScale.BABY_UNIFORM);
 
-            // Better Blood Overlay: set to the HumanoidModel actually drawn (it shares vanilla
-            // UVs, which BBO's wound atlas is authored against), or flag the villager/illager
-            // paths which render on their own (non-HumanoidModel) trees. All left unset for
-            // non-humanoid families BBO doesn't cover (creeper, animals, chicken, bat, bee).
+            // Better Blood Overlay: point it at the HumanoidModel actually drawn, or flag the villager and
+            // illager trees. Left unset for the families BBO does not cover.
             HumanoidModel<?> bloodModel = null;
             boolean villagerBlood = false;
             boolean illagerBlood = false;
@@ -1310,12 +1232,8 @@ public class ClientRagdollRenderer {
                     renderWarden(poseStack,buffer.getBuffer(RenderType.entityTranslucentEmissive(WARDEN_BIOLUMINESCENT_TEXTURE)),15728880,torso,head,larm,rarm,lleg,rleg);
                     break;
                 case ILLAGER: {
-                    // ILLAGER covers three texture/UV families: zombie villagers (vanilla
-                    // ZombieVillagerModel — a humanoid), plain villagers + wandering traders
-                    // (VillagerModel), and true illagers (pillager/vindicator/…). Route each
-                    // to the model its texture is actually drawn for.
-                    // Path only, never the whole id: a namespace containing "villager" must not
-                    // route an otherwise plain humanoid onto VillagerModel geometry.
+                    // ILLAGER spans three UV families — zombie villagers, villagers and traders, and true
+                    // illagers — routed by path only, so a namespace containing "villager" cannot mis-route.
                     String mt = MobModelHelper.mobPath(ragdoll.getMobType());
                     if (mt.contains("zombie_villager")) {
                         renderHumanoidMob(poseStack, vc, light, torso, head, larm, rarm, lleg, rleg, zombieVillagerModel, humanoidScale);
@@ -1345,9 +1263,8 @@ public class ClientRagdollRenderer {
                     break;
             }
 
-            // Procedural blood carried over from the live mob, drawn on the same physics-posed
-            // parts (under armor/overlays). No-op unless Better Blood Overlay is installed and
-            // the mob was bleeding at death.
+            // Procedural blood carried from the live mob onto the same posed parts, under armor and
+            // overlays. No-op without Better Blood Overlay or when the mob was not bleeding.
             Object bloodId = ragdoll.getOriginalEntityId();
             if (bloodModel != null) {
                 renderHumanoidBlood(bloodId, poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg, bloodModel, humanoidScale);
@@ -1387,19 +1304,14 @@ public class ClientRagdollRenderer {
                 type == MobModelHelper.ModelType.ILLAGER;
     }
 
-    // Which humanoid model a generic humanoid ragdoll is drawn on.
-    //
-    // An optional compatibility adapter may cache a mob's own model when its texture is authored
-    // for non-vanilla geometry. Extra child parts follow the six physics-posed roots automatically.
-    //
-    // Vanilla mobs deliberately stay on Ragdollified's own isolated trees.
+    // Which humanoid model a generic humanoid is drawn on. A compat adapter may cache a mob's own
+    // model for non-vanilla UVs; vanilla mobs deliberately stay on the isolated trees.
     private static HumanoidModel<?> humanoidModelFor(ClientRagdoll ragdoll) {
         HumanoidModel<?> modded = ClientMobModelCache.getModel(ragdoll.getMobType());
         if (modded != null) return modded;
 
-        // A modded mob with no cached model is about to be drawn on vanilla geometry. That is
-        // right for mods that use vanilla UVs and badly wrong for the ones that do not, and the
-        // difference is invisible from the outside — so name it once.
+        // A modded mob with no cached model is about to be drawn on vanilla geometry, which is right
+        // only if it uses vanilla UVs, and the difference is invisible from outside — so name it once.
         if (!ragdoll.getMobType().startsWith("minecraft:")) {
             warnOnce(NO_MODEL_WARNED, ragdoll.getMobType(),
                     "No captured model for {} - drawing its ragdoll on the vanilla humanoid model. "
@@ -1421,9 +1333,8 @@ public class ClientRagdollRenderer {
     // An overlay part a model keeps as a root sibling of the limb it covers, rather than a child.
     private record OverlayPart(ModelPart part, RagdollPart anchor) {}
 
-    // Which sibling-overlay names anchor to which physics part. PlayerModel's second skin layer
-    // set, plus the wear/body names modded humanoids use for the same idea. Root-level overlays
-    // are otherwise invisible on a body posed limb by limb.
+    // Which sibling-overlay names anchor to which physics part: the second skin layer set plus the
+    // wear and body names modded humanoids use. Root-level overlays are otherwise never drawn.
     private static final Map<String, RagdollPart> OVERLAY_ANCHORS = Map.ofEntries(
             Map.entry("jacket", RagdollPart.TORSO),
             Map.entry("bodywear", RagdollPart.TORSO),
@@ -1443,9 +1354,8 @@ public class ClientRagdollRenderer {
     // these are renderer singletons.
     private static final Map<HumanoidModel<?>, List<OverlayPart>> OVERLAY_CACHE = new ConcurrentHashMap<>();
 
-    // Draw the overlay parts renderHumanoidMob cannot reach. It poses six named parts plus hat,
-    // and anything parented to those rides along for free — but a part hung off the model root
-    // is drawn by nothing at all.
+    // Draw the overlay parts renderHumanoidMob cannot reach: it poses six named parts plus hat, and
+    // their children ride along, but a part hung off the model root is drawn by nothing.
     private static void renderModdedHumanoidOverlays(HumanoidModel<?> model, PoseStack poseStack,
                                                      VertexConsumer vc, int light,
                                                      RagdollTransform torso, RagdollTransform head,
@@ -1478,10 +1388,8 @@ public class ClientRagdollRenderer {
 
         List<OverlayPart> out = new java.util.ArrayList<>();
 
-        // Vanilla's second skin layer. PlayerModel hangs these off the root as siblings of the
-        // limbs they cover, and in a production jar their field names are SRG — the name scan
-        // below cannot see them, so they have to be read through the typed fields, which the
-        // compiler remaps correctly for both runtimes.
+        // Vanilla's second skin layer hangs off the root as siblings of the limbs it covers, and in a
+        // production jar those field names are SRG, so they are read through the typed fields instead.
         if (model instanceof PlayerModel<?> player) {
             addOverlay(out, drawn, player.jacket, RagdollPart.TORSO);
             addOverlay(out, drawn, player.leftSleeve, RagdollPart.LEFT_ARM);
@@ -1534,15 +1442,13 @@ public class ClientRagdollRenderer {
         renderHumanoidPartPhysics(poseStack, vc, model.rightLeg, rleg, torso, light, RagdollPart.RIGHT_LEG, modelScale);
         renderHumanoidPartPhysics(poseStack, vc, model.leftArm, larm, torso, light, RagdollPart.LEFT_ARM, modelScale);
         renderHumanoidPartPhysics(poseStack, vc, model.rightArm, rarm, torso, light, RagdollPart.RIGHT_ARM, modelScale);
-        // Second/overlay skin layer. HumanoidModel's "hat" is a sibling of "head" (not a
-        // child), so the head pass above never draws it — render it explicitly to match
-        // vanilla, which draws the hat for every humanoid (transparent on most mob textures).
+        // HumanoidModel's hat is a sibling of head rather than a child, so the head pass never draws it;
+        // rendering it explicitly matches vanilla, which draws it for every humanoid.
         renderHumanoidPartPhysics(poseStack, vc, model.hat, head, torso, light, RagdollPart.HEAD, modelScale);
     }
 
-    // Better Blood Overlay pass for a humanoid ragdoll: draws the decals captured from the live
-    // mob onto each physics-posed part the same way BBO's own renderWounds does — same model
-    // part, translucent, scaled 1.001 to sit just above the skin. No-op without BBO or blood.
+    // Better Blood Overlay pass for a humanoid: the captured decals on each posed part exactly as BBO
+    // renders them, translucent and scaled 1.001 to sit above the skin. No-op without BBO or blood.
     private static void renderHumanoidBlood(Object id, PoseStack poseStack, MultiBufferSource buffer,
                                             int light, RagdollTransform torso, RagdollTransform head,
                                             RagdollTransform larm, RagdollTransform rarm,
@@ -1557,9 +1463,8 @@ public class ClientRagdollRenderer {
         renderBloodPart(id, "left_arm",  model.leftArm,  poseStack, buffer, larm,  torso, light, RagdollPart.LEFT_ARM,  scale);
         renderBloodPart(id, "right_arm", model.rightArm, poseStack, buffer, rarm,  torso, light, RagdollPart.RIGHT_ARM, scale);
 
-        // Second skin layer. Only the player profile maps wounds to these overlay parts, and
-        // BBO only draws them when overlay-blood is enabled — so this is a no-op for mobs
-        // (decalsForPart returns empty) and gated to match BBO for players.
+        // Second skin layer. Only the player profile maps wounds to these parts and BBO only draws them
+        // with overlay blood on, so this is a no-op for mobs and gated to match BBO for players.
         if (model instanceof PlayerModel<?> pm && BetterBloodOverlayCompat.isOverlayBloodEnabled()) {
             renderBloodPart(id, "hat",          pm.hat,         poseStack, buffer, head,  torso, light, RagdollPart.HEAD,      scale);
             renderBloodPart(id, "jacket",       pm.jacket,      poseStack, buffer, torso, torso, light, RagdollPart.TORSO,     scale);
@@ -1570,10 +1475,8 @@ public class ClientRagdollRenderer {
         }
     }
 
-    // Better Blood Overlay pass for illagers. They render on IllagerModel rather than
-    // HumanoidModel but use the same per-part physics posing, so the parts are resolved by name
-    // and renderBloodPart is reused. BBO's illager profile paints a combined "arms" site, which
-    // is hidden here, so drawing left_arm and right_arm reproduces it correctly.
+    // Better Blood Overlay pass for illagers: same per-part posing on IllagerModel, parts resolved by
+    // name. BBO paints one combined arms site, so drawing both arms reproduces it.
     private static void renderIllagerBlood(Object id, PoseStack poseStack, MultiBufferSource buffer, int light,
                                            RagdollTransform torso, RagdollTransform head,
                                            RagdollTransform larm, RagdollTransform rarm,
@@ -1588,9 +1491,8 @@ public class ClientRagdollRenderer {
         renderBloodPart(id, "right_arm", root.getChild("right_arm"), poseStack, buffer, rarm,  torso, light, RagdollPart.RIGHT_ARM, scale);
     }
 
-    // Better Blood Overlay pass for villagers and wandering traders. They render on the vanilla
-    // VillagerModel through the animal-part path, and BBO's villager profile maps both arms to
-    // one combined "arms" site, so this mirrors renderVillagerParts on the same posed parts.
+    // Better Blood Overlay pass for villagers and traders, which render on VillagerModel through the
+    // animal-part path. BBO maps both arms to one site, so this mirrors renderVillagerParts.
     private static void renderVillagerBlood(Object id, PoseStack poseStack, MultiBufferSource buffer, int light,
                                             RagdollTransform torso, RagdollTransform head,
                                             RagdollTransform larm, RagdollTransform rarm,
@@ -1744,9 +1646,8 @@ public class ClientRagdollRenderer {
         renderHumanoidPartPhysics(poseStack, vc, rightArm, rarm, torso, light, RagdollPart.RIGHT_ARM, modelScale);
     }
 
-    // Regular villagers and wandering traders, on the vanilla VillagerModel whose UVs the
-    // villager textures are drawn for, with separate short arms replacing its single combined
-    // "arms" part so every part textures correctly and the overlays can cover the whole body.
+    // Villagers and wandering traders on the vanilla VillagerModel their textures are drawn for, with
+    // separate short arms replacing the combined part so every part textures correctly.
     private static void renderVillager(PoseStack poseStack, VertexConsumer vc, int light,
                                        RagdollTransform torso, RagdollTransform head,
                                        RagdollTransform larm, RagdollTransform rarm,
@@ -1764,9 +1665,8 @@ public class ClientRagdollRenderer {
                 torso, head, lleg, rleg, scale.body(), scale.head());
     }
 
-    // WitchModel extends VillagerModel and deliberately retains the same body, crossed arms,
-    // and two legs. Its replacement head owns the nose/mole and the complete four-piece hat,
-    // so rendering that head subtree preserves every witch-specific cube.
+    // WitchModel extends VillagerModel and keeps its body, crossed arms and legs; its replacement head
+    // owns the nose, mole and four-piece hat, so rendering that subtree keeps every witch cube.
     private static void renderWitch(PoseStack poseStack, VertexConsumer vc, int light,
                                     RagdollTransform torso, RagdollTransform head,
                                     RagdollTransform larm, RagdollTransform rarm,
@@ -1789,12 +1689,8 @@ public class ClientRagdollRenderer {
         renderVillagerPart(poseStack, vc, headPart, head,  torso, light, headScale);
         renderVillagerPart(poseStack, vc, leftLeg,  lleg,  torso, light, bodyScale);
         renderVillagerPart(poseStack, vc, rightLeg, rleg,  torso, light, bodyScale);
-        // Villager arms are the vanilla crossed-arms unit (two stubs + the bar connecting
-        // them). A ragdoll's two separate arm bodies can't carry a rigid connector, so — per
-        // the chosen design — we anchor the whole arms part to the torso at its natural
-        // body-relative pose and let it tumble with the body, keeping the folded-arms look.
-        // Placement: arms pivot (0,3,-1) minus the body-cube centre (0,6,0) → (0,-3,-1), with
-        // the model's -0.75 rad forward pitch preserved via defaultXRot.
+        // The vanilla crossed-arms unit cannot be split across two arm bodies, so it is anchored to the
+        // torso at its natural pose and tumbles with the body, keeping the folded-arms look.
         renderAnimalPart(poseStack, vc, arms, torso, torso, 0.0F, -3.0F, -1.0F, -0.75F, light, bodyScale);
     }
 
@@ -1852,10 +1748,8 @@ public class ClientRagdollRenderer {
         ModelPart leftFront = root.getChild("left_front_leg");
 
         float halfPI = (float) (Math.PI / 2);
-        // setPos values are derived from each ModelPart's cube bbox center (post-bake-time
-        // pi/2 X rotation for the body) so the cube's geometric center coincides with
-        // its physics body's transform origin. Replaces the previous per-mob hardcoded
-        // constants which were eyeballed and noticeably off for sheep + chicken wings.
+        // setPos values come from each ModelPart's cube bbox centre, so the cube centre coincides with
+        // its physics body origin — replacing eyeballed constants that were off for sheep and chickens.
         org.joml.Vector3f bodyOff       = setPosForPart(body, halfPI);
         org.joml.Vector3f headOff       = setPosForPart(headPart, 0);
         org.joml.Vector3f leftHindOff   = setPosForPart(leftHind, 0);
@@ -1889,9 +1783,8 @@ public class ClientRagdollRenderer {
         }
     }
 
-    // WolfModel uses an empty head pivot with a real_head child, plus separate shoulder and
-    // tail roots. Render the cube-bearing head directly so its union of head/ears/muzzle is
-    // centred on the head rigid body; shoulder and tail remain attached to the torso.
+    // WolfModel has an empty head pivot with a real_head child plus separate shoulder and tail roots,
+    // so the cube-bearing head is drawn directly and shoulder and tail stay on the torso.
     private static void renderWolf(ClientRagdoll ragdoll, PoseStack poseStack, VertexConsumer vc,
                                    MultiBufferSource buffer, int light,
                                    RagdollTransform torso, RagdollTransform head,
@@ -2324,9 +2217,8 @@ public class ClientRagdollRenderer {
                 ps.translate(head.position.x-torso.position.x,head.position.y-torso.position.y,head.position.z-torso.position.z);
                 tempQuat.set(head.rotation.x,head.rotation.y,head.rotation.z,head.rotation.w).rotateZ((float)Math.PI);
                 ps.mulPose(tempQuat);
-                // SnowGolemHeadLayer renders a 10px-wide block around the 7px head. The
-                // negative Y/Z scale and half-block translation preserve the carved face's
-                // vanilla orientation while the whole layer follows the physics head.
+                // The snow golem head layer draws a 10px block around the 7px head; the negative Y/Z scale
+                // and half-block translation keep the carved face upright while following the physics head.
                 ps.mulPose(new Quaternionf().rotateY((float)Math.PI));
                 ps.scale(.625f,-.625f,-.625f);
                 ps.translate(-.5f,-.5f,-.5f);
@@ -2488,9 +2380,8 @@ public class ClientRagdollRenderer {
         ModelPart rightWing = root.getChild("right_wing");
 
         float halfPI = (float) (Math.PI / 2);
-        // beak and redThing share the head's pivot in the vanilla model — their cubes are
-        // designed at offsets relative to the same pivot as head, so they piggyback on
-        // the head's setPos rather than computing their own.
+        // beak and redThing share the head's pivot in the vanilla model, their cubes being designed
+        // against it, so they piggyback on the head's setPos rather than computing their own.
         org.joml.Vector3f bodyOff      = setPosForPart(body, halfPI);
         org.joml.Vector3f headOff      = setPosForPart(headPart, 0);
         org.joml.Vector3f leftLegOff   = setPosForPart(leftLeg, 0);
@@ -2509,11 +2400,8 @@ public class ClientRagdollRenderer {
         renderAnimalPart(poseStack, vc, rightWing, rarm,  torso, rightWingOff.x, rightWingOff.y, rightWingOff.z, 0,      light, bodyScale);
     }
 
-    // Cat and ocelot: the same six-body quadruped layout as cows and pigs, on OcelotModel
-    // geometry, with two tail segments anchored to the torso so the tail tumbles with the body.
-    // The model's front and hind legs differ in length, and setPosForPart centres each rendered
-    // leg cube on its own physics body, so the visuals follow the real cube sizes regardless of
-    // the near-uniform physics boxes.
+    // Cat and ocelot use the six-body quadruped layout on OcelotModel geometry, with two tail segments
+    // on the torso. setPosForPart centres each leg cube on its own body despite uniform physics boxes.
     private static void renderCat(ClientRagdoll ragdoll, PoseStack poseStack, VertexConsumer vc, int light,
                                   RagdollTransform torso, RagdollTransform head,
                                   RagdollTransform larm, RagdollTransform rarm,
@@ -2536,9 +2424,8 @@ public class ClientRagdollRenderer {
         org.joml.Vector3f leftFrontOff  = setPosForPart(leftFront, 0);
         org.joml.Vector3f rightFrontOff = setPosForPart(rightFront, 0);
 
-        // CatRenderer draws the model at 0.8×. Kittens are NOT a uniform shrink: OcelotModel has
-        // scaleHead=true (babyHeadScale=2), so the head renders at 1.5/2 = 0.75× and the body at
-        // 1.0/2 = 0.5× (AgeableListModel). Adults use 1.0× for both. Everything then ×0.8.
+        // CatRenderer draws at 0.8x and kittens are not a uniform shrink: OcelotModel has scaleHead, so a
+        // kitten head renders at 0.75x and its body at 0.5x, adults at 1.0x, everything then times 0.8.
         boolean baby = ragdoll.usesBabyBodyScale();
         float bodyScale = (baby ? 0.5f  : 1.0f) * 0.8f;
         float headScale = (baby ? 0.75f : 1.0f) * 0.8f;
@@ -2554,9 +2441,8 @@ public class ClientRagdollRenderer {
         renderAnimalPart(poseStack, vc, tail2, torso, torso, 0,  3, 13, 1.7278761f, light, bodyScale);
     }
 
-    // Dyed collar overlay for a tamed cat: renderCat's body, head, and leg placement at the same
-    // 0.8x scale on CAT_COLLAR geometry, tinted by the dye colour carried in dyeColorId. The
-    // tail is skipped, since the collar texture is empty there.
+    // Dyed collar overlay for a tamed cat: renderCat's placement at the same 0.8x scale on CAT_COLLAR
+    // geometry, tinted by dyeColorId. The tail is skipped, where the collar texture is empty.
     private static void renderCatCollar(ClientRagdoll ragdoll, PoseStack poseStack, MultiBufferSource buffer, int light,
                                         RagdollTransform torso, RagdollTransform head,
                                         RagdollTransform larm, RagdollTransform rarm,
@@ -2593,10 +2479,8 @@ public class ClientRagdollRenderer {
         renderAnimalPartTinted(poseStack, vc, rightFront, rarm,  torso, rightFrontOff.x, rightFrontOff.y, rightFrontOff.z, 0,      light, rgb[0], rgb[1], rgb[2], bodyScale);
     }
 
-    // Bat: torso is the main body with the lower membrane hanging below as in vanilla, head
-    // above, the two wings in the arm slots, and the two membrane tips in the leg slots. Wings
-    // and tips are drawn detached from the vanilla parent/child hierarchy so each rides its own
-    // physics body, with visibility toggled so nothing draws twice.
+    // Bat: torso carries the main body with the membrane hanging below, head above, wings in the arm
+    // slots and membrane tips in the leg slots, each detached from the vanilla hierarchy to ride a body.
     private static void renderBat(ClientRagdoll ragdoll, PoseStack poseStack, VertexConsumer vc, int light,
                                   RagdollTransform torso, RagdollTransform head,
                                   RagdollTransform larm, RagdollTransform rarm,
@@ -2616,10 +2500,8 @@ public class ClientRagdollRenderer {
         org.joml.Vector3f rwOff = setPosForPart(rightWing, 0);
 
         try {
-            // Draw the body (main cube + membrane) without the wings, which ride their own bodies.
-            // The membrane is part of "body"; centre the MAIN 6x12x6 cube (centre y=10) so it
-            // hangs below exactly like vanilla — setPosForPart can't be used as it would average
-            // in the membrane cube.
+            // Draw body and membrane without the wings, which ride their own bodies, centring the main
+            // 6x12x6 cube so it hangs below like vanilla — setPosForPart would average in the membrane.
             leftWing.visible = false; rightWing.visible = false;
             renderAnimalPart(poseStack, vc, body, torso, torso, 0, -10, 0, 0, light, bs);
             renderAnimalPart(poseStack, vc, headPart, head, torso, headOff.x, headOff.y, headOff.z, 0, light, bs);
@@ -2635,9 +2517,8 @@ public class ClientRagdollRenderer {
         }
     }
 
-    // Bee: torso is the body box, drawing antennae and stinger as its children, with the two
-    // flat wings in the arm slots and the leg strips grouped into the leg slots — front and
-    // middle left, back right. No separate head model part exists, so the head stub is not drawn.
+    // Bee: torso is the body box with antennae and stinger as children, flat wings in the arm slots and
+    // the leg strips grouped into the leg slots. There is no head part, so the head stub is not drawn.
     private static void renderBee(ClientRagdoll ragdoll, PoseStack poseStack, VertexConsumer vc, int light,
                                   RagdollTransform torso, RagdollTransform head,
                                   RagdollTransform larm, RagdollTransform rarm,
@@ -2654,9 +2535,8 @@ public class ClientRagdollRenderer {
         org.joml.Vector3f lwOff = setPosForPart(leftWing, 0);
         org.joml.Vector3f rwOff = setPosForPart(rightWing, 0);
 
-        // Baby bees render at half scale (vanilla). Wings ride their own bodies; the tiny flat
-        // leg strips stay glued to the body, so they're anchored to the torso via
-        // setPos = part pivot − body-cube centre (bone-space), like the cat tail / villager arms.
+        // Baby bees render at half scale. Wings ride their own bodies; the tiny leg strips stay glued to
+        // the torso via setPos = pivot minus body-cube centre, like the cat tail and villager arms.
         float bodyScale = ragdoll.isBabyBee() ? 0.5f : 1.0f;
         renderAnimalPart(poseStack, vc, body, torso, torso, bodyOff.x, bodyOff.y, bodyOff.z, 0, light, bodyScale);
         renderAnimalPart(poseStack, vc, leftWing, larm, torso, lwOff.x, lwOff.y, lwOff.z, 0, light, bodyScale);
@@ -2688,9 +2568,7 @@ public class ClientRagdollRenderer {
         renderGeckoLibSlot(ragdoll.getBoots(), EquipmentSlot.FEET, poseStack, buffer, light, mobArmorInner, torso, head, larm, rarm, lleg, rleg, null, modelScale);
     }
 
-    // ============================
     // Core render methods
-    // ============================
 
     // Tinted renderHumanoidPartPhysics, for the charged-creeper energy swirl drawn at half RGB.
     private static void renderHumanoidPartPhysicsTinted(PoseStack poseStack, VertexConsumer vc, ModelPart part,
@@ -2785,10 +2663,8 @@ public class ClientRagdollRenderer {
         }
     }
 
-    // Body-versus-head scale for a humanoid ragdoll. Babies are not a uniform shrink: vanilla's
-    // young HumanoidModel draws the head at 0.75 and everything else at 0.5, which is where a
-    // baby zombie's oversized head comes from. Each ModelPart is rendered individually here,
-    // bypassing AgeableListModel.renderToBuffer, so that split is reproduced by hand.
+    // Body-versus-head scale for a humanoid. Babies are not a uniform shrink: vanilla draws the head at
+    // 0.75 and the rest at 0.5, and since parts are rendered individually here that split is redone.
     private record HumanoidScale(float body, float head) {
         static final HumanoidScale ADULT = new HumanoidScale(1.0f, 1.0f);
         // Big-head baby (zombie/husk/piglin/drowned/zombie-villager): head 0.75, body 0.5.
@@ -2874,9 +2750,8 @@ public class ClientRagdollRenderer {
         }finally{poseStack.popPose();}
     }
 
-    // renderAnimalPart with an RGB multiplier, used by the sheep wool overlay so every dye
-    // colour works off one texture. ModelPart's 8-arg render pushes the r,g,b,a floats to the
-    // shader as the per-vertex colour, exactly as vanilla SheepFurLayer does.
+    // renderAnimalPart with an RGB multiplier, used by the sheep wool overlay so every dye colour works
+    // off one texture, pushing r,g,b,a as the per-vertex colour exactly as SheepFurLayer does.
     private static void renderAnimalPartTinted(PoseStack poseStack, VertexConsumer vc,
                                                 ModelPart part, RagdollTransform transform, RagdollTransform torso,
                                                 float setPosX, float setPosY, float setPosZ,
@@ -2919,9 +2794,7 @@ public class ClientRagdollRenderer {
         }
     }
 
-    // ============================
     // Helpers
-    // ============================
 
     private static void resetPart(ModelPart part) {
         part.setPos(0, 0, 0);
@@ -2935,9 +2808,8 @@ public class ClientRagdollRenderer {
         part.getAllParts().forEach(p -> p.visible = true);
     }
 
-    // The mob's skin, with Visual Health's damage composited in when it's installed and the mob
-    // died hurt. VisualHealthCompat keys its own cache off the resolved base texture, so the
-    // ragdoll's cached texture stays the clean one and ETF/EMF variants still work.
+    // The mob's skin with Visual Health damage composited in when installed. VisualHealthCompat keys
+    // its cache off the resolved base texture, so the cached texture stays clean and ETF still works.
     private static ResourceLocation getMobTexture(ClientRagdoll ragdoll) {
         return VisualHealthCompat.texture(ragdoll.getOriginalEntityId(), getBaseMobTexture(ragdoll));
     }
@@ -2952,9 +2824,8 @@ public class ClientRagdollRenderer {
             return fromCache;
         }
 
-        // Falling through here means the live mob's texture was never captured, and a modded mob
-        // is about to be drawn with a guessed vanilla texture — which reads as "no texture at all"
-        // whenever its UVs are its own. Worth saying out loud: nothing else reports it.
+        // Reaching here means the live mob's texture was never captured and a modded mob is about to be
+        // drawn with a guessed vanilla one, which reads as no texture at all. Nothing else reports it.
         warnOnce(UNTEXTURED_WARNED, ragdoll.getMobType(),
                 "No captured texture for {} - falling back to a vanilla guess. Its ragdoll will "
                         + "look untextured if the mob does not use vanilla UVs.");
@@ -3039,10 +2910,8 @@ public class ClientRagdollRenderer {
         return new ResourceLocation("minecraft", "textures/entity/zombie/zombie.png");
     }
 
-    // Resolve a slot's armor texture, with type naming the layer — "overlay" for the dyeable
-    // leather pass, null for the base. Honours the Forge per-item override so modded armor with
-    // a custom path works, then falls back to vanilla's
-    // textures/models/armor/<material>_layer_<n>[_<type>].png.
+    // Resolve a slot's armor texture, type naming the layer ("overlay" for the dyeable pass, null for
+    // base). Honours the Forge per-item override, then falls back to the vanilla armor path.
     private static ResourceLocation getArmorTexture(ArmorItem item, EquipmentSlot slot, ItemStack stack,
                                                     net.minecraft.world.entity.Entity entity, String type) {
         try {
@@ -3071,14 +2940,8 @@ public class ClientRagdollRenderer {
         }
     }
 
-    // ============================
-    // Overlay descriptor system — extra layers (sea-grass on drowned, saddle on pig,
-    // wool on sheep, energy swirl on charged creepers, …) drawn on top of the base
-    // model. Each MobOverlay subtype targets one body shape (humanoid / quadruped /
-    // creeper) so the dispatcher can call the matching render path. Add a new overlay
-    // by appending an entry inside overlaysFor; villager profession layers (task 5)
-    // will plug in here as several stacked HumanoidOverlay descriptors.
-    // ============================
+    // Overlay descriptors for extra layers drawn over the base model. Each subtype targets one body
+    // shape so the dispatcher can pick a render path; add one by appending an entry in overlaysFor.
 
     public sealed interface MobOverlay permits HumanoidOverlay, IllagerOverlay, QuadrupedOverlay, VillagerOverlay, CreeperSwirlOverlay {}
 
@@ -3089,12 +2952,8 @@ public class ClientRagdollRenderer {
     // covers the whole body. Plain villagers only; zombie villagers use HumanoidOverlay.
     public record VillagerOverlay(ResourceLocation texture) implements MobOverlay {}
 
-    // Illager-shaped overlay for villager profession layers. IllagerModel extends
-    // HierarchicalModel rather than HumanoidModel, so it needs its own dispatch. limitToHeadBody
-    // exists because vanilla villager textures are cut for VillagerModel's UV layout, where the
-    // arms sit at a different texOffs than IllagerModel's split arms — applying them anyway
-    // pulls hat and body texture onto the arm cubes, the farmer-hat-on-stick-arms bug. Pass true
-    // for villager profession layers to overlay only head and body, where the UVs do match.
+    // Illager-shaped overlay for villager profession layers, needed because IllagerModel is not a
+    // HumanoidModel. limitToHeadBody keeps mismatched arm UVs off the arms (the farmer-hat-on-arms bug).
     public record IllagerOverlay(ResourceLocation texture, ModelPart root, boolean limitToHeadBody) implements MobOverlay {}
 
     // Per-part quadruped overlay (pig saddle, sheep wool); pass tint=1,1,1 for plain.
@@ -3135,15 +2994,13 @@ public class ClientRagdollRenderer {
                         ragdoll.usesBabyBodyScale() ? 0.5f : 1.0f));
             }
         }
-        // Villager / zombie villager profession layers — three stacked textures (biome
-        // type → profession → profession level) drawn over the base humanoid model.
-        // Empty profession key (level 0 too) means "vanilla nitwit / unknown" — skip.
+        // Villager profession layers: biome type, profession and level stacked over the base model.
+        // An empty profession key means vanilla nitwit or unknown and is skipped.
         if (modelType == MobModelHelper.ModelType.ILLAGER
                 && !ragdoll.getVillagerType().isEmpty()
                 && !ragdoll.getVillagerProfession().isEmpty()) {
-            // Resolve the namespace from the registry-key string. "minecraft:plains" splits
-            // to namespace="minecraft", path="plains". Fall back to vanilla namespace if
-            // the key was malformed.
+            // Resolve the namespace from the registry-key string, falling back to vanilla when the key
+            // was malformed.
             net.minecraft.resources.ResourceLocation typeKey;
             net.minecraft.resources.ResourceLocation profKey;
             try {
@@ -3155,10 +3012,8 @@ public class ClientRagdollRenderer {
 
             boolean isZombieVillager = mobType.contains("zombie_villager");
             String basePath = isZombieVillager ? "textures/entity/zombie_villager/" : "textures/entity/villager/";
-            // Vanilla VillagerProfessionLayer skips the profession overlay entirely when
-            // profession == NONE (there is no profession/none.png in the jar — rendering
-            // it gives the purple-and-black missing-texture indicator). Level layer also
-            // skipped for NONE and NITWIT.
+            // Vanilla skips the profession overlay for profession NONE, which has no texture in the jar
+            // and would render as the missing-texture checker; the level layer skips NONE and NITWIT too.
             boolean isNoneProfession = profKey.getNamespace().equals("minecraft")
                     && profKey.getPath().equals("none");
             boolean isNitwit = profKey.getNamespace().equals("minecraft")
@@ -3239,9 +3094,8 @@ public class ClientRagdollRenderer {
         ModelPart leftArm = root.getChild("left_arm");
         ModelPart rightArm = root.getChild("right_arm");
 
-        // IllagerModel default is to render arms together as a single "arms" part — we
-        // hide that on each render so only the per-side arms draw, matching the base
-        // illager render path.
+        // IllagerModel renders both arms as one combined part by default, hidden on each render so only
+        // the per-side arms draw, matching the base illager path.
         try { root.getChild("arms").visible = false; } catch (Exception ignored) {}
         leftArm.visible = true;
         rightArm.visible = true;
@@ -3282,11 +3136,8 @@ public class ClientRagdollRenderer {
         org.joml.Vector3f lFrontOff    = setPosForPart(leftFront, 0);
         org.joml.Vector3f rFrontOff    = setPosForPart(rightFront, 0);
 
-        // The sheep wool model (SheepFurModel) doesn't sit flush on the physics-aligned body
-        // it rides: the head wool is 1px too far forward and the leg wool 3px too low. Correct
-        // only the wool — the pig saddle shares this path and must not move. Offsets are in
-        // model-pixel space (setPos units): +Z is toward the back of the head (face is -Z) and
-        // -Y is up (model +Y points down), and they scale with the part so baby sheep line up too.
+        // SheepFurModel does not sit flush on the physics-aligned body: head wool is 1px forward and leg
+        // wool 3px low. Only the wool is corrected — the pig saddle shares this path and must not move.
         boolean isWool = overlay.texture().equals(SHEEP_FUR_TEXTURE);
         float woolHeadZ = isWool ? 1.0f  : 0.0f;
         float woolLegY  = isWool ? -3.0f : 0.0f;
@@ -3299,9 +3150,8 @@ public class ClientRagdollRenderer {
         renderAnimalPartTinted(poseStack, vc, rightFront, rarm,  torso, rFrontOff.x,  rFrontOff.y + woolLegY, rFrontOff.z,            0,      light, r, g, b, overlay.bodyScale());
     }
 
-    // Charged-creeper energy swirl. Vanilla EnergySwirlLayer draws the inflated creeper armor
-    // model at half RGB with time-driven UV scrolling; corpses do not tick, so wall-clock time
-    // stands in for the same continuous shimmer.
+    // Charged-creeper energy swirl: the inflated armor model at half RGB with scrolling UVs. Corpses do
+    // not tick, so wall-clock time stands in for the same continuous shimmer.
     private static void renderCreeperSwirlParts(PoseStack poseStack, MultiBufferSource buffer, int light,
                                                 RagdollTransform torso, RagdollTransform head,
                                                 RagdollTransform larm, RagdollTransform rarm,
@@ -3328,15 +3178,13 @@ public class ClientRagdollRenderer {
         renderAnimalPartTinted(poseStack, vc, rightFront, rarm, torso, 0, -3, 0, 0, light, 0.5f, 0.5f, 0.5f);
     }
 
-    // Cache of ModelPart to cube bbox centre in part-local pixel coords. The ModelPart instances
-    // live as long as the renderer and their cubes never change after bake, so entries stay
-    // valid. WeakHashMap so a resource reload does not leak.
+    // ModelPart to cube bbox centre in part-local pixel coords. Parts live as long as the renderer and
+    // their cubes never change after bake; WeakHashMap so a resource reload does not leak.
     private static final java.util.Map<ModelPart, org.joml.Vector3f> CUBE_CENTER_CACHE =
             new java.util.WeakHashMap<>();
 
-    // Geometric centre of a part's cubes in part-local pixel coords. The renderer overrides each
-    // pivot via setPos, so this centre is what has to be inverted and rotated to land the cube on
-    // its physics body. ModelPart.cubes is private, so it is read reflectively and cached.
+    // Geometric centre of a part's cubes in part-local pixels. Each pivot is overridden via setPos, so
+    // this is what must be inverted to land the cube on its body. ModelPart.cubes is read reflectively.
     private static org.joml.Vector3f cubeBoxCenter(ModelPart part) {
         org.joml.Vector3f cached = CUBE_CENTER_CACHE.get(part);
         if (cached != null) return cached;
@@ -3356,14 +3204,8 @@ public class ClientRagdollRenderer {
         return center;
     }
 
-    // A part's own cubes when it has any — children stay excluded, because a limb's centre must
-    // not drift toward whatever hangs off it. A part with no cubes of its own is a different
-    // case: CEM packs (Fresh Animations, Reanimated) routinely leave the vanilla-named part
-    // empty and hang every cube off submodels, and reporting a zero centre there drops the limb
-    // onto its pivot. Those descendants are the part's geometry, so they are what gets measured.
-    //
-    // Child pivots are folded in as a translation; any baked-in child rotation is ignored, which
-    // is close enough for a centring offset and keeps this a cheap one-time walk.
+    // A part's own cubes when it has any, children excluded so a limb's centre cannot drift. When it has
+    // none, CEM packs hang everything on submodels, so those descendants are measured instead.
     private static void accumulateCubeBounds(ModelPart part, float ox, float oy, float oz,
                                              float[] bounds, int depth) {
         java.util.List<ModelPart.Cube> cubes;

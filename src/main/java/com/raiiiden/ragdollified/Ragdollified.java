@@ -60,10 +60,8 @@ public class Ragdollified {
         }
     }
 
-    // NOTE: instance (non-static) on purpose. This mod subscribes to the Forge bus via
-    // MinecraftForge.EVENT_BUS.register(this) in the constructor, and EventBus#register(Object)
-    // only binds NON-static @SubscribeEvent methods (static ones require register(Class)). As a
-    // static method this never fired, so no command here was ever registered.
+    // Non-static on purpose: the mod registers on the Forge bus with register(this), which binds only
+    // non-static @SubscribeEvent methods, so as a static method this never fired.
     @SubscribeEvent
     public void onRegisterCommands(RegisterCommandsEvent event) {
         SpawnRagdollCommand.register(event.getDispatcher());

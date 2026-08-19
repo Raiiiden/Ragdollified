@@ -43,21 +43,18 @@ public class PhysicsHooks {
                 entity, event.getSource(), RagdollSpawnState.captureLinearVelocity(entity));
 
         float scale = isPlayer ? 1.0f : entity.getBbHeight() / 1.8f;
-        // Use LivingEntity.isBaby() rather than an AgeableMob check: zombies, husks and
-        // piglins are Monsters (not AgeableMob) but still override isBaby(), so the
-        // instanceof check missed every baby zombie — they spawned adult-sized ragdolls.
+        // LivingEntity.isBaby() rather than an AgeableMob check: zombies, husks and piglins are
+        // Monsters that still override isBaby(), so the instanceof test gave babies adult ragdolls.
         boolean isBaby = entity.isBaby();
 
-        // Sheep need wool-state captured at the moment of death so client renderers can
-        // draw the fur layer with the correct dye color (or skip it if the sheep had been
-        // sheared). For non-sheep mobs the byte is just zero — clients ignore it.
+        // Sheep wool state is captured at death so clients draw the fur layer with the right dye, or
+        // skip it when sheared. For other mobs the byte is zero and ignored.
         byte sheepState = 0;
         if (entity instanceof net.minecraft.world.entity.animal.Sheep sheep) {
             sheepState = RagdollSpawnPacket.packSheepState(sheep.isSheared(), sheep.getColor().getId());
         }
-        // Cats reuse the same byte layout (bit0 = a boolean flag, bits1-4 = a dye colour): here
-        // bit0 = tamed (whether to draw the collar) and bits1-4 = the collar colour. The client
-        // reads them back through the same wasSheared()/dyeColorId accessors for the cat path.
+        // Cats reuse the same byte layout, bit0 being tamed (draw the collar) and bits1-4 its colour,
+        // read back through the same accessors on the cat path.
         if (entity instanceof net.minecraft.world.entity.animal.Cat cat) {
             sheepState = RagdollSpawnPacket.packSheepState(cat.isTame(), cat.getCollarColor().getId());
         }
@@ -84,9 +81,8 @@ public class PhysicsHooks {
             sheepState = RagdollSpawnPacket.packSheepState(hasChest, markings);
         }
 
-        // Generic overlay-state bits for mobs whose corpse needs an extra layer based on
-        // a single boolean (charged creeper → energy swirl, saddled pig → saddle, …).
-        // bit 0 = creeper.isPowered(), bit 1 = pig.isSaddled(). Reserved bits 2-7.
+        // Generic overlay bits for mobs needing an extra layer from one boolean: bit0 powered creeper,
+        // bit1 saddled pig, bits 2-7 reserved.
         byte overlayState = 0;
         if (entity instanceof net.minecraft.world.entity.monster.Creeper creeper && creeper.isPowered()) {
             overlayState |= 0x1;
@@ -102,9 +98,8 @@ public class PhysicsHooks {
             overlayState |= 0x1;
         }
 
-        // Villager / zombie villager profession state. Captured as registry-key strings
-        // so mod-added biomes/professions ride along without an id remap. Empty for
-        // non-villager mobs (the renderer skips the profession overlay in that case).
+        // Villager profession state as registry-key strings, so mod-added biomes and professions ride
+        // along without a remap. Empty for non-villagers, where the overlay is skipped.
         String villagerType = "";
         String villagerProfession = "";
         byte villagerLevel = 0;
@@ -121,15 +116,13 @@ public class PhysicsHooks {
             }
         }
 
-        // Pull any directional hit captured by ServerRagdollHitTracker (TACZ Pre +
-        // vanilla LivingHurtEvent). Resolve part + impulse here on the server so every
-        // client sees the same kick — no per-client tracker race.
+        // Pull any directional hit captured by ServerRagdollHitTracker and resolve part and impulse on
+        // the server, so every client sees the same kick with no per-client tracker race.
         ServerRagdollHitTracker.HitInfo hitInfo = ServerRagdollHitTracker.consume(entity.getId());
         byte hitPartIndex = -1;
         float hitImpulseX = 0f, hitImpulseY = 0f, hitImpulseZ = 0f;
-        // Lever arm for the death impulse, relative to the entity origin. A blow through the
-        // centre of mass produces no torque at all, so without this a struck body only ever
-        // slides — it never tips over.
+        // Lever arm for the death impulse, relative to the entity origin: a blow through the centre of
+        // mass makes no torque, so without it a struck body only slides and never tips.
         float hitOffsetX = 0f, hitOffsetY = 0f, hitOffsetZ = 0f;
         Vec3 explosionKick = RagdollSpawnState.captureExplosionVelocityKick(entity, event.getSource());
         if (explosionKick != null) {
@@ -166,11 +159,8 @@ public class PhysicsHooks {
                 isPlayer ? entity.getUUID().toString() : "",
                 isPlayer ? entity.getName().getString() : "",
                 entity.getX(), entity.getY(), entity.getZ(),
-                // Body yaw, not getYRot(). getYRot() is where the entity was *looking*; the
-                // model is rendered on yBodyRot (LivingEntityRenderer uses 180 - yBodyRot,
-                // which is the formula ClientRagdoll mirrors). The two diverge by up to 50°
-                // normally, and by ~180° for anything that died while backpedaling — aiStep
-                // flips body yaw when movement and look direction disagree by more than 95°.
+                // Body yaw, not getYRot(): the model renders on yBodyRot, and the two diverge by up to 50
+                // degrees normally and ~180 for anything that died backpedaling.
                 entity.getVisualRotationYInDegrees(), entity.getXRot(),
                 vel.x, vel.y, vel.z,
                 entity.getPose() == Pose.SWIMMING,

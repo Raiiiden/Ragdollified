@@ -19,18 +19,17 @@ import net.minecraft.world.item.ItemStack;
 import java.util.ArrayList;
 import java.util.List;
 
-// Loot menu for a corpse. Its container mirrors a player inventory by slot index — 0-8 hotbar,
-// 9-35 main, 36-39 armor, 40 offhand — with captured curios appended from 41.
-//
-// CorpseScreen draws the whole GUI with no chest texture, grouping slots into an equipment band
-// (armor and offhand on one row, curios on their own), the corpse loot grid, and the looting
-// player's inventory, split by dividers. This class owns every slot coordinate and exposes the
-// divider and label positions so the screen stays in sync.
+// Loot menu for a corpse, its container mirroring a player inventory by slot index with captured
+// curios appended from 41. This class owns every slot coordinate the screen draws against.
 public class CorpseMenu extends AbstractContainerMenu {
 
     public static final int WIDTH = 176;
     private static final int SLOT = 18;
     private static final int LEFT = 8; // x of the first column's slot content
+    // The title (corpse name) owns the first line; the Take All / Swap buttons sit on their own
+    // row below it so a long name never runs under them.
+    private static final int BUTTON_ROW_Y = 17;
+    private static final int BUTTON_HEIGHT = 12;
 
     // Button ids sent from com.raiiiden.ragdollified.client.screen.CorpseScreen.
     public static final int BTN_TAKE_ALL = 0;
@@ -76,7 +75,7 @@ public class CorpseMenu extends AbstractContainerMenu {
         this.corpseSlots = CorpseEntity.VANILLA_SLOTS + n;
 
         // --- Vertical layout ---------------------------------------------------------------
-        int armorRowY = 19;                                   // armor + offhand row
+        int armorRowY = BUTTON_ROW_Y + BUTTON_HEIGHT + 4;     // armor + offhand row
         int curiosStartY;
         int equipBottomY;
         if (n > 0) {
@@ -140,6 +139,8 @@ public class CorpseMenu extends AbstractContainerMenu {
     public int getCurioDividerY() { return curioDividerY; }
     public int getPlayerDividerY() { return playerDividerY; }
     public int getCorpseInventoryLabelY() { return inventoryLabelY; }
+    public int getButtonRowY() { return BUTTON_ROW_Y; }
+    public int getButtonHeight() { return BUTTON_HEIGHT; }
 
     // An armor slot that, like vanilla, only accepts items equippable in eq.
     private static Slot armorSlot(Container c, int idx, int x, int y, EquipmentSlot eq,
@@ -179,12 +180,8 @@ public class CorpseMenu extends AbstractContainerMenu {
         return corpse.stillValid(player);
     }
 
-    // Server side of the screen's Take All / Swap buttons, driven by the vanilla menu-button
-    // packet. Player main-inventory slots belong to this menu, so they sync on the auto-broadcast
-    // once this returns true. Armor and offhand are not menu slots, and while a custom container
-    // is open the client ignores container-0 inventory packets — inventoryMenu.broadcastChanges()
-    // silently drops them, which was the ghost-armor bug — so they go out as container-(-2) slot
-    // packets the client applies regardless of the open screen. Curios sync on their own tick.
+    // Server side of the Take All / Swap buttons. Menu slots sync on the auto-broadcast, but armor and
+    // offhand are not menu slots, so they go out as container-(-2) packets; curios sync on their own.
     @Override
     public boolean clickMenuButton(Player player, int id) {
         switch (id) {

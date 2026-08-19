@@ -64,9 +64,8 @@ public class ClientRagdoll {
     // (10 blocks/s)² — above this the torso gets priority on the geometry budget.
     private static final float GEOMETRY_PRIORITY_SPEED_SQ = 100f;
 
-    // Scratch vectors reused across per-tick physics calls. Each ragdoll has its own
-    // (single client thread, no contention) — purely to avoid GC pressure from the
-    // hundreds of `new Vector3f()` allocations per tick across all active ragdolls.
+    // Scratch vectors reused across per-tick physics calls, one set per ragdoll (single thread, no
+    // contention), purely to avoid the hundreds of new Vector3f allocations a tick would cost.
     private final Vector3f scratchVel = new Vector3f();
     // Holds a dragged limb's pre-drive velocity so its fall speed survives the drag override.
     private final Vector3f scratchDragVel = new Vector3f();
@@ -135,10 +134,8 @@ public class ClientRagdoll {
     private boolean persistent;
     private volatile boolean destroyed = false;
 
-    // Owner-streamed playback. A replicated body runs no
-    // solver at all — its rigid bodies are out of the dynamics world and every tick writes an
-    // interpolated stream pose into them instead. That is what removes the correction snap:
-    // an observer never builds a divergent trajectory that has to be overwritten later.
+    // Owner-streamed playback. A replicated body runs no solver at all: its bodies leave the dynamics
+    // world and each tick writes an interpolated stream pose, so no divergent trajectory is built.
     private volatile boolean replicated;
     private volatile boolean hasReceivedStreamPose;
     private final ArrayDeque<StreamedPose> streamPoses = new ArrayDeque<>(STREAM_MAX_BUFFERED);
@@ -185,33 +182,28 @@ public class ClientRagdoll {
 
     // Settled detection
     private int settledTicks = 0;
-    // Ticks a handed-over body must simulate before it may settle again. Short on purpose: it
-    // only ensures an already-frozen body genuinely wakes rather than re-freezing two ticks
-    // later. When the corpse appears is decided by the body coming to rest, not by this.
+    // Ticks a handed-over body must simulate before it may settle again, short on purpose: it only
+    // ensures a frozen body genuinely wakes. When the corpse appears is decided by coming to rest.
     private static final int HANDOVER_SETTLE_GRACE_TICKS = 20;
     // Written on the physics worker, read from the client tick by the corpse bridge.
     private volatile int settleGraceTicks = 0;
     private volatile boolean settled = false;
     private boolean pendingTerrainValidation = false;
-    // Set alongside `settled` when the resting surface was fluid (water/lava) instead of
-    // solid ground. Renderer reads this to apply a sin-based bob offset so frozen bodies
-    // visibly float without re-running physics. Cleared on every wake path.
+    // Set with `settled` when the resting surface was fluid rather than solid ground, so the renderer
+    // can bob the frozen body without re-running physics. Cleared on every wake path.
     private boolean settledOnLiquid = false;
     private static final float SETTLED_VELOCITY_THRESHOLD = 0.05f;
     private static final float SETTLED_ANG_VELOCITY_THRESHOLD = 0.15f;
     private static final int SETTLED_CHECKS_REQUIRED = 4; // 4 checks × 5 ticks = 20 ticks to settle
     private volatile boolean bodiesFrozen = false;
 
-    // Displacement-based settle: ragdolls in piles often vibrate above the velocity
-    // threshold (contact-induced jitter) but don't actually move anywhere. Without this,
-    // a pile of 15+ ragdolls stays "active" indefinitely and the solver runs full-cost
-    // every tick. Snapshot the torso every N ticks; if it hasn't moved, force settle.
+    // Displacement-based settle: piled ragdolls jitter above the velocity threshold without going
+    // anywhere, so snapshot the torso every N ticks and force a settle when it has not moved.
     private final Vector3f settleAnchorPos = new Vector3f();
     private int settleAnchorTick = -1;
-    private static final int SETTLE_DISPLACEMENT_INTERVAL = 20;     // 1s — was 2s; in
-    //   piles, ragdolls jiggle for many seconds before velocity drops below the static
-    //   threshold. Faster displacement-based settle drains the active set sooner, which
-    //   directly cuts manifold count which directly cuts solver work.
+    private static final int SETTLE_DISPLACEMENT_INTERVAL = 20;     // 1s
+    // In piles, ragdolls jiggle for many seconds before velocity drops below the static threshold;
+    // settling on displacement sooner drains the active set, cutting manifold count and solver work.
     private static final float SETTLE_DISPLACEMENT_THRESHOLD_SQ = 0.04f; // (0.2 blocks)²
 
     // Cached transforms — current tick
@@ -229,10 +221,8 @@ public class ClientRagdoll {
     private final ResourceLocation cachedPlayerSkin;
     private final boolean cachedIsSlim;
 
-    // Immutable snapshot of every transform needed for rendering, published atomically by the
-    // physics thread at the end of updateCachedTransforms and read lock-free by the render
-    // thread and click raycast. Costs one snapshot plus 26 small vectors per ragdoll per tick,
-    // about 5 MB/s at 50 ragdolls, which stays in eden because it lives exactly one tick.
+    // Immutable render snapshot published atomically at the end of updateCachedTransforms and read
+    // lock-free. About 5 MB/s at 50 ragdolls, all of which stays in eden — it lives one tick.
     public static final class TransformSnapshot {
         public final Vector3f[] positions;     // 6 part positions (current)
         public final Quat4f[] rotations;       // 6 part rotations (current)
@@ -407,20 +397,17 @@ public class ClientRagdoll {
     private final ItemStack leggings;
     private final ItemStack boots;
     private final MobModelHelper.ModelType modelType;
-    // Sheep state (only meaningful when modelType is QUADRUPED and the mob is a sheep).
-    // wasSheared = true → renderer skips the wool overlay; otherwise dyeColorId picks the
-    // tint applied to the SheepFurModel via DyeColor.byId(dyeColorId).
+    // Sheep state, meaningful only for a QUADRUPED sheep: wasSheared skips the wool overlay,
+    // otherwise dyeColorId tints the SheepFurModel via DyeColor.byId.
     private final boolean wasSheared;
     private final int dyeColorId;
-    // Other mob-specific overlay state captured at death.
-    // chargedCreeper → render the creeper energy-swirl overlay; saddledPig → render the
-    // pig saddle overlay. Both are ignored unless mobType matches.
+    // Other mob-specific overlay state captured at death: chargedCreeper draws the energy swirl and
+    // saddledPig the saddle. Both are ignored unless mobType matches.
     private final boolean chargedCreeper;
     private final boolean saddledPig;
     private final boolean isBaby;
-    // Villager profession state — empty type means "no profession layer to render".
-    // Registry keys (e.g. "minecraft:plains", "minecraft:farmer") so mod-added types
-    // survive without a registry-id remap. Level 1..5; 0 = unknown.
+    // Villager profession state, empty type meaning no profession layer. Registry keys so mod-added
+    // types survive without a remap; level 1..5, 0 unknown.
     private final String villagerType;
     private final String villagerProfession;
     private final int villagerLevel;
@@ -450,9 +437,8 @@ public class ClientRagdoll {
         public final boolean isSwimming;
         public final boolean isBaby;
         public final ResourceLocation texture;
-        // Optional hit info — applied as a one-shot impulse to a single part right after
-        // bodies are constructed. Set hitPartIndex = -1 to skip. Used so a TACZ bullet
-        // that kills a mob whips the right body part in the bullet's travel direction.
+        // Optional hit info, applied as a one-shot impulse to a single part once bodies exist, so a
+        // killing bullet whips the right part along its travel direction. -1 skips it.
         public final int hitPartIndex;
         public final Vec3 hitImpulse;
         // Impact point relative to position; null when none was captured.
@@ -464,9 +450,8 @@ public class ClientRagdoll {
         // Other per-mob overlay flags. Only meaningful when mobType matches.
         public final boolean chargedCreeper;
         public final boolean saddledPig;
-        // Villager profession state. Empty type = "no profession layer". Strings are
-        // registry keys ("minecraft:plains", "minecraft:farmer") so mod-added biomes
-        // and professions survive without an id remap.
+        // Villager profession state, empty type meaning no profession layer. Registry keys so mod-added
+        // biomes and professions survive without an id remap.
         public final String villagerType;
         public final String villagerProfession;
         public final int villagerLevel;
@@ -630,9 +615,8 @@ public class ClientRagdoll {
                     villagerType, villagerProfession, villagerLevel);
         }
 
-        // Canonical form. hitOffset is the impact point relative to position — the lever arm
-        // that turns the death impulse into rotation. Null means none was captured, falling
-        // back to a torque-free centre-of-mass impulse.
+        // Canonical form. hitOffset is the impact point relative to position, the lever arm that turns
+        // the death impulse into rotation; null falls back to a torque-free centre-of-mass impulse.
         public SpawnData(int originalEntityId, boolean isPlayer, String mobType,
                          MobModelHelper.ModelType modelType, float scale,
                          UUID playerUUID, String playerName,
@@ -716,10 +700,8 @@ public class ClientRagdoll {
         updateCachedTransforms();
         updateLocalWorldCollision();
 
-        // Death-time directional impulse (TACZ bullet hit, vanilla arrow, etc.).
-        // Applied after bodies exist + transforms cached, before publish, so the very
-        // first rendered frame already shows the recoil. Runs on the physics worker
-        // (we're inside processSpawnQueue), so direct jbullet calls are safe here.
+        // Death-time directional impulse, applied after bodies exist and transforms are cached so the
+        // first rendered frame already shows the recoil. On the physics worker, so jbullet is safe.
         if (data.hitImpulse != null) {
             // World-space impact point, used as the lever arm below.
             deathHitPoint = data.hitOffset == null ? null : new Vector3f(
@@ -739,10 +721,8 @@ public class ClientRagdoll {
                         * (part != null ? RagdollifiedConfig.getDeathPartKnockbackMultiplier(part) : 1.0f)));
             }
         }
-        // Resolve player skin + slim variant NOW, while the entity is still loaded. Resolving
-        // through ClientPlayerSkinCache (connection PlayerInfo, not just loaded entities) both
-        // makes this robust when the owner is briefly out of range and seeds the per-UUID cache,
-        // so the corpse that replaces this ragdoll later still finds the real skin.
+        // Resolve player skin and slim variant now, while the entity is loaded. Going through
+        // ClientPlayerSkinCache also seeds the per-UUID cache the later corpse reads.
         if (isPlayer && playerUUID != null) {
             ClientPlayerSkinCache.Skin resolved = ClientPlayerSkinCache.resolve(playerUUID);
             cachedPlayerSkin = resolved.texture;
@@ -753,13 +733,10 @@ public class ClientRagdoll {
         }
     }
 
-    // ============================
     // Tick — mirrors MobRagdollPhysics.update() order exactly
-    // ============================
 
-    // Per-phase timings aggregated across every ragdoll tick in the current cycle, reset at the
-    // start of ClientRagdollManager.tickAll() and logged at the end. Public so the manager can
-    // read and reset it; not thread-safe, client thread only.
+    // Per-phase timings aggregated over every ragdoll tick in the cycle, reset and logged by
+    // ClientRagdollManager.tickAll. Public so the manager can read it; client thread only.
     public static final class PhaseStats {
         public long updateCachedTransformsNanos;
         public long velocityClampNanos;
@@ -830,11 +807,8 @@ public class ClientRagdoll {
                 settledTerrainSignature = computeTerrainSignature(torsoBlock,baseCollisionRadius());
                 hasSettledTerrainSignature = true;
             }
-            // Periodic support check — ragdolls don't always get a NeighborNotifyEvent
-            // when their support block is broken (especially for server-initiated
-            // changes that don't fire client-side events). Every 10 ticks (0.5s),
-            // verify there's still ground under us — OR fluid carrying us. If neither,
-            // wake up and force the collision cache to rebuild.
+            // Periodic support check: a broken support block does not always fire a client-side
+            // notify, so every 10 ticks re-verify ground or carrying fluid and rebuild the cache.
             boolean terrainChanged = hasSettledTerrainSignature
                     && Math.floorMod(ticksExisted + id, 20) == 0
                     && computeTerrainSignature(settledTerrainCenter,baseCollisionRadius()) != settledTerrainSignature;
@@ -857,11 +831,8 @@ public class ClientRagdoll {
 
         double physicsDistance = RagdollifiedConfig.get(RagdollifiedConfig.PHYSICS_DISTANCE);
         if (distSq > physicsDistance * physicsDistance) {
-            // Too far to simulate: pause the ragdoll. Crucially we do NOT advance ticksExisted
-            // here, so a distance-frozen body is suspended rather than aging — it resumes exactly
-            // where it left off when the player returns, and (for player corpses) the settle
-            // report waits for the real resting place instead of giving up mid-fall at the death
-            // position.
+            // Too far to simulate: pause without advancing ticksExisted, so the body is suspended
+            // rather than aging and resumes exactly where it left off, settle report included.
             if (!bodiesFrozen) {
                 freezeBodies();
                 PHASE_STATS.distanceFrozenThisTick++;
@@ -899,10 +870,8 @@ public class ClientRagdoll {
         }
         PHASE_STATS.velocityClampNanos += System.nanoTime() - t;
 
-        // 2. fluid forces — always run (not gated by camera distance). Per-part fluid
-        // lookups are cheap, and a ragdoll falling into water needs buoyancy regardless
-        // of where the player is standing — otherwise it would sink to the bottom while
-        // the player was looking elsewhere and never reach the water-surface settle path.
+        // Fluid forces always run, ungated by camera distance: the lookups are cheap and a body
+        // falling into water would otherwise sink to the bottom while the player looked away.
         t = System.nanoTime();
         applyFluidForces();
         PHASE_STATS.fluidForcesNanos += System.nanoTime() - t;
@@ -927,14 +896,8 @@ public class ClientRagdoll {
             PHASE_STATS.updateSettledStateNanos += System.nanoTime() - t;
         }
 
-        // Phantom-cache check — if this active ragdoll has stopped moving vertically
-        // but isn't actually on real ground, it's wedged on cached static geometry
-        // for blocks that no longer exist (the cache wasn't invalidated by an event,
-        // and since the ragdoll isn't moving its center didn't change so updateLocal-
-        // WorldCollision returned early). Force a cache rebuild so gravity can win.
-        // Every 10 ticks to limit cost; only triggers when the ragdoll is genuinely
-        // stuck (small vy + no real support). Skip when floating in fluid — buoyancy is
-        // the legitimate reason there's no ground contact, no phantom cache to fix.
+        // Phantom-cache check: a body that stopped falling with no real support is wedged on cached
+        // geometry for blocks that no longer exist, so rebuild. Skipped in fluid, where buoyancy holds.
         if (ticksExisted % 10 == 0
                 && collisionGeometryReadyForContacts()
                 && !collectTerrainGroundContacts()
@@ -974,9 +937,8 @@ public class ClientRagdoll {
         return true;
     }
 
-    // Wake from settled because the support floor is gone. Drops this body's cached collision
-    // geometry so the next tick rebuilds without the missing block, and invalidates nearby cache
-    // entries so other ragdolls in the area see fresh geometry too. From the floor check in tick().
+    // Wake from settled because the support floor is gone: drop this body's cached geometry and
+    // invalidate nearby entries so the area rebuilds. Called from the floor check in tick().
     private void unsettleAndDropCache() {
         settled = false;
         pendingTerrainValidation = false;
@@ -1019,10 +981,8 @@ public class ClientRagdoll {
             r.setLinearVelocity(new Vector3f(0, 0, 0));
             r.setAngularVelocity(new Vector3f(0, 0, 0));
         }
-        // Completely remove from the dynamics world — this is the only way to make them
-        // truly invisible to the broadphase and solver. DISABLE_SIMULATION still leaves
-        // bodies in the world as unresponsive obstacles; an active body hitting one gets
-        // all the impulse and gets flung. Removing them entirely avoids that entirely.
+        // Remove from the dynamics world entirely, the only way to be invisible to broadphase and
+        // solver. DISABLE_SIMULATION leaves an obstacle that flings whatever hits it.
         for (TypedConstraint c : ragdollJoints) world.removeConstraint(c);
         for (RigidBody r : ragdollParts) world.removeRigidBody(r);
     }
@@ -1036,9 +996,8 @@ public class ClientRagdoll {
         // Re-add bodies before constraints (constraint solver expects live bodies).
         for (RigidBody r : ragdollParts) {
             world.addRigidBody(r);
-            // DISABLE_DEACTIVATION = body never auto-sleeps. Critical here: after a wake
-            // from floor-loss, bodies have zero velocity. Without this, Bullet would
-            // deactivate them ~2s later, gravity stops, and the ragdoll floats mid-air.
+            // DISABLE_DEACTIVATION so the body never auto-sleeps: after a floor-loss wake velocity is
+            // zero, and Bullet would deactivate it seconds later, leaving the ragdoll floating.
             r.forceActivationState(CollisionObject.DISABLE_DEACTIVATION);
             r.activate(true);
         }
@@ -1046,9 +1005,8 @@ public class ClientRagdoll {
     }
 
     private void updateSettledState() {
-        // A body handed back as a fresh death ragdoll is already lying still, so the two-tick
-        // velocity gate below would re-freeze it within a tenth of a second — waking it achieved
-        // nothing visible. Hold the settle off until it has actually simulated for a while.
+        // A body handed back as a fresh death ragdoll already lies still, so the velocity gate would
+        // re-freeze it within a tenth of a second. Hold the settle off until it has really simulated.
         if (settleGraceTicks > 0) {
             settleGraceTicks--;
             settledTicks = 0;
@@ -1066,12 +1024,8 @@ public class ClientRagdoll {
         }
         boolean canSettle = onGround || atSurface;
 
-        // Buoyancy + gravity at the half-submerged equilibrium leaves a ~0.07 m/s residual
-        // in vy each tick (gravity adds 0.49, buoyancy + drag cancels most of it). The
-        // ground threshold (0.05) is too tight for that, so water-floating ragdolls would
-        // never reach the velocity-settle path and would bob around chewing solver time.
-        // 0.4 captures the steady-state oscillation amplitude while still rejecting bodies
-        // that are actually moving (a kicked ragdoll keeps vel > 1 m/s for >10 ticks).
+        // Buoyancy and gravity leave ~0.07 m/s residual in vy at the half-submerged equilibrium, which
+        // the 0.05 ground threshold rejects; 0.4 catches that bob while still rejecting moving bodies.
         float vThreshold = atSurface ? 0.4f : SETTLED_VELOCITY_THRESHOLD;
         float aThreshold = atSurface ? 0.6f : SETTLED_ANG_VELOCITY_THRESHOLD;
 
@@ -1096,10 +1050,8 @@ public class ClientRagdoll {
             settledTicks = 0;
         }
 
-        // Displacement-based fallback: jittering pile-bound ragdolls never reach the
-        // velocity-based settle. If the torso hasn't moved meaningfully in the last
-        // SETTLE_DISPLACEMENT_INTERVAL ticks, settle anyway. The velocity gate may still
-        // be hot but the ragdoll isn't actually going anywhere — solver work is wasted.
+        // Displacement fallback: pile-bound jitter never reaches the velocity settle, so a torso that
+        // has not moved in SETTLE_DISPLACEMENT_INTERVAL ticks settles anyway.
         if (settleAnchorTick < 0) {
             settleAnchorPos.set(cachedTorsoPos);
             settleAnchorTick = ticksExisted;
@@ -1368,20 +1320,13 @@ public class ClientRagdoll {
         onBlockChangedNear(changedPos);
     }
 
-    // Wake this ragdoll when an active one's torso comes within 2 blocks. Settled bodies use
-    // DISABLE_SIMULATION, so active ragdolls would otherwise fall straight through them. The
-    // wake loop runs before the physics step, putting settled bodies back in the broadphase
-    // before contacts resolve. 2 blocks rather than 3 still avoids cascade activation in dense
-    // piles while leaving margin for ~0.5 blocks of movement per tick.
-    // Returns true if this ragdoll was woken, false if it was already active or out of range.
+    // Wake this ragdoll when an active torso comes within 2 blocks, since settled bodies are out of
+    // the world and would be fallen through. True only if this call woke it.
     public boolean wakeIfNearRagdoll(Vector3f otherTorsoPos) {
         if (replicated) return false;
         if (!settled) return false; // distance-frozen bodies are too far to matter
-        // Water-settled corpses don't need cascade-wake. Bodies are removed from the world
-        // anyway (frozen), so other active ragdolls pass through them visually instead of
-        // colliding. A pile of corpses on a pond was previously bouncing each other awake
-        // every few ticks — solver was running at full cost for ~25 active bodies just to
-        // resolve floating piles. Block changes still wake them via onBlockChangedNear.
+        // Water-settled corpses skip cascade-wake: they are out of the world anyway, and a pond full
+        // of them used to bounce each other awake every few ticks. Block changes still wake them.
         if (settledOnLiquid) return false;
         float dx = otherTorsoPos.x - cachedTorsoPos.x;
         float dy = otherTorsoPos.y - cachedTorsoPos.y;
@@ -1398,9 +1343,7 @@ public class ClientRagdoll {
         return false;
     }
 
-    // ============================
     // World collision — mirrors MobRagdollPhysics.updateLocalWorldCollision() exactly
-    // ============================
 
     private void updateLocalWorldCollision() {
         Vector3f torsoPos = cachedTorsoPos;
@@ -1424,16 +1367,8 @@ public class ClientRagdoll {
             releaseCurrentCollisionGeometry();
         }
 
-        // Try to acquire new geometry first. getOrCreateCollisionGeometry returns null when
-        // the per-tick creation budget is exhausted — we keep the old geometry and retry
-        // next tick rather than leaving the ragdoll without any floor collision.
-        //
-        // Per-AABB static bodies (one RigidBody per block face). DbvtBroadphase prunes
-        // these efficiently — only AABBs that actually overlap a dynamic part generate
-        // a narrowphase pair. A previous attempt to bundle these into one CompoundShape
-        // per cache entry was reverted: jbullet's CompoundCollisionAlgorithm iterates
-        // all children per pair (no internal BVH), turning broadphase savings into a
-        // much larger narrowphase loss.
+        // Acquire new geometry first, keeping the old and retrying next tick when the budget is spent,
+        // rather than leaving the body with no floor. Per-AABB static bodies beat one CompoundShape.
         ClientJbulletWorld.CollisionGeometryHandle newGeometry =
                 physicsWorld.getOrCreateCollisionGeometry(
                         center, collisionRadius, isOutrunningCollisionGeometry(),
@@ -1455,14 +1390,12 @@ public class ClientRagdoll {
         currentCollisionGeometry = newGeometry;
         collisionGeometryAcquiredTick = physicsWorld.getTickCount();
 
-        // No wakeUpAndClearContacts() — clearing manifolds destroys floor contacts
-        // and causes the settle-sink-bounce cycle. JBullet builds new contacts for
-        // the new geometry within 1-2 substeps naturally.
+        // No wakeUpAndClearContacts(): clearing manifolds destroys floor contacts and causes the
+        // settle-sink-bounce cycle. Contacts for the new geometry rebuild within a substep or two.
     }
 
-    // True when the torso moves fast enough that a tick of stale geometry risks it leaving its
-    // COLLISION_RADIUS bubble and tunnelling. At the threshold it covers 0.5 blocks a tick,
-    // leaving ~6 ticks of margin — enough to survive losing a rebuild or two to the budget.
+    // True when the torso moves fast enough that a tick of stale geometry risks tunnelling out of its
+    // COLLISION_RADIUS bubble. At the threshold that is 0.5 blocks a tick, about 6 ticks of margin.
     private boolean isOutrunningCollisionGeometry() {
         if (ragdollParts.isEmpty()) return false;
         // Torso only: parts are jointed so it tracks the body as a whole, and the
@@ -1566,9 +1499,7 @@ public class ClientRagdoll {
         return true;
     }
 
-    // ============================
     // Physics body creation — unchanged from previous version
-    // ============================
 
     private void createRagdollBodies(SpawnData data) {
         float xRotDeg = MobModelHelper.isHumanoidModelType(modelType) ? 0f : data.xRot;
@@ -1680,9 +1611,8 @@ public class ClientRagdoll {
         if (modelType == MobModelHelper.ModelType.IRON_GOLEM) spawnYOffset = 1.515625f;
         if (modelType == MobModelHelper.ModelType.ENDERMAN) spawnYOffset = 2.0f;
 
-        // Keep X/Z on the entity's exact death origin. The Y offset is not prediction or
-        // random displacement: it converts the feet-level entity origin into this body's
-        // authored torso/root location.
+        // Keep X/Z on the entity's exact death origin. The Y offset is neither prediction nor jitter:
+        // it converts the feet-level entity origin into this body's authored torso location.
         Vector3f pos = new Vector3f(
                 (float) data.position.x,
                 (float) data.position.y + spawnYOffset,
@@ -1713,16 +1643,10 @@ public class ClientRagdoll {
         }
     }
 
-    // ============================
     // Forces — mirrors MobRagdollPhysics exactly
-    // ============================
 
-    // Per-part buoyancy and drag. For each part in a fluid block, measure how far below the
-    // local surface its centre sits and add an upward velocity change proportional to that
-    // depth. Equilibrium is half-submerged, where buoyancy (2g x 0.5 = g) cancels gravity;
-    // deeper parts rise, shallower ones fall. Parts end up hovering at the surface with the
-    // torso near the waterline, which lets the body qualify for a water-surface settle and
-    // freeze. Heavy drag, 0.7 retention per tick, drains the oscillation in about half a second.
+    // Per-part buoyancy and drag: each submerged part gains upward velocity with its depth below the
+    // local surface, so the body hovers half-submerged and can reach the water-surface settle.
     private void applyFluidForces() {
         final float dt = 1f / 20f;
         final float gravity = (float) RagdollifiedConfig.get(RagdollifiedConfig.GRAVITY);
@@ -1872,17 +1796,13 @@ public class ClientRagdoll {
         }
     }
 
-    // Damping factor for everything that injects momentum into this body — inherited death
-    // velocity, death-hit impulses, later player hits and shoves. `scale` is bbHeight / 1.8, so
-    // a player is 1.0 and nothing at or above player size is touched. See
-    // RagdollifiedConfig#getModelSizeVelocityScale for why small bodies need it.
+    // Damping for everything that injects momentum — inherited death velocity, impulses, later hits.
+    // scale is bbHeight / 1.8, so a player is 1.0 and nothing player-sized or larger is touched.
     private float modelSizeVelocityScale() {
         return RagdollifiedConfig.getModelSizeVelocityScale(scale);
     }
 
-    // ============================
     // Public API
-    // ============================
 
     public void applyImpulse(RagdollPart part, Vector3f impulse) {
         if (part == null || part.index >= ragdollParts.size()) return;
@@ -1907,9 +1827,8 @@ public class ClientRagdoll {
         markSettledPoseDirty();
     }
 
-    // Drive a whole limb group on the physics worker. Every target lands before the next Bullet
-    // step, so paired arms or legs never fight each other across ticks. Velocity-driven only:
-    // it never teleports a rigid body and never applies an impulse.
+    // Drive a whole limb group on the physics worker, every target landing before the next step so
+    // paired limbs never fight across ticks. Velocity-driven: no teleport, no impulse.
     public void dragPartsTo(Map<RagdollPart, Vec3> targets) {
         drivePartsTo(targets, DRAG_STIFFNESS, DragTarget.DEFAULT_MAX_HORIZONTAL_SPEED,
                 DragTarget.DEFAULT_MAX_VERTICAL_SPEED, DRAG_TORSO_MAX_SPEED);
@@ -1963,27 +1882,21 @@ public class ClientRagdoll {
         RagdollPart leftPart = end == DragEnd.ARMS ? RagdollPart.LEFT_ARM : RagdollPart.LEFT_LEG;
         RagdollPart rightPart = end == DragEnd.ARMS ? RagdollPart.RIGHT_ARM : RagdollPart.RIGHT_LEG;
 
-        // Hand each target to whichever limb is already nearest it, instead of always giving the
-        // left limb the left-hand target. The two targets are laid out along the *dragger's* side
-        // axis, which says nothing about which way the body is lying: a prone or reversed body
-        // had its limbs assigned to the far target and crossed over to reach it, and the twist
-        // that put through the hips and shoulders is also what kept rolling a body onto its face.
+        // Hand each target to whichever limb is already nearest, since the targets are laid out along
+        // the dragger's side axis: a prone body used to cross its limbs over and roll onto its face.
         boolean crossed = pickCrossedAssignment(leftPart, rightPart, sideA, sideB);
         Map<RagdollPart, Vec3> targets = new EnumMap<>(RagdollPart.class);
         targets.put(leftPart, crossed ? sideB : sideA);
         targets.put(rightPart, crossed ? sideA : sideB);
-        // A drag's follow responsiveness drives the limbs as well as the anchor: at the default 7
-        // a limb settles into a steady lag of (player speed / 7), which is most of a block behind
-        // at a sprint. Capped because this is velocity control on a fixed 20 Hz step — a gain
-        // above 1/dt moves the limb past its target every tick and rings instead of converging.
+        // Follow responsiveness drives limbs as well as the anchor, leaving a lag of (speed / gain).
+        // Capped because on a fixed 20 Hz step a gain above 1/dt overshoots and rings every tick.
         drivePartsTo(targets, Math.min(DRAG_MAX_STIFFNESS, target.followResponsiveness()),
                 target.maxHorizontalSpeed(), target.maxVerticalSpeed(),
                 Math.min(DRAG_TORSO_MAX_SPEED, target.maxHorizontalSpeed()));
     }
 
-    // Decide whether to swap the paired targets, keeping the previous answer unless the other is
-    // clearly better. Without that hysteresis a body lying square to the pull sits on the tie
-    // point and flips every tick, which reads as the limbs shivering.
+    // Decide whether to swap the paired targets, keeping the previous answer unless the other clearly
+    // wins. Without that hysteresis a body square to the pull flips every tick and looks like shivering.
     private boolean pickCrossedAssignment(RagdollPart leftPart, RagdollPart rightPart,
                                           Vec3 sideA, Vec3 sideB) {
         if (leftPart.index >= ragdollParts.size() || rightPart.index >= ragdollParts.size()) {
@@ -2059,11 +1972,8 @@ public class ClientRagdoll {
             scratchVel.x *= scale;
             scratchVel.z *= scale;
         }
-        // Vertical is asymmetric on purpose, and this is what gives a towed body its weight.
-        // Clamping both directions replaced gravity outright: a limb below the hold point was
-        // hauled up at the full pull speed and one above it was driven back down just as hard,
-        // so the body behaved like it was on a rail. Lifting is now capped hard, and there is no
-        // downward drive at all — below the grip the limb simply falls under its own weight.
+        // Vertical is asymmetric on purpose, and it is what gives a towed body weight: clamping both
+        // ways replaced gravity and put the body on a rail. Only the lift is capped; below the grip it falls.
         if (scratchVel.y > maxVerticalSpeed) scratchVel.y = maxVerticalSpeed;
         if (scratchVel.y < 0F) scratchVel.y = Math.min(0F, scratchDragVel.y);
         body.setLinearVelocity(scratchVel);
@@ -2071,9 +1981,8 @@ public class ClientRagdoll {
         velocitySum.add(scratchVel);
     }
 
-    // The constraints feed some of each limb's towing velocity into angular momentum. Damping it
-    // before the step stops a long pull building into a full flip, while leaving enough rotation
-    // for the body to conform to terrain.
+    // The constraints feed some towing velocity into angular momentum; damping it before the step
+    // stops a long pull building into a flip while leaving enough rotation to conform to terrain.
     private void stabilizeDragRotation() {
         for (int i = 0; i < ragdollParts.size(); i++) {
             RigidBody body = ragdollParts.get(i);
@@ -2107,10 +2016,8 @@ public class ClientRagdoll {
             stepX *= scale;
             stepZ *= scale;
         }
-        // Only the rise is capped, matching the limb drive. Capping the descent too is what made
-        // a towed body go weightless downhill: the vertical limit is deliberately far below a
-        // walking pace, so on any downward slope the anchor could not keep up with the dragger,
-        // hung in the air above them, and pulled the limbs up to it instead of letting them fall.
+        // Only the rise is capped, matching the limb drive. Capping descent made a towed body go
+        // weightless downhill: the anchor hung in the air above the dragger and pulled the limbs up.
         float maxRiseStep = target.maxVerticalSpeed() / 20f;
         if (stepY > maxRiseStep) stepY = maxRiseStep;
         smoothedDragAnchor.set(smoothedDragAnchor.x + stepX,
@@ -2169,15 +2076,12 @@ public class ClientRagdoll {
         torso.activate(true);
     }
 
-    // ===========================
     // Owner-streamed replication
-    // ===========================
 
     public boolean isReplicated() { return replicated; }
 
-    // Switch between local simulation and stream playback, physics thread only. Entering
-    // playback pulls the bodies out of the dynamics world entirely, so a replicated ragdoll
-    // costs nothing in the solver and cannot collide with or shove a live one.
+    // Switch between local simulation and stream playback, physics thread only. Playback pulls the
+    // bodies out of the world, so a replicated ragdoll costs no solver time and cannot shove a live one.
     public void setReplicated(boolean replicated) {
         if (this.replicated == replicated || destroyed) return;
         this.replicated = replicated;
@@ -2258,9 +2162,8 @@ public class ClientRagdoll {
         return stationaryHardSyncRequested.compareAndSet(true, false);
     }
 
-    // Seed a newly elected owner that entered after the death. Unlike an observer it must resume
-    // Bullet, so write the server-retained owner pose directly and keep its spawn velocities as
-    // the best available continuation until fresh contact forces take over.
+    // Seed a newly elected owner that entered after the death: it must resume Bullet, so write the
+    // server-retained pose and keep its spawn velocities as the best continuation available.
     public void applyOwnerHandoffPose(RagdollTransform[] transforms) {
         if (destroyed || transforms == null || transforms.length == 0 || transforms[0] == null) return;
         if (replicated) setReplicated(false);
@@ -2290,9 +2193,8 @@ public class ClientRagdoll {
             destroy();
             return;
         }
-        // Never fall back to an independent observer simulation when the stream pauses. Holding
-        // the last authoritative frame may briefly freeze a body during packet loss, but it
-        // cannot produce a second trajectory or a different final resting place.
+        // Never fall back to an independent observer simulation when the stream pauses: holding the
+        // last authoritative frame can freeze briefly, but cannot invent a second resting place.
         if (streamPoses.isEmpty()) return;
 
         StreamedPose newest = streamPoses.peekLast();
@@ -2467,12 +2369,8 @@ public class ClientRagdoll {
         }
     }
 
-    // Apply an impulse at the recorded impact point rather than through the centre of mass.
-    // applyCentralImpulse is torque-free by definition, so it could only translate a body — a
-    // pig took a full sword hit and slid away upright, since the only rotation came from joint
-    // drag on a struck head. Offsetting by r supplies the r x J needed to tip it over. The arm
-    // is clamped to the part's own bounding radius: an impulse cannot land outside the body it
-    // hit, and an unclamped arm to a distant limb would spin that limb absurdly fast.
+    // Impulse at the recorded impact point rather than through the centre of mass: applyCentralImpulse
+    // is torque-free, so r x J is what tips a body over. The arm is clamped to the part's own radius.
     private void applyOffCentreImpulse(RigidBody body, Vector3f impulse) {
         if (deathHitPoint == null) {
             body.applyCentralImpulse(impulse);
@@ -2682,9 +2580,8 @@ public class ClientRagdoll {
     public void destroy() {
         if (destroyed) return;
         destroyed = true;
-        // Publish a destroyed-flagged snapshot immediately so the render thread skips
-        // this ragdoll on its next read instead of trying to render the about-to-be-
-        // cleared bodies/transforms.
+        // Publish a destroyed-flagged snapshot immediately so the render thread skips this ragdoll
+        // rather than reading bodies that are about to be cleared.
         TransformSnapshot prev = publishedSnapshot;
         if (prev != null) {
             publishedSnapshot = new TransformSnapshot(
@@ -2747,6 +2644,61 @@ public class ClientRagdoll {
         groupPenetrationCorrection.set(0f, 0f, 0f);
     }
 
+    // Pre-step centre of mass, linear and angular velocity per part, nine floats each. Filled only
+    // with a collision listener registered, so impacts score off pre-step rather than post-solver.
+    private final float[] impactSample = new float[RagdollTransform.MAX_PARTS * 9];
+    private boolean impactSampleValid;
+
+    public void captureImpactSample() {
+        int count = Math.min(ragdollParts.size(), RagdollTransform.MAX_PARTS);
+        for (int i = 0; i < count; i++) {
+            RigidBody body = ragdollParts.get(i);
+            body.getCenterOfMassPosition(scratchVel);
+            int base = i * 9;
+            impactSample[base] = scratchVel.x;
+            impactSample[base + 1] = scratchVel.y;
+            impactSample[base + 2] = scratchVel.z;
+            body.getLinearVelocity(scratchVel);
+            impactSample[base + 3] = scratchVel.x;
+            impactSample[base + 4] = scratchVel.y;
+            impactSample[base + 5] = scratchVel.z;
+            body.getAngularVelocity(scratchVel);
+            impactSample[base + 6] = scratchVel.x;
+            impactSample[base + 7] = scratchVel.y;
+            impactSample[base + 8] = scratchVel.z;
+        }
+        impactSampleValid = count > 0;
+    }
+
+    public void clearImpactSample() {
+        impactSampleValid = false;
+    }
+
+    // World velocity the part had at contactPoint before the step, written into out.
+    public boolean readImpactVelocity(int partIndex, Vector3f contactPoint, Vector3f out) {
+        if (!impactSampleValid || partIndex < 0 || partIndex >= RagdollTransform.MAX_PARTS
+                || partIndex >= ragdollParts.size()) {
+            return false;
+        }
+        int base = partIndex * 9;
+        float rx = contactPoint.x - impactSample[base];
+        float ry = contactPoint.y - impactSample[base + 1];
+        float rz = contactPoint.z - impactSample[base + 2];
+        float wx = impactSample[base + 6], wy = impactSample[base + 7], wz = impactSample[base + 8];
+        out.set(
+                impactSample[base + 3] + wy * rz - wz * ry,
+                impactSample[base + 4] + wz * rx - wx * rz,
+                impactSample[base + 5] + wx * ry - wy * rx);
+        return true;
+    }
+
+    public int partIndexOf(CollisionObject body) {
+        for (int i = 0; i < ragdollParts.size(); i++) {
+            if (ragdollParts.get(i) == body) return i;
+        }
+        return -1;
+    }
+
     public RagdollTransform getTransform(RagdollPart part) {
         if (part.index >= ragdollParts.size() || part.index >= RagdollTransform.MAX_PARTS) return null;
         return cachedTransforms[part.index];
@@ -2758,20 +2710,15 @@ public class ClientRagdoll {
     public boolean isPersistent() { return persistent; }
     public void setPersistent(boolean persistent) { this.persistent = persistent; }
 
-    // Restart death bookkeeping for a body an integration owned until now. The pose is untouched;
-    // only the lifetime and the one-shot pose and corpse reports are re-armed, so a body that
-    // spent minutes alive still gets a full death lifetime and still reports the rest pose its
-    // corpse is built from. Physics thread only.
+    // Restart death bookkeeping for a body an integration owned. The pose is untouched; the lifetime
+    // and one-shot pose and corpse reports are re-armed. Physics thread only.
     public void restartDeathLifetime() {
         ticksExisted = 0;
-        // The server's pending corpse for this death starts counting pushes at zero. A body that
-        // was shoved around while its owner was still alive would otherwise report a revision
-        // that pending can never match, and its corpse would never be built from this pose.
+        // The server's pending corpse counts pushes from zero, so a body shoved while its owner lived
+        // would report a revision pending can never match and never get a corpse from this pose.
         lastImpulseRevision = 0;
-        // A body an integration held for a while has almost certainly settled and frozen already,
-        // because it spent that whole time lying still. Handing it over in that state produces a
-        // corpse that looks like it hit the floor the instant it died. Clear the settle result so
-        // the death lifetime it is being given is actually simulated and comes to rest on its own.
+        // A body an integration held has almost certainly settled already, which would produce a corpse
+        // that looks like it hit the floor on death. Clear the settle so the new lifetime is simulated.
         settled = false;
         settledOnLiquid = false;
         settledTicks = 0;
@@ -2790,9 +2737,8 @@ public class ClientRagdoll {
         }
         markSettledPoseDirty();
     }
-    // True while a body handed back as a fresh death ragdoll is still owed its active window.
-    // Blocks the settle and the corpse report both, since a corpse built during the grace would
-    // replace the body before it ever moved.
+    // True while a body handed back as a fresh death ragdoll is still owed its active window. Blocks
+    // both settle and corpse report, since a corpse built inside the grace replaces an unmoved body.
     public boolean isAwaitingSettleGrace() { return settleGraceTicks > 0; }
     public boolean isSettled() { return settled; }
     public boolean isSettledOnLiquid() { return settledOnLiquid; }
@@ -2854,11 +2800,8 @@ public class ClientRagdoll {
     public boolean isBabyHumanoid() {
         return isBaby && MobModelHelper.isHumanoidModelType(modelType);
     }
-    // Whether this mob's vanilla model enlarges the baby head (vs. a uniform shrink). Mirrors
-    // vanilla per-mob behaviour: zombies/husks/piglins/drowned and zombie villagers use
-    // HumanoidModel with scaleHead=true (big head); plain villagers and wandering traders use
-    // VillagerModel and are scaled uniformly by VillagerRenderer#scale. Only meaningful for a
-    // baby humanoid.
+    // Whether this mob's vanilla model enlarges the baby head instead of shrinking uniformly: zombie
+    // family and zombie villagers use HumanoidModel scaleHead, plain villagers scale uniformly.
     public boolean babyScalesHead() {
         if (!MobModelHelper.isHumanoidModelType(modelType)) return false;
         if (modelType == MobModelHelper.ModelType.ILLAGER) {
@@ -2950,8 +2893,6 @@ public class ClientRagdoll {
         settledPoseReported = false;
     }
 
-    // ============================
     // Math helpers (kept locally for interpolation — body/joint creation delegated to RagdollBodyFactory)
-    // ============================
 
 }

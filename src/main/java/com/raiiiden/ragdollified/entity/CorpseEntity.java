@@ -34,10 +34,8 @@ import javax.vecmath.Quat4f;
 import javax.vecmath.Vector3f;
 import java.util.UUID;
 
-// Server-authoritative lootable corpse, spawned on player death when corpses are enabled. The
-// dead player's inventory lives in inventory, server-side only; the cosmetic snapshot — skin
-// identity, worn armor, frozen ragdoll pose — syncs through RENDER_DATA so every client, late
-// joiners included, draws the same body.
+// Server-authoritative lootable corpse. The inventory is server-side only, while the cosmetic
+// snapshot — skin, worn armor, frozen pose — syncs through RENDER_DATA so every client agrees.
 public class CorpseEntity extends Entity {
 
     // Vanilla portion: 36 main/hotbar + 4 armor + 1 offhand. Curio slots (if any) follow.
@@ -56,9 +54,8 @@ public class CorpseEntity extends Entity {
     // and the retrieve command to refer to this exact corpse. Synced to clients via RENDER_DATA.
     private UUID corpseId;
     private String ownerName = "";
-    // The client-side ragdoll entity id this corpse replaces (see PendingCorpse#deathEntityId).
-    // Synced to clients via RENDER_DATA so the physics-ragdoll handoff removes exactly the body
-    // that settled into THIS corpse, never another death's ragdoll for the same player.
+    // The client-side ragdoll entity id this corpse replaces, synced through RENDER_DATA so handoff
+    // removes exactly the body that settled into this corpse and never another death's.
     private int ragdollEntityId = -1;
 
     // Cached, parsed pose for the renderer (client). Rebuilt lazily when RENDER_DATA changes.
@@ -77,9 +74,7 @@ public class CorpseEntity extends Entity {
         this.setNoGravity(false);
     }
 
-    // ============================
     // Server-side construction
-    // ============================
 
     // Fill in loot and identity at death, server-side. vanillaItems is the 41 player slots,
     // index-aligned; curioStacks and curioIds are parallel and empty without Curios.
@@ -157,10 +152,8 @@ public class CorpseEntity extends Entity {
         data.put("Chest", saveStack(chest));
         data.put("Legs", saveStack(legs));
         data.put("Boots", saveStack(boots));
-        // Captured curios, so clients can draw them on the body the same way armor is drawn. Like
-        // the armor snapshot this is fixed at death and does not follow looting — the corpse keeps
-        // wearing what it died in. Only curios the drop rules handed to the corpse are here;
-        // anything the player kept was never ours to show.
+        // Captured curios, drawn like armor and likewise fixed at death rather than following looting.
+        // Only curios the drop rules handed over are here; anything the player kept was never ours.
         ListTag curios = new ListTag();
         for (int i = 0; i < curioSlotIds.size(); i++) {
             ItemStack stack = inventory.getItem(VANILLA_SLOTS + i);
@@ -178,9 +171,7 @@ public class CorpseEntity extends Entity {
         return (stack == null ? ItemStack.EMPTY : stack).save(new CompoundTag());
     }
 
-    // ============================
     // Client-side render accessors
-    // ============================
 
     public CompoundTag getRenderData() { return getEntityData().get(RENDER_DATA); }
 
@@ -210,10 +201,8 @@ public class CorpseEntity extends Entity {
         return d.contains(key) ? ItemStack.of(d.getCompound(key)) : ItemStack.EMPTY;
     }
 
-    // The curios this corpse is wearing, for the renderer. Parsed once per render-data change —
-    // the renderer asks every frame, and rebuilding ItemStacks from NBT that often is not free.
-    // The slot index and flags are synthesised: the captured stacks are what the body was showing,
-    // so each is reported as a visible, non-cosmetic curio in its own slot.
+    // The curios this corpse wears, parsed once per render-data change since the renderer asks every
+    // frame. Slot index and flags are synthesised: each captured stack was visible and non-cosmetic.
     public java.util.List<CuriosCompat.WornCurio> getWornCurios() {
         CompoundTag d = getRenderData();
         if (cachedCurios != null && d.equals(cachedCuriosSource)) return cachedCurios;
@@ -257,9 +246,7 @@ public class CorpseEntity extends Entity {
 
     public int getCurioCount() { return curioSlotIds.size(); }
 
-    // ============================
     // Entity overrides
-    // ============================
 
     @Override
     protected void defineSynchedData() {
@@ -318,10 +305,8 @@ public class CorpseEntity extends Entity {
         }
     }
 
-    // Ordinary server entity physics, deliberately not the jBullet simulation: plain gravity and
-    // block collision through move(), so a corpse rests on the ground, falls when the block under
-    // it breaks, and rises to the surface of water rather than hanging. Residual drift is zeroed
-    // so a settled body stops moving and stops sending position updates.
+    // Ordinary server entity physics rather than jBullet: gravity and move() so a corpse rests, falls
+    // and floats. Residual drift is zeroed so a settled body stops sending position updates.
     private void tickPhysics() {
         Vec3 m = getDeltaMovement();
 
@@ -383,9 +368,7 @@ public class CorpseEntity extends Entity {
         discard();
     }
 
-    // ============================
     // Interaction / physics behavior
-    // ============================
 
     @Override
     public boolean isPickable() { return !isRemoved(); }
@@ -415,9 +398,7 @@ public class CorpseEntity extends Entity {
         return false;
     }
 
-    // ============================
     // Persistence
-    // ============================
 
     @Override
     protected void readAdditionalSaveData(CompoundTag tag) {
@@ -435,9 +416,8 @@ public class CorpseEntity extends Entity {
         if (tag.contains("RenderData")) {
             getEntityData().set(RENDER_DATA, tag.getCompound("RenderData"));
         }
-        // A corpse persisted while still unposed (e.g. the game crashed during the brief
-        // pre-settle window) would otherwise never pose again — its settle bookkeeping is
-        // gone — and stay invisible forever. Pose it flat on load so it always renders.
+        // A corpse persisted while still unposed has lost its settle bookkeeping and would stay
+        // invisible forever, so it is posed flat on load and always renders.
         if (!isPosed()) markPosedFlat();
     }
 

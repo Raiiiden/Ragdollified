@@ -66,14 +66,10 @@ public final class RagdollBodyFactory {
         WARDEN
     }
 
-    // ===========================
     // Entry point
-    // ===========================
 
-    // Build every body and joint for a ragdoll into the given world and lists: parts receives 6
-    // rigid bodies, joints receives 5 constraints. pos is the spawn centre (entity X/Z plus the
-    // model's authored root Y offset), and capturedPose holds per-part rotation offsets taken
-    // before death, or null.
+    // Build every body and joint for a ragdoll: parts gets 6 rigid bodies, joints 5 constraints. pos is
+    // the spawn centre, capturedPose the per-part rotation offsets taken before death, or null.
     public static void build(DiscreteDynamicsWorld world,
                              List<RigidBody> parts, List<TypedConstraint> joints,
                              MobModelHelper.ModelType modelType,
@@ -98,9 +94,8 @@ public final class RagdollBodyFactory {
                              Vector3f pos, Quat4f baseQuat, float scale,
                              Vector3f initialVel, MobPoseCapture.MobPose capturedPose,
                              BodyProfile bodyProfile, boolean isBaby, boolean babyBigHead) {
-        // Bat/bee physics is authored at the vanilla model's natural pixel size (matching the
-        // unscaled BatModel/BeeModel the renderer draws), so keep their body scale at 1.0
-        // instead of the bbHeight-derived scale used for generic quadrupeds.
+        // Bat and bee physics is authored at the vanilla model's natural pixel size, matching the
+        // unscaled models the renderer draws, so their body scale stays 1.0.
         float bodyScale = (bodyProfile == BodyProfile.DEFAULT
                 && modelType != MobModelHelper.ModelType.BAT
                 && modelType != MobModelHelper.ModelType.BEE) ? scale : 1.0f;
@@ -204,11 +199,8 @@ public final class RagdollBodyFactory {
         buildJoints(world, parts, joints, modelType, bodyScale, bodyProfile, isBaby, babyBigHead);
     }
 
-    // Scale each body's authored mass by its configured per-part weight. Done here rather than
-    // at the ~40 makePart call sites so every skeleton picks it up from one place and each
-    // builder's masses stay readable as the proportions they are. Inertia must be recomputed:
-    // makePart derived it from the pre-scale mass, and a stale tensor would make a heavier part
-    // spin as if it were still light.
+    // Scale each body's authored mass by its configured per-part weight, here rather than at ~40 call
+    // sites. Inertia is recomputed: a stale tensor would spin a heavier part as if it were still light.
     private static void applyPartWeights(List<RigidBody> parts,BodyProfile profile) {
         Vector3f inertia = new Vector3f();
         for (int i = 0; i < parts.size(); i++) {
@@ -232,19 +224,14 @@ public final class RagdollBodyFactory {
         }
     }
 
-    // ===========================
     // Body builders
-    // ===========================
 
     private static void buildHumanoid(DiscreteDynamicsWorld world, List<RigidBody> parts,
                                       Vector3f pos, Quat4f baseQuat, float scale,
                                       Vector3f vel, MobPoseCapture.MobPose pose,
                                       Function<Vector3f, Vector3f> worldOffset, boolean isBaby, boolean babyBigHead) {
-        // Humanoid bodies are authored at a fixed reference size (scale param is unused for
-        // adults). Baby scaling matches what vanilla does per-mob: mobs whose vanilla model
-        // enlarges the baby head (zombie/husk/piglin/drowned/zombie-villager — HumanoidModel
-        // scaleHead=true → head 0.75, body 0.5) pass babyBigHead=true; mobs that scale
-        // uniformly (plain villagers via VillagerRenderer#scale) pass false → head 0.5 too.
+        // Humanoid bodies use a fixed reference size. Baby scaling mirrors vanilla per-mob: models that
+        // enlarge the baby head pass babyBigHead=true, uniformly scaled ones pass false.
         float bs = isBaby ? 0.5f : 1.0f;                       // torso, arms, legs
         float hd = isBaby ? (babyBigHead ? 0.75f : 0.5f) : 1.0f; // head
         // Head sits on top of the torso: torso half-height (0.4) + head half-height (0.2)
@@ -288,10 +275,8 @@ public final class RagdollBodyFactory {
         parts.add(makePart(world, new BoxShape(new Vector3f(0.12f*s,0.3f*s,  0.12f*s)),  brPos,   brRot,     3*s, vel));
     }
 
-    // Bat: one body per wing (tip included, rendered as the wing's rigid child), plus torso and
-    // head. The bat model has no legs, so those two slots hold hidden stubs welded inside the
-    // torso to fill the six-body skeleton. Authored at BatRenderer's 0.35 render scale so the
-    // ragdoll matches the live mob.
+    // Bat: one body per wing plus torso and head. The model has no legs, so those slots hold hidden
+    // stubs welded inside the torso. Authored at BatRenderer's 0.35 scale to match the live mob.
     private static void buildBat(DiscreteDynamicsWorld world, List<RigidBody> parts,
                                  Vector3f pos, Quat4f baseQuat, float s,
                                  Vector3f vel, MobPoseCapture.MobPose pose) {
@@ -315,10 +300,8 @@ public final class RagdollBodyFactory {
         parts.add(makePart(world, new BoxShape(new Vector3f(0.3125f*ns, 0.5f*ns,    0.05f*ns)),   rwPos,   rwRot,    1.5f*ns, vel)); // RIGHT_ARM = right wing (+tip)
     }
 
-    // Bee: torso is the body box (carrying antennae and stinger in the render), with a small
-    // hidden head stub at the front for the neck joint and the two flat wings in the arm slots.
-    // Its legs are strips rendered on the torso, so the leg slots hold hidden stubs welded
-    // inside it. Baby bees are built and rendered at half scale, matching vanilla.
+    // Bee: torso is the body box with a hidden head stub for the neck joint and the flat wings in the
+    // arm slots. Its legs render on the torso, so the leg slots hold hidden stubs. Babies are half scale.
     private static void buildBee(DiscreteDynamicsWorld world, List<RigidBody> parts,
                                  Vector3f pos, Quat4f baseQuat, float s,
                                  Vector3f vel, MobPoseCapture.MobPose pose, boolean isBaby) {
@@ -376,24 +359,19 @@ public final class RagdollBodyFactory {
         }
     }
 
-    // HorseModel is not a QuadrupedModel: its 10x10x22 body, 12-pixel neck/head unit and
-    // 11-pixel legs have their own pivots. Horse, donkey, mule and both undead horses share
-    // this geometry; only the renderer's species scale differs.
+    // HorseModel is not a QuadrupedModel: its body, neck/head unit and legs have their own pivots.
+    // Horse, donkey, mule and both undead horses share the geometry, differing only in render scale.
     private static void buildEquine(DiscreteDynamicsWorld world, List<RigidBody> parts,
                                     Vector3f torsoPos, Quat4f baseQuat, Vector3f vel,
                                     MobPoseCapture.MobPose pose, BodyProfile profile, boolean isBaby) {
         float rs = equineRenderScale(profile);
-        // HorseModel's AgeableListModel parameters are easy to misread: babyHeadScale is
-        // 2.7272, but vanilla renders a scaled head at 1.5 / babyHeadScale. The body uses its
-        // separate babyBodyScale of 2.0. This applies to horse, donkey, mule and both undead
-        // horse layers because all five use HorseModel.
+        // HorseModel's ageable parameters are easy to misread: babyHeadScale is 2.7272 but vanilla draws
+        // the head at 1.5 / that, and the body uses its own babyBodyScale of 2.0. All five share this.
         float bs = isBaby ? 0.5f : 1.0f;
         float hs = isBaby ? (1.5f / 2.7272f) : 1.0f;
 
-        // Match the established cow/pig/sheep path: bodies start at their baked cube centres,
-        // while authored default rotations (the horse neck's 30-degree pitch) stay in render.
-        // HorseModel animation pivots are not cube centres, and its mirrored leg cubes are
-        // asymmetric by one pixel, so using the pivots directly spreads and shifts the legs.
+        // As with cow/pig/sheep, bodies start at baked cube centres and authored default rotations stay
+        // in render: HorseModel's pivots are not cube centres and its mirrored legs are a pixel off.
         Quat4f torsoRot = baseQuat;
         Quat4f headRot  = baseQuat;
         Quat4f flRot    = baseQuat;
@@ -410,17 +388,11 @@ public final class RagdollBodyFactory {
         Vector3f hlPos;
         Vector3f hrPos;
         if (!isBaby) {
-            // Exact adult centres from HorseModel#createBodyMesh, relative to the body cube
-            // centre (0,8,-1 px). Head includes its authored PI/6 pitch:
-            // centre (0,3.25,-10.70096 px). Leg centres include their +/-1 px local X bias.
+            // Exact adult centres from HorseModel#createBodyMesh relative to the body cube centre. The
+            // head includes its authored PI/6 pitch, the legs their one-pixel local X bias.
             headPos = offset(torsoPos, torsoRot, v(0f, 0.296875f*rs, -0.60631f*rs));
-            // Vanilla puts the front-leg pivots exactly on the body's front face. That is fine
-            // for an animated mesh, but a freely rotating rigid limb visibly separates there;
-            // inset it two model pixels like the working cow/pig/sheep ragdolls do.
-            // renderAnimalPart applies the vanilla model-space 180-degree Z flip, so the
-            // model's +X "left" limbs belong on negative ragdoll-local X. Keeping these
-            // semantic sides aligned is important for the mirrored left-leg UVs, most visibly
-            // on the mule texture.
+            // Vanilla puts front-leg pivots on the body's front face, where a freely rotating rigid limb
+            // visibly separates, so inset two pixels. Model +X limbs belong on negative local X for UVs.
             flPos = offset(torsoPos, torsoRot, v(-0.1875f*rs, -0.655625f*rs, -0.55625f*rs));
             frPos = offset(torsoPos, torsoRot, v( 0.1875f*rs, -0.655625f*rs, -0.55625f*rs));
             hlPos = offset(torsoPos, torsoRot, v(-0.1875f*rs, -0.655625f*rs,  0.5625f*rs));
@@ -428,10 +400,8 @@ public final class RagdollBodyFactory {
         } else {
             // Centres after AgeableListModel's distinct head/body translations and scales.
             headPos = offset(torsoPos, torsoRot, v(0f, 0.2002f*rs, -0.28984f*rs));
-            // HorseModel#prepareMobModel moves standing front-leg pivots from baked Z=-12
-            // to Z=-10. After the 0.5 baby body scale their centres are -0.278125 from the
-            // torso, not -0.340625; using the baked pivot leaves both legs out by one rendered
-            // model pixel toward the head.
+            // prepareMobModel moves standing front-leg pivots from baked Z=-12 to Z=-10; at the 0.5 baby
+            // scale the baked pivot leaves both legs a rendered pixel out toward the head.
             flPos = offset(torsoPos, torsoRot, v(-0.09375f*rs, -0.33406f*rs, -0.278125f*rs));
             frPos = offset(torsoPos, torsoRot, v( 0.09375f*rs, -0.33406f*rs, -0.278125f*rs));
             hlPos = offset(torsoPos, torsoRot, v(-0.09375f*rs, -0.33406f*rs,  0.28125f*rs));
@@ -460,9 +430,8 @@ public final class RagdollBodyFactory {
             float legX, float legY, float frontZ, float hindZ, float legCenterY, float legHalfX, float legHalfY, float legHalfZ,
             float torsoHalfX, float torsoHalfY, float torsoHalfZ,
             float torsoMass, float headMass, float legMass,
-            // Hind-leg vertical layout, separated from the front legs so mobs whose front
-            // and hind legs differ in length or attach height (cats) place both correctly.
-            // Cow/pig/sheep pass the same values as their front legs → identical behaviour.
+            // Hind-leg vertical layout, kept separate from the front legs so mobs whose legs differ in
+            // length or attach height place both correctly. Cow/pig/sheep pass identical values.
             float hindLegY, float hindLegCenterY, float hindLegHalfY) {}
 
     private static QuadLayout layoutFor(BodyProfile profile, boolean baby) {
@@ -484,12 +453,8 @@ public final class RagdollBodyFactory {
                     0.23f * b, 0.17f * b, 0.44f * b,
                     8f, 2.5f, 2.2f,
                     -0.1875f * b, -0.235f * b, 0.34f * b);
-            // All values are the natural OcelotModel geometry × 0.8 (CatRenderer#scale draws the
-            // model at 0.8×), so the physics bodies match the rendered cat/ocelot size. Unlike
-            // cow/pig/sheep (scaleHead=false → baby head stays 1.0×), OcelotModel has
-            // scaleHead=true with babyHeadScale=2, so a kitten's head renders at 1.5/2 = 0.75×
-            // while its body renders at 1.0/2 = 0.5×. The head box + offsets use that 0.75 factor
-            // (chf) so the physics head matches the rendered head instead of staying adult-sized.
+            // Natural OcelotModel geometry times the 0.8 render scale. OcelotModel has scaleHead, so a
+            // kitten head draws at 0.75x and its body at 0.5x; the head box uses that 0.75 factor.
             case CAT -> {
                 float chf = baby ? 0.75f : 1.0f;
                 yield new QuadLayout(
@@ -527,9 +492,8 @@ public final class RagdollBodyFactory {
                         3f, 1.2f, 0.5f,
                         -0.0625f * b, -0.21875f * b, 0.1875f * b);
             }
-            // PandaModel uses a 19x26x13 rotated body, a broad 17x13x11 head union, and
-            // 6x9x6 legs. Cubs use vanilla's 1/3 body scale and 1.5/2.7 head scale, with
-            // separate AgeableListModel translations accounted for in these centres.
+            // PandaModel uses a rotated body, a broad head union and 6x9x6 legs. Cubs use vanilla's 1/3
+            // body and 1.5/2.7 head scales, with the ageable translations folded into these centres.
             case PANDA -> {
                 float pbs = baby ? (1f / 3f) : 1f;
                 float phs = baby ? (1.5f / 2.7f) : 1f;
@@ -550,9 +514,8 @@ public final class RagdollBodyFactory {
                 yield new QuadLayout(
                         baby ? 0.05f : 0.15625f, baby ? -0.409375f : -0.71875f,
                         baby ? 0f : -0.03125f,
-                        // Exact union of the head part's baked ear/goatee cubes.  The old
-                        // half-block Z extent included a large volume of empty space between
-                        // the face and torso, making the two physics bodies overlap deeply.
+                        // Exact union of the head part's baked ear and goatee cubes: the old half-block Z
+                        // extent enclosed empty space and made the two bodies overlap deeply.
                         0.34375f*ghs, 0.46875f*ghs, 0.15625f*ghs,
                         -0.125f*gbs, -0.0625f*gbs, 0.3125f*gbs, 0.3125f*gbs,
                         -0.3125f*gbs,
@@ -604,9 +567,8 @@ public final class RagdollBodyFactory {
         parts.add(makePart(world, new BoxShape(new Vector3f(l.legHalfX*s, l.legHalfY*s, l.legHalfZ*s)), frPos, frRot, l.legMass*s, vel));
     }
 
-    // IronGolemModel has humanoid topology but not humanoid proportions: the arms are 30
-    // pixels long, the torso is 18 pixels wide, and its model root is centred above the usual
-    // 24-pixel ground plane. Centres below are the exact union centres of the baked cubes.
+    // IronGolemModel is humanoid in topology but not proportions — 30-pixel arms, an 18-pixel torso, a
+    // root above the usual ground plane — so the centres below are exact baked cube unions.
     private static void buildIronGolem(DiscreteDynamicsWorld world, List<RigidBody> parts,
                                        Vector3f torsoPos, Quat4f baseQuat, Vector3f vel) {
         Vector3f headPos = offset(torsoPos, baseQuat, v(0f, 0.828125f, -0.25f));
@@ -702,9 +664,8 @@ public final class RagdollBodyFactory {
     private static void buildFrog(DiscreteDynamicsWorld world, List<RigidBody> parts,
                                   Vector3f torsoPos, Quat4f q, Vector3f vel) {
         parts.add(makePart(world,new BoxShape(v(.21875f,.09375f,.28125f)),torsoPos,q,2f,vel));
-        // Hands and feet are zero-thickness decorative planes in FrogModel.  Colliding as
-        // their full 8x8 footprints made every limb overlap the torso and its opposite limb;
-        // use the exact solid head/arm/leg cubes while still rendering those child planes.
+        // Hands and feet are zero-thickness planes in FrogModel; colliding as full footprints made every
+        // limb overlap the torso, so the solid cubes are used while the planes still render.
         parts.add(makePart(world,new BoxShape(v(.21875f,.09375f,.28125f)),offset(torsoPos,q,v(0,.125f,0)),q,1f,vel));
         parts.add(makePart(world,new BoxShape(v(.09375f,.09375f,.125f)),offset(torsoPos,q,v(-.25f,-.0625f,.21875f)),q,.5f,vel));
         parts.add(makePart(world,new BoxShape(v(.09375f,.09375f,.125f)),offset(torsoPos,q,v(.25f,-.0625f,.21875f)),q,.5f,vel));
@@ -743,9 +704,8 @@ public final class RagdollBodyFactory {
     private static void buildRavager(DiscreteDynamicsWorld world,List<RigidBody> parts,
             Vector3f p,Quat4f q,Vector3f vel){
         parts.add(makePart(world,new BoxShape(v(.4375f,.625f,.90625f)),p,q,32f,vel));
-        // Use the solid 16x20x16 head cube.  The former whole neck/head subtree AABB
-        // extended back through both front legs, so those unconnected sibling bodies
-        // continuously expelled one another and flipped the ragdoll.
+        // Use the solid head cube: the whole neck/head subtree AABB reached back through both front legs,
+        // and those unconnected bodies expelled one another and flipped the ragdoll.
         parts.add(makePart(world,new BoxShape(v(.5f,.625f,.5f)),offset(p,q,v(0,-.0625f,-1.5f)),q,13f,vel));
         parts.add(makePart(world,new BoxShape(v(.25f,1.15625f,.25f)),offset(p,q,v(-.5f,-.46875f,.71875f)),q,8f,vel));
         parts.add(makePart(world,new BoxShape(v(.25f,1.15625f,.25f)),offset(p,q,v(.5f,-.46875f,.71875f)),q,8f,vel));
@@ -902,9 +862,7 @@ public final class RagdollBodyFactory {
         a.add(makePart(w,new BoxShape(v(.25f,.875f,.25f)),offset(p,q,v(.8125f,-.21875f,.0625f)),q,6f,vel));
     }
 
-    // ===========================
     // Joint builders
-    // ===========================
 
     private static void buildJoints(DiscreteDynamicsWorld world, List<RigidBody> parts,
                                     List<TypedConstraint> joints,
@@ -968,10 +926,8 @@ public final class RagdollBodyFactory {
             RigidBody torso, RigidBody head, RigidBody lLeg, RigidBody rLeg, RigidBody lArm, RigidBody rArm,
             Transform tHead, Transform tLLeg, Transform tRLeg, Transform tLArm, Transform tRArm,
             Function<Vector3f, Vector3f> tw, float s, boolean isBaby, boolean babyBigHead) {
-        // Anchor offsets must track the scaled extents used in buildHumanoid so baby joints
-        // sit at the shrunken part boundaries. Head uses the head scale (hd — 0.75 for big-
-        // head mobs, else the body scale); torso/arms/legs use the body scale (bs). Angular
-        // limits (degrees) are unchanged.
+        // Anchor offsets track the scaled extents from buildHumanoid so baby joints sit at the shrunken
+        // boundaries: head on the head scale, torso and limbs on the body scale. Angular limits unchanged.
         float bs = isBaby ? 0.5f : 1.0f;
         float hd = isBaby ? (babyBigHead ? 0.75f : 0.5f) : 1.0f;
         Vector3f torsoTop = tw.apply(new Vector3f(0f, 0.4f*bs, 0f));
@@ -1076,9 +1032,8 @@ public final class RagdollBodyFactory {
             RigidBody torso,RigidBody head,RigidBody lf,RigidBody rf,RigidBody lh,RigidBody rh,
             Function<Vector3f,Vector3f> tw){
         Vector3f l=v(-.008f,-.008f,-.008f),u=v(.008f,.008f,.008f);
-        // Anchors are the actual FrogModel pivots relative to the solid body's cube centre.
-        // In particular, all four limb pivots are above their rigid-body centres; anchoring
-        // below them folded the meshes inward as soon as the solver moved the ragdoll.
+        // Anchors are the real FrogModel pivots relative to the solid body's cube centre. All four limb
+        // pivots sit above their body centres; anchoring below folded the meshes inward on the first step.
         joints.add(joint(world,torso,head,tw.apply(v(0,.0625f,0)),l,u,v(-30,-30,-20),v(35,30,20)));
         joints.add(joint(world,torso,lf,tw.apply(v(-.25f,.03125f,-.1875f)),l,u,v(-50,-25,-45),v(50,25,45)));
         joints.add(joint(world,torso,rf,tw.apply(v(.25f,.03125f,-.1875f)),l,u,v(-50,-25,-45),v(50,25,45)));
@@ -1303,9 +1258,8 @@ public final class RagdollBodyFactory {
         joints.add(joint(world, torso, rl, tw.apply(new Vector3f(-0.1f*s,-0.2f*s,0f)), li, lu, v(-legl,-8,-8), v(legl,8,8)));
     }
 
-    // Bat/bee joints anchor at body-origin midpoints (not torso-local offsets) so they stay
-    // correct regardless of the model-specific build scale (bat 0.35×, baby bee 0.5×) — the
-    // shared `s` passed here is the unscaled body scale and wouldn't match those bodies.
+    // Bat and bee joints anchor at body-origin midpoints rather than torso-local offsets, so they hold
+    // at any model-specific build scale — the shared `s` here is the unscaled body scale.
     private static void buildBatJoints(DiscreteDynamicsWorld world, List<TypedConstraint> joints,
             RigidBody torso, RigidBody head, RigidBody lWing, RigidBody rWing, RigidBody lStub, RigidBody rStub,
             Transform tHead, Transform tLWing, Transform tRWing, Transform tLStub, Transform tRStub,
@@ -1333,9 +1287,7 @@ public final class RagdollBodyFactory {
         joints.add(joint(world, torso, rStub, tRStub.origin, v(0,0,0), v(0,0,0), v(-1,-1,-1), v(1,1,1)));
     }
 
-    // ===========================
     // Low-level helpers
-    // ===========================
 
     public static RigidBody makePart(DiscreteDynamicsWorld world, CollisionShape shape,
                                      Vector3f position, Quat4f rotation,
@@ -1359,21 +1311,15 @@ public final class RagdollBodyFactory {
 
         RigidBody body = new RigidBody(info);
 
-        // No per-body initial-velocity clamp here — the ragdoll's per-tick clamp (90 m/s
-        // linear, 8 rad/s angular) handles excess. Capping at construction would otherwise
-        // erase the entity's death-time momentum (sprint speed alone is ~5.6 m/s and can
-        // exceed any low cap the moment knockback or fall is added).
+        // No initial-velocity clamp: the per-tick clamp handles excess, while capping at construction
+        // would erase death-time momentum, and sprint speed alone already exceeds any low cap.
         body.setLinearVelocity(new Vector3f(initialVel));
 
         body.setDamping((float) RagdollifiedConfig.get(RagdollifiedConfig.LINEAR_DAMPING),
                 (float) RagdollifiedConfig.get(RagdollifiedConfig.ANGULAR_DAMPING));
         body.setSleepingThresholds(0.3f, 0.3f);
-        // Disable Bullet's auto-deactivation. Bullet sleeps bodies that stay below
-        // the velocity threshold for ~2s, AND once asleep gravity stops being applied
-        // to them — which leaves ragdolls floating mid-air after they wake from a
-        // floor break (zero velocity → auto-sleep before gravity can build speed).
-        // Our manual settle detection (freezeBodies) is the authoritative way to
-        // deactivate ragdolls; we don't need or want Bullet's version on top of it.
+        // Disable Bullet auto-deactivation: a slept body also stops receiving gravity, so one that woke
+        // from a floor break with zero velocity floated. Manual settle detection is authoritative.
         body.setActivationState(CollisionObject.DISABLE_DEACTIVATION);
         if (shape instanceof BoxShape box) {
             Vector3f halfExtents = new Vector3f();
@@ -1421,18 +1367,15 @@ public final class RagdollBodyFactory {
             Vector3f angLDeg,Vector3f angUDeg){
         Transform ta=wt(a),tb=wt(b);Transform localA=new Transform();localA.setIdentity();localA.origin.set(toLocal(ta,anchor));
         Transform localB=new Transform();localB.setIdentity();localB.origin.set(toLocal(tb,anchor));
-        // Give both local frames the same initial world orientation. Without this, a leg whose
-        // baked pose starts at 45 degrees is interpreted as already violating the joint limit
-        // and the solver violently snaps it toward identity on the first step.
+        // Give both local frames the same initial world orientation, or a leg baked at 45 degrees reads
+        // as already violating its limit and the solver snaps it toward identity on the first step.
         localB.basis.transpose(tb.basis);localB.basis.mul(ta.basis);
         Generic6DofConstraint c=new Generic6DofConstraint(a,b,localA,localB,true);
         c.setLinearLowerLimit(linL);c.setLinearUpperLimit(linU);c.setAngularLowerLimit(rad(angLDeg));c.setAngularUpperLimit(rad(angUDeg));
         a.activate();b.activate();world.addConstraint(c,true);return c;
     }
 
-    // ===========================
     // Math utilities (package-visible for tests, private use)
-    // ===========================
 
     public static Quat4f mul(Quat4f q1, Quat4f q2) {
         float w = q1.w*q2.w - q1.x*q2.x - q1.y*q2.y - q1.z*q2.z;
@@ -1442,9 +1385,8 @@ public final class RagdollBodyFactory {
         return new Quat4f(x, y, z, w);
     }
 
-    // The renderer converts Bullet space to vanilla model space with a 180-degree Z turn.
-    // Conjugating the baked ModelPart rotation by that turn gives the Bullet orientation whose
-    // rendered result is exactly the original model angle.
+    // The renderer converts Bullet space to model space with a 180-degree Z turn, so conjugating the
+    // baked rotation by that turn gives the Bullet orientation that renders as the original angle.
     private static Quat4f modelPartRotation(Quat4f base,float xRot,float yRot,float zRot){
         Quaternionf combined=new Quaternionf(base.x,base.y,base.z,base.w);
         Quaternionf flip=new Quaternionf().rotationZ((float)Math.PI);

@@ -48,22 +48,12 @@ public class ClientJbulletWorld {
         }
     }
 
-    // Limit expensive region acquisitions when many ragdolls spawn together.
-    //
-    // A flat budget starves mass-death scenarios: an explosion both invalidates a large
-    // number of cached regions (destroyed blocks) and puts every ragdoll in motion at
-    // once, so demand spikes by an order of magnitude while supply stays fixed. Ragdolls
-    // that lose the race keep their previous geometry (see ClientRagdoll.updateLocal-
-    // WorldCollision) and end up colliding against terrain that no longer exists, which
-    // reads as phasing through walls and floors. So the budget scales with the number of
-    // active ragdolls instead.
+    // Region acquisitions are budgeted, and the budget scales with active ragdolls: a flat one starves
+    // mass deaths, leaving ragdolls on stale geometry that reads as phasing through walls.
     private static final int BASE_CACHE_ENTRIES_PER_TICK = 3;
     private static final int MAX_CACHE_ENTRIES_PER_TICK = 24;
-    // Share of the budget only fast-moving ragdolls may spend. A settled ragdoll
-    // re-acquiring geometry can wait a tick without visible consequence; one crossing
-    // several blocks per tick cannot. Slow requesters are cut off at
-    // (budget - reserve) so this slice is still available late in the tick, regardless
-    // of the order ragdolls happen to be iterated in.
+    // Share of the budget reserved for fast movers, since a settled ragdoll can wait a tick for
+    // geometry and one crossing blocks cannot. Slow requesters stop at (budget - reserve).
     private static final float PRIORITY_RESERVE_FRACTION = 0.4f;
     private static final int UNLOADED_STATE_ID = Block.getId(Blocks.AIR.defaultBlockState());
     private int newCacheEntriesThisTick = 0;
@@ -104,12 +94,8 @@ public class ClientJbulletWorld {
     private ConstraintSolver solver;
     private DiscreteDynamicsWorld dynamicsWorld;
 
-    // Exactly mirrors JbulletWorld's cache — time-based expiry, refcounted.
-    // 1-second TTL: long enough to absorb ragdolls oscillating between adjacent block
-    // centers (which would otherwise thrash the cache), short enough that during heavy
-    // churn (mass-spawn / pile collapse) we don't accumulate a huge backlog of stale
-    // static-body geometry. Was 40 (2s) but in spike scenarios let cache grow to 91
-    // entries / 5483 bodies; halving it caps the broadphase footprint.
+    // Mirrors JbulletWorld's cache: time-based expiry, refcounted. A 1s TTL absorbs oscillation
+    // between adjacent block centres without letting mass spawns pile up stale static geometry.
     private final Long2ObjectOpenHashMap<CachedBlockCollisionData> collisionCache =
             new Long2ObjectOpenHashMap<>();
     private final BlockPos.MutableBlockPos cacheBuildPos = new BlockPos.MutableBlockPos();
@@ -168,9 +154,8 @@ public class ClientJbulletWorld {
         this.level = level;
         collisionConfig = new DefaultCollisionConfiguration();
         dispatcher = new CollisionDispatcher(collisionConfig);
-        // DbvtBroadphase: dynamic AABB-tree broadphase with O(log N) updates and no
-        // fixed handle cap or world-bounds. AxisSweep3 was hitting its handle limit
-        // and slowing as static-block bodies accumulated across many cache regions.
+        // DbvtBroadphase: dynamic AABB tree, O(log N) updates, no handle cap. AxisSweep3 hit its limit
+        // and slowed as static block bodies accumulated across cache regions.
         broadphase = new DbvtBroadphase();
         solver = new SequentialImpulseConstraintSolver();
         dynamicsWorld = new DiscreteDynamicsWorld(dispatcher, broadphase, solver, collisionConfig);
@@ -178,15 +163,12 @@ public class ClientJbulletWorld {
         dynamicsWorld.getSolverInfo().numIterations = 20;
     }
 
-    // activeRagdollCount is last tick's active total, sizing this tick's region-creation budget
-    // (see BASE/MAX_CACHE_ENTRIES_PER_TICK). Good enough as a proxy: the active set moves by a
-    // few per tick outside a mass spawn, and a mass spawn just ramps the budget one tick later,
-    // which the priority reserve covers.
+    // activeRagdollCount is last tick's total, sizing this tick's region budget. Close enough: the
+    // active set moves by a few per tick, and a mass spawn just ramps the budget a tick later.
     public void beginTick(int activeRagdollCount) {
         newCacheEntriesThisTick = 0;
-        // One region per active ragdoll is the ideal (each can cross a block boundary per
-        // tick); half that in practice, since only ragdolls that actually moved to a new
-        // block request one.
+        // One region per active ragdoll is the ideal, since each can cross a block boundary per tick;
+        // half that in practice, as only ragdolls that moved to a new block ask.
         int budget = BASE_CACHE_ENTRIES_PER_TICK + (activeRagdollCount / 2);
         cacheEntryBudgetThisTick = Math.min(MAX_CACHE_ENTRIES_PER_TICK, budget);
         int reserve = Math.max(1, Math.round(cacheEntryBudgetThisTick * PRIORITY_RESERVE_FRACTION));
@@ -195,12 +177,8 @@ public class ClientJbulletWorld {
         cacheStats.resetCounters();
     }
 
-    // Step the world, with activeRagdollCount picking solver quality and substep rate. The
-    // dominant cost is solver iterations times contact count, which explodes once many active
-    // ragdolls share contact islands. Tiers: 4 or fewer gets 20 iters at 1/120, 8 gets 10 at
-    // 1/120, 15 gets 10 at 1/60, and above that pile mode drops to 6 iters at 1/40. Pile mode
-    // trades joint accuracy for a 2-3x speedup, which barely shows because piled bodies are
-    // usually near rest.
+    // Step the world, activeRagdollCount picking solver quality and substep rate, since cost is
+    // iterations times contacts. Pile mode trades joint accuracy for speed on near-resting bodies.
     public void step(float dt, int activeRagdollCount) {
         int iterations;
         float substepSize;
@@ -222,9 +200,8 @@ public class ClientJbulletWorld {
         tickCacheCleanup();
     }
 
-    // Advance the cache TTL and drop expired static bodies without simulating anything. Used
-    // when no dynamic bodies are active: stepSimulation() would still make the AxisSweep3
-    // broadphase traverse every static block body, burning 5-10 ms for nothing.
+    // Advance the cache TTL and drop expired static bodies without simulating. Used when nothing is
+    // active, where a step would still walk every static block body for 5-10 ms of nothing.
     public void maintainCache() {
         tickCacheCleanup();
     }

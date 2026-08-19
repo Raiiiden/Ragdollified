@@ -9,9 +9,8 @@ import net.minecraftforge.network.NetworkEvent;
 import java.util.UUID;
 import java.util.function.Supplier;
 
-// Client reports that a nearby player ragdoll settled. Carries the dead player, the death
-// entity, the settle origin, and six frozen part transforms, so the server can spawn the posed
-// corpse from any nearby observer's simulation.
+// Client report that a nearby player ragdoll settled: dead player, death entity, settle origin and
+// six frozen part transforms, so the server can spawn the posed corpse from any observer.
 public class CorpseSettlePacket {
 
     private final double originX, originY, originZ;

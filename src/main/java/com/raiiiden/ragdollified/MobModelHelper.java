@@ -29,9 +29,8 @@ public class MobModelHelper {
         QUADRUPED,
         CHICKEN,
         UNSUPPORTED,
-        // Appended so existing ordinals (used as the network wire value in
-        // RagdollSpawnPacket) stay stable. New winged mobs whose anatomy doesn't fit the
-        // humanoid or quadruped skeletons get their own layouts.
+        // Appended so existing ordinals, which are the network wire value, stay stable. Winged mobs that
+        // fit neither the humanoid nor quadruped skeleton get their own layouts.
         BAT,
         BEE,
         // Appended to preserve every existing network ordinal.
@@ -97,10 +96,8 @@ public class MobModelHelper {
                 type == ModelType.ENDERMAN;
     }
 
-    // The path half of an entity id ("examplemod:guard" -> "guard"). The keyword tests below
-    // are all authored against vanilla paths, and a raw contains() over the whole id lets a mod's
-    // namespace answer them: "examplemod:guard" reads as a villager, "…:zombie…" as a zombie,
-    // and so on. Matching the path keeps a namespace from deciding what a mob looks like.
+    // The path half of an entity id, since the keyword tests are authored against vanilla paths and a
+    // raw contains() would let a mod's namespace decide what a mob looks like.
     public static String mobPath(String mobType) {
         int colon = mobType.indexOf(':');
         return colon >= 0 ? mobType.substring(colon + 1) : mobType;
@@ -194,9 +191,8 @@ public class MobModelHelper {
             return ModelType.BEE;
         }
 
-        // Nothing matched. A modded humanoid lands here and the client resolves it properly from
-        // its real model class (ClientMobModelHelper#getActualModelType), which this
-        // string-only server-side view cannot see.
+        // Nothing matched: a modded humanoid lands here and the client resolves it from its real model
+        // class, which this string-only server-side view cannot see.
         return ModelType.UNSUPPORTED;
     }
 

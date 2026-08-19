@@ -15,10 +15,8 @@ import java.util.Map;
 
 public class RagdollifiedConfig {
 
-    // ============================
     // GAMEPLAY COMMON config. The server sends a runtime snapshot on join; client-side
     // gameplay reads resolve through that snapshot while connected to a modded server.
-    // ============================
     public static final ForgeConfigSpec.Builder SERVER_BUILDER = new ForgeConfigSpec.Builder();
     public static final ForgeConfigSpec GAMEPLAY_SPEC;
 
@@ -27,6 +25,7 @@ public class RagdollifiedConfig {
     public static final ForgeConfigSpec.IntValue MAX_RAGDOLLS_PER_PLAYER;
     public static final ForgeConfigSpec.BooleanValue ENABLE_RAGDOLLS;
     public static final ForgeConfigSpec.BooleanValue ENABLE_PLAYER_RAGDOLLS;
+    public static final ForgeConfigSpec.BooleanValue ENABLE_MOB_RAGDOLLS;
     public static final ForgeConfigSpec.ConfigValue<List<? extends String>> ENTITY_DENYLIST;
 
     public static final ForgeConfigSpec.DoubleValue HIT_IMPULSE_HEADSHOT;
@@ -59,12 +58,8 @@ public class RagdollifiedConfig {
     public static final ForgeConfigSpec.DoubleValue PART_WEIGHT_LEFT_LEG;
     public static final ForgeConfigSpec.DoubleValue PART_WEIGHT_RIGHT_LEG;
 
-    // Reference weights of the humanoid skeleton as authored in RagdollBodyFactory. The
-    // configured weight is divided by these to get a per-part multiplier, which is what
-    // actually gets applied — so a humanoid ends up at exactly the configured weight while
-    // non-humanoid skeletons (quadrupeds, creeper, bat, bee) keep their own authored
-    // proportions and are scaled by the same ratio. At the defaults every ratio is 1.0 and
-    // nothing changes.
+    // Reference weights of the humanoid skeleton as authored in RagdollBodyFactory. The configured
+    // weight divided by these gives the multiplier, so other skeletons keep their own proportions.
     public static final float REFERENCE_WEIGHT_TORSO = 8f;
     public static final float REFERENCE_WEIGHT_HEAD = 4f;
     public static final float REFERENCE_WEIGHT_ARM = 4f;
@@ -96,9 +91,7 @@ public class RagdollifiedConfig {
     public static final ForgeConfigSpec.BooleanValue CORPSE_STORE_XP;
     public static final ForgeConfigSpec.BooleanValue ENABLE_CORPSE_COMPASS;
 
-    // ============================
     // CLIENT config (local only, never synced)
-    // ============================
     public static final ForgeConfigSpec.Builder CLIENT_BUILDER = new ForgeConfigSpec.Builder();
     public static final ForgeConfigSpec CLIENT_SPEC;
 
@@ -123,9 +116,7 @@ public class RagdollifiedConfig {
     }
 
     static {
-        // ============================
         // SERVER spec
-        // ============================
         SERVER_BUILDER.push("Ragdoll Settings");
 
         RAGDOLL_LIFETIME = SERVER_BUILDER
@@ -150,6 +141,10 @@ public class RagdollifiedConfig {
         ENABLE_PLAYER_RAGDOLLS = SERVER_BUILDER
                 .comment("Allow player death ragdolls.")
                 .define("enablePlayerRagdolls", true);
+
+        ENABLE_MOB_RAGDOLLS = SERVER_BUILDER
+                .comment("Allow non-player (mob) death ragdolls.")
+                .define("enableMobRagdolls", true);
 
         ENTITY_DENYLIST = SERVER_BUILDER
                 .comment("Entity registry ids that should never ragdoll. Use minecraft:player for players.",
@@ -240,12 +235,8 @@ public class RagdollifiedConfig {
                         "These are multiplied by physics.massScale, which remains a global scalar.")
                 .push("partWeights");
 
-        // These MUST stay equal to REFERENCE_WEIGHT_* — the multiplier is config/reference, so
-        // any mismatch silently rescales every skeleton in the mod. torso 10 / head 8 shipped
-        // as the defaults against references of 8 / 4, which multiplied every body's torso by
-        // 1.25 and its head by 2.0: impulses divide by mass, so death knockback lost 20% on the
-        // torso and 50% on the head, and quadrupeds ended up planted on proportionally lighter
-        // legs instead of collapsing.
+        // These must stay equal to REFERENCE_WEIGHT_*: the multiplier is config/reference, so a mismatch
+        // silently rescales every skeleton, costing knockback and planting quadrupeds on light legs.
         PART_WEIGHT_TORSO = SERVER_BUILDER.comment("Weight of the torso.")
                 .defineInRange("torso", REFERENCE_WEIGHT_TORSO, 0.1, 200.0);
         PART_WEIGHT_HEAD = SERVER_BUILDER.comment("Weight of the head.")
@@ -354,9 +345,7 @@ public class RagdollifiedConfig {
         GAMEPLAY_SPEC = SERVER_BUILDER.build();
         registerGameplayKeys();
 
-        // ============================
         // CLIENT spec
-        // ============================
         CLIENT_BUILDER.comment("Render Settings").push("render");
 
         RENDER_DISTANCE = CLIENT_BUILDER.comment("Distance in blocks beyond which ragdolls do not render.")
@@ -401,6 +390,7 @@ public class RagdollifiedConfig {
         register("maxRagdollsPerPlayer", MAX_RAGDOLLS_PER_PLAYER);
         register("enableRagdolls", ENABLE_RAGDOLLS);
         register("enablePlayerRagdolls", ENABLE_PLAYER_RAGDOLLS);
+        register("enableMobRagdolls", ENABLE_MOB_RAGDOLLS);
         register("entityDenylist", ENTITY_DENYLIST);
         register("hitImpulseHeadshot", HIT_IMPULSE_HEADSHOT);
         register("hitImpulseBody", HIT_IMPULSE_BODY);
@@ -533,6 +523,7 @@ public class RagdollifiedConfig {
         if (!get(ENABLE_RAGDOLLS)) return false;
         String id = isPlayer ? "minecraft:player" : entityId;
         if (isPlayer && !get(ENABLE_PLAYER_RAGDOLLS)) return false;
+        if (!isPlayer && !get(ENABLE_MOB_RAGDOLLS)) return false;
         for (String denied : getStringList(ENTITY_DENYLIST)) {
             if (denied != null && denied.trim().equalsIgnoreCase(id)) return false;
         }
@@ -574,11 +565,8 @@ public class RagdollifiedConfig {
         };
     }
 
-    // Velocity/knockback damping for undersized bodies. `bodyScale` is the ragdoll's spawn scale
-    // (bbHeight / 1.8, so 1.0 is a player). Hit impulses are authored as fixed magnitudes, so the
-    // resulting speed is J/m: a chicken part weighs a fraction of a humanoid torso and leaves the
-    // ground at several times the speed from the same shot. Clamped at 1.0 because normal and
-    // large bodies already behave — this only ever reduces.
+    // Velocity damping for undersized bodies, bodyScale being bbHeight / 1.8. Impulses are fixed
+    // magnitudes and speed is J/m, so a light part flies off far too fast. Clamped at 1.0: it only reduces.
     public static float getModelSizeVelocityScale(float bodyScale) {
         if (!get(SCALE_VELOCITY_BY_MODEL_SIZE) || bodyScale >= 1.0f) return 1.0f;
         return Math.max((float) get(MIN_MODEL_SIZE_VELOCITY_SCALE), bodyScale);

@@ -27,9 +27,8 @@ public class ClientDeathHandler {
         String mobType = net.minecraft.world.entity.EntityType.getKey(entity.getType()).toString();
         if (!RagdollifiedConfig.isRagdollEnabledFor(mobType, isPlayer)) return;
 
-        // Snapshot the compat visuals before the pending/active early-out below. A server-driven
-        // RagdollSpawnPacket often lands before this event, and this is the last moment the entity
-        // is guaranteed to still carry its wounds — bailing first would leave a bare ragdoll.
+        // Snapshot the compat visuals before the early-out below: a server spawn packet often lands
+        // first, and this is the last moment the entity is guaranteed to still carry its wounds.
         ClientRagdollManager.captureCompatVisuals(entity);
 
         // Skip if either spawn path has already queued or constructed this entity.

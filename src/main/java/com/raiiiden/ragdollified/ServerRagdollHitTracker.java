@@ -17,17 +17,8 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 
-// Server-side counterpart to RagdollHitTracker, existing to close a packet-ordering race.
-//
-// PhysicsHooks.onLivingDeath runs inside LivingEntity.die(), itself inside hurt(). TACZ posts
-// EntityHurtByGunEvent.Post only after hurt() returns, so a fatal shot goes: hurt, die,
-// LivingDeathEvent queues RagdollSpawnPacket, hurt returns, then the gun-hurt packet queues.
-// Both ship the same tick but the spawn packet is first, so the client tracker is still empty
-// when it arrives and kills only looked right when the target had been hit a tick earlier.
-//
-// Capturing on the Pre event, before hurt(), lets PhysicsHooks bake the hit info straight into
-// the spawn packet with no race window. LivingHurtEvent is covered too so vanilla projectiles
-// get the same treatment when no TACZ event fires.
+// Server-side counterpart to RagdollHitTracker, closing a packet-ordering race: TACZ posts its Post
+// event after hurt() returns, so capturing on Pre lets PhysicsHooks bake hit info into the spawn packet.
 @Mod.EventBusSubscriber(modid = Ragdollified.MODID, bus = Mod.EventBusSubscriber.Bus.FORGE)
 public final class ServerRagdollHitTracker {
 
@@ -39,9 +30,8 @@ public final class ServerRagdollHitTracker {
         public final boolean isHeadShot;
         public final boolean isTaczBullet;
         public final boolean isMelee;
-        // Final damage amount at hit time (post-armor for vanilla LivingHurtEvent, raw
-        // gun amount for TACZ Pre). Used to scale the impulse magnitude so pellet weapons
-        // barely twitch the corpse and high-damage rounds whip it. 0 = damage unknown.
+        // Final damage at hit time, used to scale the impulse so pellet weapons barely twitch a corpse
+        // and heavy rounds whip it. 0 means unknown.
         public final float damage;
         public final long captureTimeMs;
 
@@ -65,9 +55,8 @@ public final class ServerRagdollHitTracker {
     private static final long ENTRY_TTL_MS = 10_000L;
     private static int cleanupTick = 0;
 
-    // Captures a TACZ hit before hurt() runs. Pre is what makes fatal kills work — see the
-    // class comment. HIGHEST priority puts this ahead of anything that might cancel the event,
-    // though it hardly matters since nothing here mutates it.
+    // Captures a TACZ hit before hurt() runs, which is what makes fatal kills work. HIGHEST priority
+    // puts this ahead of anything that might cancel the event, though nothing here mutates it.
     public static void registerOptionalTaczHandler(IEventBus forgeBus) {
         if (!ModList.get().isLoaded("tacz")) return;
         try {
@@ -92,9 +81,8 @@ public final class ServerRagdollHitTracker {
         if (!(hurt instanceof LivingEntity living)) return;
         if (!MobModelHelper.shouldHaveRagdoll(living)) return;
 
-        // xOld/yOld/zOld is the bullet's position one tick before the hit — usually the
-        // closest sample we have to the actual contact point (current position has
-        // already integrated past the entity).
+        // xOld/yOld/zOld is the bullet's position a tick before the hit, usually the closest sample to
+        // the contact point, since the current position has already integrated past the entity.
         Vec3 vel = bullet.getDeltaMovement();
         Vec3 dir = vel.lengthSqr() > 1.0e-6 ? vel.normalize() : Vec3.ZERO;
         Vec3 hitPos = projectileRayStart(bullet, dir);
@@ -104,9 +92,8 @@ public final class ServerRagdollHitTracker {
         maybeCleanup();
     }
 
-    // Vanilla projectile fallback for arrows, tridents, and snowballs. No conflict with the
-    // TACZ handler above, which never fires for these. Non-projectile damage is skipped so
-    // melee, fire, and fall never create entries.
+    // Vanilla projectile fallback for arrows, tridents and snowballs, which the TACZ handler never sees.
+    // Non-projectile damage is skipped, so melee, fire and fall create no entries.
     @SubscribeEvent(priority = EventPriority.HIGH)
     public static void onLivingHurt(LivingHurtEvent event) {
         if (event.getEntity().level().isClientSide) return;
