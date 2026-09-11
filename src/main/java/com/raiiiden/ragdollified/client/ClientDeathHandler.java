@@ -34,7 +34,11 @@ public class ClientDeathHandler {
         // Skip if either spawn path has already queued or constructed this entity.
         if (ClientRagdollManager.hasPendingOrActiveRagdoll(entity.getId())) return;
 
-        if (RagdollifiedConfig.hasServerSnapshot()) return;
+        // Singleplayer: build the ragdoll now instead of waiting a server round trip; the packet dedupes.
+        if (RagdollifiedConfig.hasServerSnapshot()
+                && !net.minecraft.client.Minecraft.getInstance().hasSingleplayerServer()) {
+            return;
+        }
 
         MobModelHelper.ModelType modelType = isPlayer
                 ? MobModelHelper.ModelType.HUMANOID_STANDARD

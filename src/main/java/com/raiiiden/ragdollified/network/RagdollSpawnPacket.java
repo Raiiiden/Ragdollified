@@ -6,7 +6,7 @@ import com.raiiiden.ragdollified.RagdollHitMapper;
 import com.raiiiden.ragdollified.RagdollPart;
 import com.raiiiden.ragdollified.Ragdollified;
 import com.raiiiden.ragdollified.client.ClientRagdoll;
-import com.raiiiden.ragdollified.client.ClientJbulletWorld;
+import com.raiiiden.ragdollified.client.ClientPhysicsWorld;
 import com.raiiiden.ragdollified.client.ClientMobModelHelper;
 import com.raiiiden.ragdollified.client.EntityRenderCaptureHandler;
 import com.raiiiden.ragdollified.client.ClientRagdollManager;
@@ -58,6 +58,8 @@ public class RagdollSpawnPacket {
     private final String villagerType;
     private final String villagerProfession;
     private final byte villagerLevel;
+    // Missing parts as a RagdollPart bitmask; written last behind a length check for older protocols.
+    private byte severedMask;
 
     public RagdollSpawnPacket(int originalEntityId, boolean isPlayer, String mobType, float scale,
                               String playerUUID, String playerName,
@@ -249,6 +251,14 @@ public class RagdollSpawnPacket {
         return ordinal >= 0 && ordinal < values.length ? values[ordinal] : MobModelHelper.ModelType.UNSUPPORTED;
     }
 
+    // Parts this body spawns without. Server side, before the packet is sent.
+    public RagdollSpawnPacket severedMask(int mask) {
+        this.severedMask = (byte) (mask & 0xFF);
+        return this;
+    }
+
+    public byte severedMask() { return severedMask; }
+
     public static void encode(RagdollSpawnPacket msg, FriendlyByteBuf buf) {
         buf.writeInt(msg.originalEntityId);
         buf.writeBoolean(msg.isPlayer);
@@ -283,10 +293,11 @@ public class RagdollSpawnPacket {
         buf.writeUtf(msg.villagerType);
         buf.writeUtf(msg.villagerProfession);
         buf.writeByte(msg.villagerLevel);
+        buf.writeByte(msg.severedMask);
     }
 
     public static RagdollSpawnPacket decode(FriendlyByteBuf buf) {
-        return new RagdollSpawnPacket(
+        RagdollSpawnPacket packet = new RagdollSpawnPacket(
                 buf.readInt(),
                 buf.readBoolean(),
                 buf.readUtf(),
@@ -307,6 +318,8 @@ public class RagdollSpawnPacket {
                 buf.readByte(),
                 buf.readUtf(), buf.readUtf(), buf.readByte()
         );
+        if (buf.readableBytes() > 0) packet.severedMask(buf.readByte());
+        return packet;
     }
 
     public static void handle(RagdollSpawnPacket msg, Supplier<NetworkEvent.Context> ctx) {
@@ -324,7 +337,7 @@ public class RagdollSpawnPacket {
         net.minecraft.world.entity.Entity worldEntity = level.getEntity(msg.originalEntityId);
         MobModelHelper.ModelType modelType = msg.modelType;
         // The packet type comes from the entity id, all the server can see, so a client that still has
-        // the entity prefers its real model class — except for models we cannot identify, like villagers.
+        // the entity prefers its real model class, except for models we cannot identify, like villagers.
         if (!msg.isPlayer && worldEntity instanceof net.minecraft.world.entity.LivingEntity living) {
             MobModelHelper.ModelType actual = ClientMobModelHelper.getActualModelType(living);
             if (MobModelHelper.isSupportedModelType(actual)) {
@@ -348,8 +361,11 @@ public class RagdollSpawnPacket {
             ClientRagdollManager.captureCompatVisuals(dying);
         }
 
-        // Get captured pose if available locally
-        MobPoseCapture.MobPose capturedPose = MobPoseCapture.getPose(msg.originalEntityId);
+        // Pose from the last drawn frame; if the packet beat that frame, pose the entity on demand.
+        MobPoseCapture.MobPose capturedPose =
+                worldEntity instanceof net.minecraft.world.entity.LivingEntity posable
+                        ? ClientRagdollManager.resolvePose(posable, modelType)
+                        : MobPoseCapture.getPose(msg.originalEntityId);
 
         UUID uuid = null;
         if (!msg.playerUUID.isEmpty()) {
@@ -380,6 +396,9 @@ public class RagdollSpawnPacket {
                     ? (hit.centered ? RagdollHitMapper.CENTER_HIT_PART_INDEX : hit.part.index)
                     : -1;
             hitImpulse = hit != null ? hit.impulse : null;
+            if (hit != null && hit.impact != null && worldEntity != null) {
+                hitOffset = hit.impact.subtract(worldEntity.position());
+            }
         }
 
         boolean wasSheared = unpackSheared(msg.sheepState);
@@ -411,6 +430,7 @@ public class RagdollSpawnPacket {
                 chargedCreeper, saddledPig,
                 msg.villagerType, msg.villagerProfession, msg.villagerLevel
         );
+        data.severedMask = msg.severedMask & 0xFF;
 
         // Enqueue for the physics worker. processSpawnQueue destroys any existing local death-event
         // spawn for this entity id first, on that thread, so there is no race.

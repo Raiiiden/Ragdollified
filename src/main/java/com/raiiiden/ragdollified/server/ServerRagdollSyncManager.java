@@ -4,6 +4,7 @@ import com.raiiiden.ragdollified.RagdollTransform;
 import com.raiiiden.ragdollified.Ragdollified;
 import com.raiiiden.ragdollified.config.RagdollifiedConfig;
 import com.raiiiden.ragdollified.network.ModNetwork;
+import com.raiiiden.ragdollified.RagdollPart;
 import com.raiiiden.ragdollified.network.RagdollSpawnPacket;
 import com.raiiiden.ragdollified.network.RagdollStatePacket;
 import com.raiiiden.ragdollified.network.RagdollStreamOwnerPacket;
@@ -301,6 +302,19 @@ public final class ServerRagdollSyncManager {
             retained.settledTransforms = null;
             retained.latestStreamTransforms = null;
             retained.impulseRevision = Math.max(retained.impulseRevision, revision);
+        }
+    }
+
+    // Fold a severed part into the retained spawn packet so late joiners see the body without it.
+    public static void markSevered(int entityId, RagdollPart part) {
+        if (part == null || !part.isSeverable()) return;
+        RetainedRagdoll retained = RETAINED.get(entityId);
+        if (retained == null) return;
+        synchronized (retained) {
+            retained.spawnPacket.severedMask(retained.spawnPacket.severedMask() | part.bit());
+            // Drop a retained pose taken before the limb came off; the owner reports a fresh one soon after.
+            retained.settledTransforms = null;
+            retained.latestStreamTransforms = null;
         }
     }
 

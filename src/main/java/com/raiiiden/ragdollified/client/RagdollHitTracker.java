@@ -74,9 +74,11 @@ public final class RagdollHitTracker {
         if (!(hurt instanceof LivingEntity living)) return;
         if (!MobModelHelper.shouldHaveRagdoll(living)) return;
 
+        // position() during the hit handling is the start of the segment TACZ swept; see
+        // RagdollHitMapper.projectileSegmentStart.
         Vec3 vel = bullet.getDeltaMovement();
         Vec3 dir = vel.lengthSqr() > 1.0e-6 ? vel.normalize() : Vec3.ZERO;
-        Vec3 hitPos = projectileRayStart(bullet, dir);
+        Vec3 hitPos = RagdollHitMapper.projectileSegmentStart(bullet, dir);
 
         HIT_INFO.put(hurt.getId(), new HitInfo(
                 hitPos, dir, getBoolean(event, "isHeadShot"), true, getFloat(event, "getAmount")));
@@ -93,7 +95,7 @@ public final class RagdollHitTracker {
         if (direct instanceof Projectile) {
             Vec3 vel = direct.getDeltaMovement();
             Vec3 dir = vel.lengthSqr() > 1.0e-6 ? vel.normalize() : Vec3.ZERO;
-            Vec3 hitPos = projectileRayStart(direct, dir);
+            Vec3 hitPos = RagdollHitMapper.projectileSegmentStart(direct, dir);
             return new HitInfo(hitPos, dir, false, false, 0f);
         }
 
@@ -119,12 +121,6 @@ public final class RagdollHitTracker {
         Vec3 end = eye.add(dir.scale(reach));
         Optional<Vec3> clipped = target.getBoundingBox().inflate(0.05).clip(eye, end);
         return clipped.orElseGet(() -> closestPointOnSegmentToTarget(eye, end, target));
-    }
-
-    private static Vec3 projectileRayStart(Entity projectile, Vec3 dir) {
-        Vec3 previous = new Vec3(projectile.xOld, projectile.yOld, projectile.zOld);
-        if (dir.lengthSqr() < 1.0e-6) return previous;
-        return previous.subtract(dir.scale(0.75));
     }
 
     private static Vec3 closestPointOnSegmentToTarget(Vec3 start, Vec3 end, LivingEntity target) {
@@ -158,20 +154,25 @@ public final class RagdollHitTracker {
                 hit.direction, hit.isHeadShot, hit.isTaczBullet, hit.isMelee, hit.damage);
         if (impulse == null) return null;
 
-        RagdollPart part = RagdollHitMapper.map(entity, hit.hitPos, hit.direction, hit.isHeadShot);
-        boolean centered = RagdollHitMapper.isCenteredHit(entity, hit.hitPos, hit.isHeadShot, part);
-        return new ResolvedHit(part, impulse, centered);
+        RagdollHitMapper.Resolution resolution =
+                RagdollHitMapper.resolve(entity, hit.hitPos, hit.direction, hit.isHeadShot);
+        boolean centered = RagdollHitMapper.isCenteredHit(
+                entity, resolution.impact, hit.isHeadShot, resolution.part);
+        return new ResolvedHit(resolution.part, impulse, centered, resolution.impact);
     }
 
     public static final class ResolvedHit {
         public final RagdollPart part;
         public final Vec3 impulse;
         public final boolean centered;
+        // World-space impact point or null; the pivot for the impulse. Only used without a server hit.
+        public final Vec3 impact;
 
-        public ResolvedHit(RagdollPart part, Vec3 impulse, boolean centered) {
+        public ResolvedHit(RagdollPart part, Vec3 impulse, boolean centered, Vec3 impact) {
             this.part = part;
             this.impulse = impulse;
             this.centered = centered;
+            this.impact = impact;
         }
     }
 

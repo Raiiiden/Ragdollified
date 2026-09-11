@@ -1,21 +1,113 @@
-MIT License
+Zarra Studios Restricted License v1.0
 
-Copyright (c) 2025 Raiiiden
+Copyright (c) 2026 Raiiiden / Zarra Studios. All Rights Reserved.
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+"The Software" means this project, including its source code, assets,
+configuration, and documentation. "The Author" means Raiiiden and Zarra
+Studios, which are the same rights holder acting individually and as an
+organization.
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+The Software is not open source. Except as expressly permitted below, no
+person is granted any right to use, copy, modify, merge, publish,
+distribute, sublicense, sell, or create derivative works of the Software.
+All rights not expressly granted are reserved by the Author.
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+1. PERMITTED USE
+
+You may download, install, and run the Software for personal use,
+including on private or public Minecraft servers, and you may include it
+in a modpack provided the Software is distributed unmodified and the
+Author is credited. You may view and fork the source code on the hosting
+platform for the purpose of preparing contributions under Section 2, or
+for private study and personal, non-distributed modification. You may not
+publicly distribute modified builds, reuploads, or derivative works
+except under Sections 3 and 4, or with the Author's written permission.
+
+2. CONTRIBUTIONS
+
+Contributions are welcome and encouraged. Bug reports, feature requests,
+pull requests, translations, assets, and documentation are all accepted.
+
+By submitting a contribution, you grant the Author a perpetual,
+worldwide, irrevocable, royalty-free, non-exclusive license to use,
+reproduce, modify, sublicense, and distribute that contribution as part
+of the Software under this or any later license the Author applies to the
+Software. You confirm that you have the right to grant this. You retain
+copyright in your own contribution, and you will be credited in the
+project's contributor records.
+
+3. DORMANCY GRANT
+
+If all of the following are true for a continuous period of twelve (12)
+months, the Software becomes available for use and forking under the
+terms in Section 4:
+
+   (a) no commit, release, or tag has been published to the project's
+       GitHub repository; and
+   (b) no file or version update has been published to the project's
+       CurseForge page and no file or version update has been published
+       to the project's Modrinth page; and
+   (c) the Author has not publicly stated that the project is paused,
+       maintained, or otherwise still active.
+
+The twelve month period is measured per project. Activity on other
+projects by the Author does not reset it. Any qualifying activity listed
+above resets the period to zero and ends any dormancy in progress, but
+does not retroactively revoke work already lawfully published under
+Section 4.
+
+4. TERMS OF THE DORMANCY GRANT
+
+Once Section 3 is satisfied, you may use, modify, and distribute the
+Software and derivative works of it, subject to these conditions:
+
+   (a) CREDIT. You must clearly and visibly credit "Raiiiden / Zarra
+       Studios" as the original author, name the original project, and
+       link to its original GitHub repository. The credit must appear in
+       your source repository, in your distribution page description, and
+       in this license file, which must be included in full with all
+       copies or substantial portions of the Software.
+
+   (b) NO COMPETING FORKS. A fork published to continue maintenance,
+       compatibility, or porting of a dormant project is permitted. A
+       fork published to draw users away from the original project is
+       not, whether by rebranding the Software, by removing or obscuring
+       the credit required by 4(a), or by presenting the fork as an
+       independent work rather than a continuation. If the original
+       project resumes activity, you may continue to maintain and
+       distribute your existing fork, but you must state on your
+       distribution pages that the original project is active again and
+       link to it.
+
+   (c) NO RESALE. You may not sell the Software or derivative works of
+       it, place it behind a paywall, or gate access to it through early
+       access, subscriptions, or advertising link shorteners.
+
+   (d) SURVIVING TERMS. Sections 4 and 6 apply to your derivative works.
+       You may not relicense the Software or its derivatives under terms
+       more permissive than this license.
+
+5. EXCEPTIONS AND PERMISSION
+
+If you want to do something this license does not permit, ask. The Author
+is generally willing to grant permission, including for uses that Section
+4 would otherwise restrict. Requests may be sent by Discord to
+"Raiiiden." or raised as an issue on the project's GitHub repository.
+Permission is only granted when given in writing by the Author, and any
+grant applies only to the person and use described in it.
+
+6. WARRANTY AND LIABILITY
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN
+NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
+USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+7. TERMINATION
+
+Any use outside the permissions granted here terminates your rights under
+this license automatically. Rights may be restored by the Author in
+writing.

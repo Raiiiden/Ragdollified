@@ -15,6 +15,7 @@ import java.util.Optional;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
+import java.util.UUID;
 import java.util.function.IntPredicate;
 import org.joml.Quaternionf;
 import org.joml.Vector3f;
@@ -41,6 +42,26 @@ public final class RagdollifiedApi {
         }
         if (resolved.hideEntity()) setEntityHidden(entity, true);
         return new RagdollHandle(entity.getId(), resolved.hideEntity());
+    }
+
+    // Make a ragdoll thrash, driving joints toward random targets (Jolt only; inert on JBullet).
+    // durationTicks <= 0 stops; intervalTicks 3-6 works best. Returns false if there is no such ragdoll.
+    public static boolean flail(int entityId, int durationTicks, int intervalTicks,
+                                float spreadDegrees, float strength) {
+        if (!ClientRagdollManager.hasPendingOrActiveRagdoll(entityId)) return false;
+        ClientRagdollManager.requestFlail(entityId, durationTicks, Math.max(1, intervalTicks),
+                (float) Math.toRadians(spreadDegrees), strength);
+        return true;
+    }
+
+    public static boolean flail(Entity entity, int durationTicks, int intervalTicks,
+                                float spreadDegrees, float strength) {
+        return entity != null && flail(entity.getId(), durationTicks, intervalTicks, spreadDegrees, strength);
+    }
+
+    // Stop a flail early and hand the joints back to the rest-pose springs.
+    public static boolean stopFlail(int entityId) {
+        return flail(entityId, 0, 1, 0f, 0f);
     }
 
     // Remove an active or queued ragdoll.
@@ -186,8 +207,8 @@ public final class RagdollifiedApi {
         return Optional.ofNullable(closest);
     }
 
-    // Slab-test a world ray against one snapshot oriented box by transforming into local space.
-    private static double intersectPart(Vec3 start, Vec3 delta, javax.vecmath.Vector3f center,
+    // Slab-test a world ray against a snapshot box in local space; package-private for RagdollAmputationApi.
+    static double intersectPart(Vec3 start, Vec3 delta, javax.vecmath.Vector3f center,
                                         javax.vecmath.Quat4f rotation, javax.vecmath.Vector3f halfExtents) {
         Quaternionf inverse = new Quaternionf(rotation.x, rotation.y, rotation.z, rotation.w).invert();
         Vector3f localStart = inverse.transform(new Vector3f(
@@ -195,7 +216,9 @@ public final class RagdollifiedApi {
         Vector3f localDelta = inverse.transform(new Vector3f((float) delta.x, (float) delta.y, (float) delta.z));
         float[] origin = {localStart.x, localStart.y, localStart.z};
         float[] direction = {localDelta.x, localDelta.y, localDelta.z};
-        float[] extent = {halfExtents.x + 0.04f, halfExtents.y + 0.04f, halfExtents.z + 0.04f};
+        // The snapshot now carries the resolved collision half extents. It used to carry
+        // Bullet's pre-margin size, which is why this had a margin added back on.
+        float[] extent = {halfExtents.x, halfExtents.y, halfExtents.z};
         double enter = 0.0, exit = 1.0;
         for (int axis = 0; axis < 3; axis++) {
             if (Math.abs(direction[axis]) < 1.0e-7f) {
@@ -231,6 +254,43 @@ public final class RagdollifiedApi {
     // True while any listener is registered, i.e. while contact detection is doing work.
     public static boolean isCollisionTrackingActive() {
         return RagdollCollisionTracker.isActive();
+    }
+
+    // Settle reporting
+
+    // Listen for local player ragdolls settling; each body reports once per client.
+    // Every simulating client reports, so validate via RagdollifiedServerApi#isStreamOwner.
+    public static void addSettleListener(RagdollSettleListener listener) {
+        ClientRagdollManager.addSettleListener(listener);
+    }
+
+    public static boolean removeSettleListener(RagdollSettleListener listener) {
+        return ClientRagdollManager.removeSettleListener(listener);
+    }
+
+    // Settle-report deadline in ticks: an unsettled body reports its current pose just before it.
+    // The shortest requested deadline wins, capped by the ragdoll lifetime.
+    public static void setSettleDeadlineTicks(int ticks) {
+        ClientRagdollManager.setSettleDeadlineTicks(ticks);
+    }
+
+    // The player a ragdoll was built from, empty for a mob body or an unknown id.
+    public static Optional<UUID> getPlayerUUID(int entityId) {
+        ClientRagdoll ragdoll = ClientRagdollManager.get(entityId);
+        return ragdoll == null || !ragdoll.isPlayer()
+                ? Optional.empty()
+                : Optional.ofNullable(ragdoll.getPlayerUUID());
+    }
+
+    // Replace a settled player ragdoll with a caller-owned body, moving its visuals onto replacementKey.
+    // expectedOwner guards against recycled entity ids; safe to call every tick until it returns true.
+    public static boolean handOffPlayerRagdoll(int ragdollEntityId, UUID expectedOwner, UUID replacementKey) {
+        return ClientRagdollManager.handOffPlayerRagdoll(ragdollEntityId, expectedOwner, replacementKey);
+    }
+
+    // Exempt player ragdolls from the per-player limit while an addon's bodies stand in for them.
+    public static void setPlayerRagdollCullingSuppressed(boolean suppressed) {
+        ClientRagdollManager.setPlayerRagdollCullingSuppressed(suppressed);
     }
 
     // Snapshot of known active ragdoll entity ids.

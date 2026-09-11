@@ -1,17 +1,12 @@
 package com.raiiiden.ragdollified;
 
-import com.bulletphysics.collision.dispatch.CollisionFlags;
-import com.bulletphysics.collision.dispatch.CollisionObject;
-import com.bulletphysics.collision.shapes.BoxShape;
-import com.bulletphysics.collision.shapes.CollisionShape;
-import com.bulletphysics.dynamics.DiscreteDynamicsWorld;
-import com.bulletphysics.dynamics.RigidBody;
-import com.bulletphysics.dynamics.RigidBodyConstructionInfo;
-import com.bulletphysics.dynamics.constraintsolver.Generic6DofConstraint;
-import com.bulletphysics.dynamics.constraintsolver.TypedConstraint;
-import com.bulletphysics.linearmath.DefaultMotionState;
-import com.bulletphysics.linearmath.Transform;
 import com.raiiiden.ragdollified.config.RagdollifiedConfig;
+import com.raiiiden.ragdollified.physics.BodyProperties;
+import com.raiiiden.ragdollified.physics.PhysTransform;
+import com.raiiiden.ragdollified.physics.PhysicsBody;
+import com.raiiiden.ragdollified.physics.PhysicsConstraint;
+import com.raiiiden.ragdollified.physics.PhysicsShape;
+import com.raiiiden.ragdollified.physics.PhysicsWorld;
 import org.joml.Quaternionf;
 
 import javax.vecmath.Quat4f;
@@ -63,23 +58,36 @@ public final class RagdollBodyFactory {
         SHULKER,
         GHAST,
         VEX,
-        WARDEN
+        WARDEN,
+        GUARDIAN,
+        ELDER_GUARDIAN,
+        SQUID,
+        DOLPHIN,
+        AXOLOTL,
+        // One profile per small fish: they share the FISH rig and differ only in dimensions.
+        COD,
+        SALMON,
+        TROPICAL_FISH,
+        PUFFERFISH,
+        TADPOLE,
+        WITHER,
+        ENDER_DRAGON
     }
 
     // Entry point
 
     // Build every body and joint for a ragdoll: parts gets 6 rigid bodies, joints 5 constraints. pos is
     // the spawn centre, capturedPose the per-part rotation offsets taken before death, or null.
-    public static void build(DiscreteDynamicsWorld world,
-                             List<RigidBody> parts, List<TypedConstraint> joints,
+    public static void build(PhysicsWorld world,
+                             List<PhysicsBody> parts, List<PhysicsConstraint> joints,
                              MobModelHelper.ModelType modelType,
                              Vector3f pos, Quat4f baseQuat, float scale,
                              Vector3f initialVel, MobPoseCapture.MobPose capturedPose) {
         build(world, parts, joints, modelType, pos, baseQuat, scale, initialVel, capturedPose, false);
     }
 
-    public static void build(DiscreteDynamicsWorld world,
-                             List<RigidBody> parts, List<TypedConstraint> joints,
+    public static void build(PhysicsWorld world,
+                             List<PhysicsBody> parts, List<PhysicsConstraint> joints,
                              MobModelHelper.ModelType modelType,
                              Vector3f pos, Quat4f baseQuat, float scale,
                              Vector3f initialVel, MobPoseCapture.MobPose capturedPose,
@@ -88,12 +96,31 @@ public final class RagdollBodyFactory {
                 isBabyCow ? BodyProfile.COW : BodyProfile.DEFAULT, isBabyCow, false);
     }
 
-    public static void build(DiscreteDynamicsWorld world,
-                             List<RigidBody> parts, List<TypedConstraint> joints,
+    public static void build(PhysicsWorld world,
+                             List<PhysicsBody> parts, List<PhysicsConstraint> joints,
                              MobModelHelper.ModelType modelType,
                              Vector3f pos, Quat4f baseQuat, float scale,
                              Vector3f initialVel, MobPoseCapture.MobPose capturedPose,
                              BodyProfile bodyProfile, boolean isBaby, boolean babyBigHead) {
+        build(world, parts, joints, modelType, pos, baseQuat, scale, initialVel, capturedPose,
+                bodyProfile, isBaby, babyBigHead, null);
+    }
+
+    // genericRig: the measured skeleton, required for ModelType.GENERIC and ignored otherwise.
+    public static void build(PhysicsWorld world,
+                             List<PhysicsBody> parts, List<PhysicsConstraint> joints,
+                             MobModelHelper.ModelType modelType,
+                             Vector3f pos, Quat4f baseQuat, float scale,
+                             Vector3f initialVel, MobPoseCapture.MobPose capturedPose,
+                             BodyProfile bodyProfile, boolean isBaby, boolean babyBigHead,
+                             GenericRig genericRig) {
+        if (modelType == MobModelHelper.ModelType.GENERIC) {
+            if (genericRig == null) {
+                throw new IllegalArgumentException("GENERIC ragdoll built without a measured rig");
+            }
+            buildGeneric(world, parts, joints, genericRig, pos, baseQuat, scale, initialVel);
+            return;
+        }
         // Bat and bee physics is authored at the vanilla model's natural pixel size, matching the
         // unscaled models the renderer draws, so their body scale stays 1.0.
         float bodyScale = (bodyProfile == BodyProfile.DEFAULT
@@ -183,6 +210,13 @@ public final class RagdollBodyFactory {
             case GHAST: buildGhast(world,parts,pos,baseQuat,initialVel); break;
             case VEX: buildVex(world,parts,pos,baseQuat,initialVel); break;
             case WARDEN: buildWarden(world,parts,pos,baseQuat,initialVel); break;
+            case GUARDIAN: buildGuardian(world,parts,pos,baseQuat,initialVel,guardianScale(bodyProfile)); break;
+            case SQUID: buildSquid(world,parts,pos,baseQuat,initialVel); break;
+            case DOLPHIN: buildDolphin(world,parts,pos,baseQuat,initialVel); break;
+            case AXOLOTL: buildAxolotl(world,parts,pos,baseQuat,initialVel); break;
+            case FISH: buildFish(world,parts,pos,baseQuat,initialVel,bodyProfile); break;
+            case WITHER: buildWither(world,parts,pos,baseQuat,initialVel); break;
+            case ENDER_DRAGON: buildEnderDragon(world,parts,pos,baseQuat,initialVel); break;
             case BAT:
                 buildBat(world, parts, pos, baseQuat, bodyScale, initialVel, capturedPose);
                 break;
@@ -201,8 +235,7 @@ public final class RagdollBodyFactory {
 
     // Scale each body's authored mass by its configured per-part weight, here rather than at ~40 call
     // sites. Inertia is recomputed: a stale tensor would spin a heavier part as if it were still light.
-    private static void applyPartWeights(List<RigidBody> parts,BodyProfile profile) {
-        Vector3f inertia = new Vector3f();
+    private static void applyPartWeights(List<PhysicsBody> parts,BodyProfile profile) {
         for (int i = 0; i < parts.size(); i++) {
             RagdollPart part = RagdollPart.byIndex(i);
             if (part == null) continue;
@@ -210,23 +243,77 @@ public final class RagdollBodyFactory {
             // do not accidentally apply arm/leg config weights to arbitrary tentacles/legs.
             if (profile == BodyProfile.GHAST && i > 0) continue;
             if ((profile == BodyProfile.SPIDER || profile == BodyProfile.CAVE_SPIDER) && i > 1) continue;
+            // Squid tentacles and the dragon's neck/tail/hind legs occupy limb indexes without being
+            // the limbs those weights describe.
+            if (profile == BodyProfile.SQUID && i > 0) continue;
+            if (profile == BodyProfile.ENDER_DRAGON && i > 5) continue;
             float multiplier = RagdollifiedConfig.getPartWeightMultiplier(part);
             if (multiplier == 1f) continue;
-            RigidBody body = parts.get(i);
+            PhysicsBody body = parts.get(i);
             float invMass = body.getInvMass();
-            if (invMass <= 0f) continue; // static/kinematic — no mass to scale
-            float mass = (1f / invMass) * multiplier;
-            body.getCollisionShape().calculateLocalInertia(mass, inertia);
-            body.setMassProps(mass, inertia);
-            // setMassProps only updates the inverse-mass/inertia scalars; the cached world
-            // inertia tensor the solver actually reads is rebuilt here.
-            body.updateInertiaTensor();
+            if (invMass <= 0f) continue; // static/kinematic: no mass to scale
+            // setMass rebuilds the inertia tensor from the shape as well: a stale tensor would spin
+            // a heavier part as if it were still light, which is the bug this comment used to guard.
+            body.setMass((1f / invMass) * multiplier);
         }
     }
 
+    // Build a skeleton from a measured rig, one box and joint per part in a single forward pass.
+    // Skips part weights, bakes joints at the built pose, and scales mass with volume.
+    private static void buildGeneric(PhysicsWorld world, List<PhysicsBody> parts,
+                                     List<PhysicsConstraint> joints, GenericRig rig,
+                                     Vector3f pos, Quat4f baseQuat, float scale, Vector3f initialVel) {
+        Quaternionf q = new Quaternionf(baseQuat.x, baseQuat.y, baseQuat.z, baseQuat.w);
+        Function<Vector3f, Vector3f> tw = local -> {
+            org.joml.Vector3f tmp = new org.joml.Vector3f(local.x, local.y, local.z);
+            q.transform(tmp);
+            Vector3f out = new Vector3f(tmp.x, tmp.y, tmp.z);
+            out.add(pos);
+            return out;
+        };
+
+        for (GenericRig.Part part : rig.parts) {
+            Vector3f half = v(Math.max(MIN_GENERIC_HALF_EXTENT, part.hx() * scale),
+                    Math.max(MIN_GENERIC_HALF_EXTENT, part.hy() * scale),
+                    Math.max(MIN_GENERIC_HALF_EXTENT, part.hz() * scale));
+            float mass = Math.max(GENERIC_MIN_MASS,
+                    GENERIC_DENSITY * (2 * half.x) * (2 * half.y) * (2 * half.z));
+            parts.add(makePart(world, box(world, half),
+                    tw.apply(v(part.ox() * scale, part.oy() * scale, part.oz() * scale)),
+                    baseQuat, mass, initialVel));
+        }
+
+        int firstJoint = joints.size();
+        for (int i = 1; i < rig.parts.size(); i++) {
+            GenericRig.Part part = rig.parts.get(i);
+            PhysicsBody child = parts.get(i);
+            PhysicsBody parent = parts.get(Math.max(0, part.parentIndex()));
+            Vector3f anchor = tw.apply(v(part.jx() * scale, part.jy() * scale, part.jz() * scale));
+            joints.add(joint(world, parent, child, anchor,
+                    GENERIC_LINEAR_SLOP_LOWER, GENERIC_LINEAR_SLOP_UPPER,
+                    GENERIC_ANGULAR_LOWER, GENERIC_ANGULAR_UPPER, false, true));
+        }
+
+        applyRelaxation(joints, firstJoint, 1f);
+        applyAerodynamicDrag(parts);
+    }
+
+    // Nothing measured off a model is allowed to be thinner than this. A part one pixel deep gives a
+    // box 3 cm thick, which tunnels through a floor between two steps however good the CCD is.
+    private static final float MIN_GENERIC_HALF_EXTENT = 0.03f;
+    // Chosen so a vanilla-sized humanoid torso lands near the 8 kg the authored rig gives it, which
+    // keeps a measured mob falling at the same rate as the ones next to it.
+    private static final float GENERIC_DENSITY = 90f;
+    private static final float GENERIC_MIN_MASS = 0.15f;
+    // One middle-ground limit for every joint of an unauthored rig: loose enough to fold, tight enough to hold.
+    private static final Vector3f GENERIC_ANGULAR_LOWER = new Vector3f(-45, -35, -35);
+    private static final Vector3f GENERIC_ANGULAR_UPPER = new Vector3f(45, 35, 35);
+    private static final Vector3f GENERIC_LINEAR_SLOP_LOWER = new Vector3f(-.015f, -.015f, -.015f);
+    private static final Vector3f GENERIC_LINEAR_SLOP_UPPER = new Vector3f(.015f, .015f, .015f);
+
     // Body builders
 
-    private static void buildHumanoid(DiscreteDynamicsWorld world, List<RigidBody> parts,
+    private static void buildHumanoid(PhysicsWorld world, List<PhysicsBody> parts,
                                       Vector3f pos, Quat4f baseQuat, float scale,
                                       Vector3f vel, MobPoseCapture.MobPose pose,
                                       Function<Vector3f, Vector3f> worldOffset, boolean isBaby, boolean babyBigHead) {
@@ -234,107 +321,125 @@ public final class RagdollBodyFactory {
         // enlarge the baby head pass babyBigHead=true, uniformly scaled ones pass false.
         float bs = isBaby ? 0.5f : 1.0f;                       // torso, arms, legs
         float hd = isBaby ? (babyBigHead ? 0.75f : 0.5f) : 1.0f; // head
-        // Head sits on top of the torso: torso half-height (0.4) + head half-height (0.2)
-        // minus the same 0.05 neck overlap the adult layout used (0.4+0.2-0.05 = 0.55).
-        float headOffY = 0.4f*bs + 0.2f*hd - 0.05f*bs;
-        Quat4f lArmRot = pose != null ? mul(baseQuat, pose.getRotationQuaternion(RagdollPart.LEFT_ARM))  : baseQuat;
-        Quat4f rArmRot = pose != null ? mul(baseQuat, pose.getRotationQuaternion(RagdollPart.RIGHT_ARM)) : baseQuat;
-        Vector3f lArmPos = pose != null
-                ? calcPos(pos, baseQuat, new Vector3f(-0.35f*bs, 0.22f*bs, 0f), lArmRot, new Vector3f(0f, -0.35f*bs, 0f))
-                : worldOffset.apply(new Vector3f(-0.35f*bs, -0.13f*bs, 0f));
-        Vector3f rArmPos = pose != null
-                ? calcPos(pos, baseQuat, new Vector3f( 0.35f*bs, 0.22f*bs, 0f), rArmRot, new Vector3f(0f, -0.35f*bs, 0f))
-                : worldOffset.apply(new Vector3f( 0.35f*bs, -0.13f*bs, 0f));
-        parts.add(makePart(world, new BoxShape(new Vector3f(0.25f*bs, 0.4f*bs,  0.15f*bs)), pos,                                              baseQuat, 8*bs, vel));
-        parts.add(makePart(world, new BoxShape(new Vector3f(0.2f*hd,  0.2f*hd,  0.2f*hd)),  worldOffset.apply(new Vector3f(0f, headOffY, 0f)),   baseQuat, 4*hd, vel));
-        parts.add(makePart(world, new BoxShape(new Vector3f(0.15f*bs, 0.45f*bs, 0.15f*bs)), worldOffset.apply(new Vector3f(-0.1f*bs,-0.75f*bs,0f)), baseQuat, 6*bs, vel));
-        parts.add(makePart(world, new BoxShape(new Vector3f(0.15f*bs, 0.45f*bs, 0.15f*bs)), worldOffset.apply(new Vector3f( 0.1f*bs,-0.75f*bs,0f)), baseQuat, 6*bs, vel));
-        parts.add(makePart(world, new BoxShape(new Vector3f(0.1f*bs,  0.35f*bs, 0.1f*bs)),  lArmPos, lArmRot, 4*bs, vel));
-        parts.add(makePart(world, new BoxShape(new Vector3f(0.1f*bs,  0.35f*bs, 0.1f*bs)),  rArmPos, rArmRot, 4*bs, vel));
+        // Head on top of the torso at the model's own separation (0.375 + 0.25).
+        float headOffY = 0.375f*bs + 0.25f*hd;
+        // Pose all six parts, not just the arms, so the ragdoll keeps its death pose instead of snapping upright.
+        Quat4f torsoRot = poseRot(pose, RagdollPart.TORSO, baseQuat);
+        Quat4f headRot  = poseRot(pose, RagdollPart.HEAD, baseQuat);
+        Quat4f lLegRot  = poseRot(pose, RagdollPart.LEFT_LEG, baseQuat);
+        Quat4f rLegRot  = poseRot(pose, RagdollPart.RIGHT_LEG, baseQuat);
+        Quat4f lArmRot  = poseRot(pose, RagdollPart.LEFT_ARM, baseQuat);
+        Quat4f rArmRot  = poseRot(pose, RagdollPart.RIGHT_ARM, baseQuat);
+        // Placement comes from the drawn frame when captured, otherwise from the authored anatomy below.
+        Vector3f torsoPos = posePos(pose, RagdollPart.TORSO, pos);
+        Vector3f headPos = posePos(pose, RagdollPart.HEAD, worldOffset.apply(new Vector3f(0f, headOffY, 0f)));
+        // Hips sit 1.9 pixels off the midline, not 1.6: the same place the model puts them.
+        Vector3f lLegPos = posePos(pose, RagdollPart.LEFT_LEG, worldOffset.apply(new Vector3f(-0.11875f*bs, -0.75f*bs, 0f)));
+        Vector3f rLegPos = posePos(pose, RagdollPart.RIGHT_LEG, worldOffset.apply(new Vector3f( 0.11875f*bs, -0.75f*bs, 0f)));
+        // Arm fallback: shoulder-anchored swing using the model's own pivot (5px out, 2px up) and cube.
+        Vector3f lArmPos = posePos(pose, RagdollPart.LEFT_ARM, pose != null
+                        ? calcPos(pos, baseQuat, new Vector3f(-0.3125f*bs, 0.25f*bs, 0f), lArmRot, new Vector3f(-0.0625f*bs, -0.25f*bs, 0f))
+                        : worldOffset.apply(new Vector3f(-0.375f*bs, 0f, 0f)));
+        Vector3f rArmPos = posePos(pose, RagdollPart.RIGHT_ARM, pose != null
+                        ? calcPos(pos, baseQuat, new Vector3f( 0.3125f*bs, 0.25f*bs, 0f), rArmRot, new Vector3f( 0.0625f*bs, -0.25f*bs, 0f))
+                        : worldOffset.apply(new Vector3f( 0.375f*bs, 0f, 0f)));
+        // Masses follow real body fractions (torso 55%, head 7%, arm 4%, leg 14%, ~32 total) so the torso
+        // reaches the floor. Boxes are the drawn cubes, with the vanilla player's as fallback.
+        parts.add(makePart(world, box(world, poseBox(pose, RagdollPart.TORSO, new Vector3f(0.25f*bs, 0.375f*bs, 0.15f*bs))), torsoPos, torsoRot, 18*bs, vel));
+        parts.add(makePart(world, box(world, poseBox(pose, RagdollPart.HEAD, new Vector3f(0.25f*hd, 0.25f*hd, 0.25f*hd))), headPos, headRot, 2.4f*hd, vel));
+        // Limbs use the vanilla 4x12x4 cubes so feet don't spawn in the floor and sleeves don't sink.
+        Vector3f authoredLimb = new Vector3f(0.125f*bs, 0.375f*bs, 0.125f*bs);
+        parts.add(makePart(world, box(world, poseBox(pose, RagdollPart.LEFT_LEG, authoredLimb)), lLegPos, lLegRot, 4.6f*bs, vel));
+        parts.add(makePart(world, box(world, poseBox(pose, RagdollPart.RIGHT_LEG, authoredLimb)), rLegPos, rLegRot, 4.6f*bs, vel));
+        parts.add(makePart(world, box(world, poseBox(pose, RagdollPart.LEFT_ARM, authoredLimb)), lArmPos, lArmRot, 1.4f*bs, vel));
+        parts.add(makePart(world, box(world, poseBox(pose, RagdollPart.RIGHT_ARM, authoredLimb)), rArmPos, rArmRot, 1.4f*bs, vel));
     }
 
-    private static void buildCreeper(DiscreteDynamicsWorld world, List<RigidBody> parts,
+    private static void buildCreeper(PhysicsWorld world, List<PhysicsBody> parts,
                                      Vector3f pos, Quat4f baseQuat, float s,
                                      Vector3f vel, MobPoseCapture.MobPose pose) {
-        Quat4f torsoRot = pose != null ? mul(baseQuat, pose.getRotationQuaternion(RagdollPart.TORSO))     : baseQuat;
-        Quat4f headRot  = pose != null ? mul(baseQuat, pose.getRotationQuaternion(RagdollPart.HEAD))      : baseQuat;
-        Quat4f flRot    = pose != null ? mul(baseQuat, pose.getRotationQuaternion(RagdollPart.LEFT_ARM))  : baseQuat;
-        Quat4f frRot    = pose != null ? mul(baseQuat, pose.getRotationQuaternion(RagdollPart.RIGHT_ARM)) : baseQuat;
-        Quat4f blRot    = pose != null ? mul(baseQuat, pose.getRotationQuaternion(RagdollPart.LEFT_LEG))  : baseQuat;
-        Quat4f brRot    = pose != null ? mul(baseQuat, pose.getRotationQuaternion(RagdollPart.RIGHT_LEG)) : baseQuat;
-        Vector3f headPos = calcPos(pos, torsoRot, new Vector3f(0f, 0.5f*s, 0f), headRot, new Vector3f(0f, 0.125f*s, 0f));
-        Vector3f flPos  = calcPos(pos, torsoRot, new Vector3f( 0.11f*s,-0.3f*s,-0.22f*s), flRot, new Vector3f(0f,-0.255f*s,0f));
-        Vector3f frPos  = calcPos(pos, torsoRot, new Vector3f(-0.11f*s,-0.3f*s,-0.22f*s), frRot, new Vector3f(0f,-0.255f*s,0f));
-        Vector3f blPos  = calcPos(pos, torsoRot, new Vector3f( 0.11f*s,-0.3f*s, 0.22f*s), blRot, new Vector3f(0f,-0.255f*s,0f));
-        Vector3f brPos  = calcPos(pos, torsoRot, new Vector3f(-0.11f*s,-0.3f*s, 0.22f*s), brRot, new Vector3f(0f,-0.255f*s,0f));
-        parts.add(makePart(world, new BoxShape(new Vector3f(0.3f*s, 0.5f*s,  0.3f*s)),   pos,     torsoRot, 10*s, vel));
-        parts.add(makePart(world, new BoxShape(new Vector3f(0.25f*s,0.25f*s, 0.25f*s)),  headPos, headRot,   4*s, vel));
-        parts.add(makePart(world, new BoxShape(new Vector3f(0.12f*s,0.3f*s,  0.12f*s)),  flPos,   flRot,     3*s, vel));
-        parts.add(makePart(world, new BoxShape(new Vector3f(0.12f*s,0.3f*s,  0.12f*s)),  frPos,   frRot,     3*s, vel));
-        parts.add(makePart(world, new BoxShape(new Vector3f(0.12f*s,0.3f*s,  0.12f*s)),  blPos,   blRot,     3*s, vel));
-        parts.add(makePart(world, new BoxShape(new Vector3f(0.12f*s,0.3f*s,  0.12f*s)),  brPos,   brRot,     3*s, vel));
+        Quat4f torsoRot = poseRot(pose, RagdollPart.TORSO, baseQuat);
+        Quat4f headRot  = poseRot(pose, RagdollPart.HEAD, baseQuat);
+        Quat4f flRot    = poseRot(pose, RagdollPart.LEFT_ARM, baseQuat);
+        Quat4f frRot    = poseRot(pose, RagdollPart.RIGHT_ARM, baseQuat);
+        Quat4f blRot    = poseRot(pose, RagdollPart.LEFT_LEG, baseQuat);
+        Quat4f brRot    = poseRot(pose, RagdollPart.RIGHT_LEG, baseQuat);
+        // Same pivot rule as the humanoid: the creeper's parts are baked with no rotation of their
+        // own, so a captured transform can place them directly.
+        Vector3f torsoPos = posePos(pose, RagdollPart.TORSO, pos);
+        Vector3f headPos = posePos(pose, RagdollPart.HEAD, calcPos(pos, torsoRot, new Vector3f(0f, 0.5f*s, 0f), headRot, new Vector3f(0f, 0.125f*s, 0f)));
+        Vector3f flPos  = posePos(pose, RagdollPart.LEFT_ARM, calcPos(pos, torsoRot, new Vector3f( 0.11f*s,-0.3f*s,-0.22f*s), flRot, new Vector3f(0f,-0.255f*s,0f)));
+        Vector3f frPos  = posePos(pose, RagdollPart.RIGHT_ARM, calcPos(pos, torsoRot, new Vector3f(-0.11f*s,-0.3f*s,-0.22f*s), frRot, new Vector3f(0f,-0.255f*s,0f)));
+        Vector3f blPos  = posePos(pose, RagdollPart.LEFT_LEG, calcPos(pos, torsoRot, new Vector3f( 0.11f*s,-0.3f*s, 0.22f*s), blRot, new Vector3f(0f,-0.255f*s,0f)));
+        Vector3f brPos  = posePos(pose, RagdollPart.RIGHT_LEG, calcPos(pos, torsoRot, new Vector3f(-0.11f*s,-0.3f*s, 0.22f*s), brRot, new Vector3f(0f,-0.255f*s,0f)));
+        parts.add(makePart(world, box(world, new Vector3f(0.3f*s, 0.5f*s,  0.3f*s)),   torsoPos, torsoRot, 10*s, vel));
+        parts.add(makePart(world, box(world, new Vector3f(0.25f*s,0.25f*s, 0.25f*s)),  headPos, headRot,   4*s, vel));
+        parts.add(makePart(world, box(world, new Vector3f(0.12f*s,0.3f*s,  0.12f*s)),  flPos,   flRot,     3*s, vel));
+        parts.add(makePart(world, box(world, new Vector3f(0.12f*s,0.3f*s,  0.12f*s)),  frPos,   frRot,     3*s, vel));
+        parts.add(makePart(world, box(world, new Vector3f(0.12f*s,0.3f*s,  0.12f*s)),  blPos,   blRot,     3*s, vel));
+        parts.add(makePart(world, box(world, new Vector3f(0.12f*s,0.3f*s,  0.12f*s)),  brPos,   brRot,     3*s, vel));
     }
 
     // Bat: one body per wing plus torso and head. The model has no legs, so those slots hold hidden
     // stubs welded inside the torso. Authored at BatRenderer's 0.35 scale to match the live mob.
-    private static void buildBat(DiscreteDynamicsWorld world, List<RigidBody> parts,
+    private static void buildBat(PhysicsWorld world, List<PhysicsBody> parts,
                                  Vector3f pos, Quat4f baseQuat, float s,
                                  Vector3f vel, MobPoseCapture.MobPose pose) {
         final float ns = s * 0.35f; // BatRenderer draws the model at 0.35×
-        Quat4f torsoRot = pose != null ? mul(baseQuat, pose.getRotationQuaternion(RagdollPart.TORSO))     : baseQuat;
-        Quat4f headRot  = pose != null ? mul(baseQuat, pose.getRotationQuaternion(RagdollPart.HEAD))      : baseQuat;
-        Quat4f lwRot    = pose != null ? mul(baseQuat, pose.getRotationQuaternion(RagdollPart.LEFT_ARM))  : baseQuat;
-        Quat4f rwRot    = pose != null ? mul(baseQuat, pose.getRotationQuaternion(RagdollPart.RIGHT_ARM)) : baseQuat;
-        Quat4f lsRot    = pose != null ? mul(baseQuat, pose.getRotationQuaternion(RagdollPart.LEFT_LEG))  : baseQuat;
-        Quat4f rsRot    = pose != null ? mul(baseQuat, pose.getRotationQuaternion(RagdollPart.RIGHT_LEG)) : baseQuat;
+        Quat4f torsoRot = poseRot(pose, RagdollPart.TORSO, baseQuat);
+        Quat4f headRot  = poseRot(pose, RagdollPart.HEAD, baseQuat);
+        Quat4f lwRot    = poseRot(pose, RagdollPart.LEFT_ARM, baseQuat);
+        Quat4f rwRot    = poseRot(pose, RagdollPart.RIGHT_ARM, baseQuat);
+        Quat4f lsRot    = poseRot(pose, RagdollPart.LEFT_LEG, baseQuat);
+        Quat4f rsRot    = poseRot(pose, RagdollPart.RIGHT_LEG, baseQuat);
         Vector3f headPos = calcPos(pos, torsoRot, new Vector3f(0f, 0.625f*ns, 0f),                 headRot, new Vector3f());
         Vector3f lwPos   = calcPos(pos, torsoRot, new Vector3f(-0.4375f*ns, 0.0625f*ns, 0.125f*ns), lwRot,  new Vector3f());
         Vector3f rwPos   = calcPos(pos, torsoRot, new Vector3f( 0.4375f*ns, 0.0625f*ns, 0.125f*ns), rwRot,  new Vector3f());
         Vector3f lsPos   = calcPos(pos, torsoRot, new Vector3f(-0.06f*ns, -0.1f*ns, 0f),             lsRot,  new Vector3f());
         Vector3f rsPos   = calcPos(pos, torsoRot, new Vector3f( 0.06f*ns, -0.1f*ns, 0f),             rsRot,  new Vector3f());
-        parts.add(makePart(world, new BoxShape(new Vector3f(0.1875f*ns, 0.375f*ns,  0.1875f*ns)), pos,     torsoRot, 4*ns,    vel)); // TORSO
-        parts.add(makePart(world, new BoxShape(new Vector3f(0.1875f*ns, 0.1875f*ns, 0.1875f*ns)), headPos, headRot,  2*ns,    vel)); // HEAD
-        parts.add(makePart(world, new BoxShape(new Vector3f(0.05f*ns,   0.05f*ns,   0.05f*ns)),   lsPos,   lsRot,    0.3f*ns, vel)); // LEFT_LEG  stub
-        parts.add(makePart(world, new BoxShape(new Vector3f(0.05f*ns,   0.05f*ns,   0.05f*ns)),   rsPos,   rsRot,    0.3f*ns, vel)); // RIGHT_LEG stub
-        parts.add(makePart(world, new BoxShape(new Vector3f(0.3125f*ns, 0.5f*ns,    0.05f*ns)),   lwPos,   lwRot,    1.5f*ns, vel)); // LEFT_ARM  = left wing (+tip)
-        parts.add(makePart(world, new BoxShape(new Vector3f(0.3125f*ns, 0.5f*ns,    0.05f*ns)),   rwPos,   rwRot,    1.5f*ns, vel)); // RIGHT_ARM = right wing (+tip)
+        parts.add(makePart(world, box(world, new Vector3f(0.1875f*ns, 0.375f*ns,  0.1875f*ns)), pos,     torsoRot, 4*ns,    vel)); // TORSO
+        parts.add(makePart(world, box(world, new Vector3f(0.1875f*ns, 0.1875f*ns, 0.1875f*ns)), headPos, headRot,  2*ns,    vel)); // HEAD
+        parts.add(makePart(world, box(world, new Vector3f(0.05f*ns,   0.05f*ns,   0.05f*ns)),   lsPos,   lsRot,    0.3f*ns, vel)); // LEFT_LEG  stub
+        parts.add(makePart(world, box(world, new Vector3f(0.05f*ns,   0.05f*ns,   0.05f*ns)),   rsPos,   rsRot,    0.3f*ns, vel)); // RIGHT_LEG stub
+        parts.add(makePart(world, box(world, new Vector3f(0.3125f*ns, 0.5f*ns,    0.05f*ns)),   lwPos,   lwRot,    1.5f*ns, vel)); // LEFT_ARM  = left wing (+tip)
+        parts.add(makePart(world, box(world, new Vector3f(0.3125f*ns, 0.5f*ns,    0.05f*ns)),   rwPos,   rwRot,    1.5f*ns, vel)); // RIGHT_ARM = right wing (+tip)
     }
 
     // Bee: torso is the body box with a hidden head stub for the neck joint and the flat wings in the
     // arm slots. Its legs render on the torso, so the leg slots hold hidden stubs. Babies are half scale.
-    private static void buildBee(DiscreteDynamicsWorld world, List<RigidBody> parts,
+    private static void buildBee(PhysicsWorld world, List<PhysicsBody> parts,
                                  Vector3f pos, Quat4f baseQuat, float s,
                                  Vector3f vel, MobPoseCapture.MobPose pose, boolean isBaby) {
         final float ns = isBaby ? s * 0.5f : s;
-        Quat4f torsoRot = pose != null ? mul(baseQuat, pose.getRotationQuaternion(RagdollPart.TORSO))     : baseQuat;
-        Quat4f headRot  = pose != null ? mul(baseQuat, pose.getRotationQuaternion(RagdollPart.HEAD))      : baseQuat;
-        Quat4f lwRot    = pose != null ? mul(baseQuat, pose.getRotationQuaternion(RagdollPart.LEFT_ARM))  : baseQuat;
-        Quat4f rwRot    = pose != null ? mul(baseQuat, pose.getRotationQuaternion(RagdollPart.RIGHT_ARM)) : baseQuat;
-        Quat4f lsRot    = pose != null ? mul(baseQuat, pose.getRotationQuaternion(RagdollPart.LEFT_LEG))  : baseQuat;
-        Quat4f rsRot    = pose != null ? mul(baseQuat, pose.getRotationQuaternion(RagdollPart.RIGHT_LEG)) : baseQuat;
+        Quat4f torsoRot = poseRot(pose, RagdollPart.TORSO, baseQuat);
+        Quat4f headRot  = poseRot(pose, RagdollPart.HEAD, baseQuat);
+        Quat4f lwRot    = poseRot(pose, RagdollPart.LEFT_ARM, baseQuat);
+        Quat4f rwRot    = poseRot(pose, RagdollPart.RIGHT_ARM, baseQuat);
+        Quat4f lsRot    = poseRot(pose, RagdollPart.LEFT_LEG, baseQuat);
+        Quat4f rsRot    = poseRot(pose, RagdollPart.RIGHT_LEG, baseQuat);
         Vector3f headPos = calcPos(pos, torsoRot, new Vector3f(0f, 0.1f*ns, -0.28f*ns),           headRot, new Vector3f());
         Vector3f lwPos   = calcPos(pos, torsoRot, new Vector3f(-0.414f*ns, 0.219f*ns, -0.079f*ns), lwRot,  new Vector3f());
         Vector3f rwPos   = calcPos(pos, torsoRot, new Vector3f( 0.414f*ns, 0.219f*ns, -0.079f*ns), rwRot,  new Vector3f());
         Vector3f lsPos   = calcPos(pos, torsoRot, new Vector3f(-0.06f*ns, -0.05f*ns, 0f),           lsRot,  new Vector3f());
         Vector3f rsPos   = calcPos(pos, torsoRot, new Vector3f( 0.06f*ns, -0.05f*ns, 0f),           rsRot,  new Vector3f());
-        parts.add(makePart(world, new BoxShape(new Vector3f(0.21875f*ns, 0.21875f*ns, 0.3125f*ns)), pos,     torsoRot, 4*ns,    vel)); // TORSO = body
-        parts.add(makePart(world, new BoxShape(new Vector3f(0.08f*ns,    0.08f*ns,    0.08f*ns)),    headPos, headRot,  0.5f*ns, vel)); // HEAD stub
-        parts.add(makePart(world, new BoxShape(new Vector3f(0.05f*ns,    0.05f*ns,    0.05f*ns)),    lsPos,   lsRot,    0.3f*ns, vel)); // LEFT_LEG  stub
-        parts.add(makePart(world, new BoxShape(new Vector3f(0.05f*ns,    0.05f*ns,    0.05f*ns)),    rsPos,   rsRot,    0.3f*ns, vel)); // RIGHT_LEG stub
-        parts.add(makePart(world, new BoxShape(new Vector3f(0.28f*ns,    0.02f*ns,    0.1875f*ns)),  lwPos,   lwRot,    0.5f*ns, vel)); // LEFT_ARM  = left wing
-        parts.add(makePart(world, new BoxShape(new Vector3f(0.28f*ns,    0.02f*ns,    0.1875f*ns)),  rwPos,   rwRot,    0.5f*ns, vel)); // RIGHT_ARM = right wing
+        parts.add(makePart(world, box(world, new Vector3f(0.21875f*ns, 0.21875f*ns, 0.3125f*ns)), pos,     torsoRot, 4*ns,    vel)); // TORSO = body
+        parts.add(makePart(world, box(world, new Vector3f(0.08f*ns,    0.08f*ns,    0.08f*ns)),    headPos, headRot,  0.5f*ns, vel)); // HEAD stub
+        parts.add(makePart(world, box(world, new Vector3f(0.05f*ns,    0.05f*ns,    0.05f*ns)),    lsPos,   lsRot,    0.3f*ns, vel)); // LEFT_LEG  stub
+        parts.add(makePart(world, box(world, new Vector3f(0.05f*ns,    0.05f*ns,    0.05f*ns)),    rsPos,   rsRot,    0.3f*ns, vel)); // RIGHT_LEG stub
+        parts.add(makePart(world, box(world, new Vector3f(0.28f*ns,    0.02f*ns,    0.1875f*ns)),  lwPos,   lwRot,    0.5f*ns, vel)); // LEFT_ARM  = left wing
+        parts.add(makePart(world, box(world, new Vector3f(0.28f*ns,    0.02f*ns,    0.1875f*ns)),  rwPos,   rwRot,    0.5f*ns, vel)); // RIGHT_ARM = right wing
     }
 
-    private static void buildQuadruped(DiscreteDynamicsWorld world, List<RigidBody> parts,
+    private static void buildQuadruped(PhysicsWorld world, List<PhysicsBody> parts,
                                        Vector3f torsoPos, Quat4f baseQuat, float s,
                                        Vector3f vel, MobPoseCapture.MobPose pose,
                                        boolean isChicken, BodyProfile bodyProfile, boolean isBaby) {
-        Quat4f torsoRot = pose != null ? mul(baseQuat, pose.getRotationQuaternion(RagdollPart.TORSO))     : baseQuat;
-        Quat4f headRot  = pose != null ? mul(baseQuat, pose.getRotationQuaternion(RagdollPart.HEAD))      : baseQuat;
-        Quat4f flRot    = pose != null ? mul(baseQuat, pose.getRotationQuaternion(RagdollPart.LEFT_ARM))  : baseQuat;
-        Quat4f frRot    = pose != null ? mul(baseQuat, pose.getRotationQuaternion(RagdollPart.RIGHT_ARM)) : baseQuat;
-        Quat4f blRot    = pose != null ? mul(baseQuat, pose.getRotationQuaternion(RagdollPart.LEFT_LEG))  : baseQuat;
-        Quat4f brRot    = pose != null ? mul(baseQuat, pose.getRotationQuaternion(RagdollPart.RIGHT_LEG)) : baseQuat;
+        Quat4f torsoRot = poseRot(pose, RagdollPart.TORSO, baseQuat);
+        Quat4f headRot  = poseRot(pose, RagdollPart.HEAD, baseQuat);
+        Quat4f flRot    = poseRot(pose, RagdollPart.LEFT_ARM, baseQuat);
+        Quat4f frRot    = poseRot(pose, RagdollPart.RIGHT_ARM, baseQuat);
+        Quat4f blRot    = poseRot(pose, RagdollPart.LEFT_LEG, baseQuat);
+        Quat4f brRot    = poseRot(pose, RagdollPart.RIGHT_LEG, baseQuat);
         if (isChicken) {
             float b = isBaby ? 0.5f : 1.0f;
             float hb = isBaby ? 0.5f : 1.0f;
@@ -344,12 +449,12 @@ public final class RagdollBodyFactory {
             Vector3f rlPos   = calcPos(torsoPos, torsoRot, new Vector3f(-0.1f*b*s,-0.2f*b*s,0f), brRot,   new Vector3f(0f,-0.07f*b*s,0f));
             Vector3f lwPos   = calcPos(torsoPos, torsoRot, new Vector3f( 0.25f*b*s,0.05f*b*s,0f), flRot,  new Vector3f(-0.03f*b*s,0f,0f));
             Vector3f rwPos   = calcPos(torsoPos, torsoRot, new Vector3f(-0.25f*b*s,0.05f*b*s,0f), frRot,  new Vector3f( 0.03f*b*s,0f,0f));
-            parts.add(makePart(world, new BoxShape(new Vector3f(0.2f*b*s,  0.22f*b*s, 0.15f*b*s)), torsoPos, torsoRot, 5*s, vel));
-            parts.add(makePart(world, new BoxShape(new Vector3f(0.12f*s, 0.18f*s, 0.12f*s)), headPos,  headRot,  2*s, vel));
-            parts.add(makePart(world, new BoxShape(new Vector3f(0.06f*b*s, 0.18f*b*s, 0.06f*b*s)), llPos,    blRot,    1*s, vel));
-            parts.add(makePart(world, new BoxShape(new Vector3f(0.06f*b*s, 0.18f*b*s, 0.06f*b*s)), rlPos,    brRot,    1*s, vel));
-            parts.add(makePart(world, new BoxShape(new Vector3f(0.05f*b*s, 0.18f*b*s, 0.12f*b*s)), lwPos,    flRot,    1*s, vel));
-            parts.add(makePart(world, new BoxShape(new Vector3f(0.05f*b*s, 0.18f*b*s, 0.12f*b*s)), rwPos,    frRot,    1*s, vel));
+            parts.add(makePart(world, box(world, new Vector3f(0.2f*b*s,  0.22f*b*s, 0.15f*b*s)), torsoPos, torsoRot, 5*s, vel));
+            parts.add(makePart(world, box(world, new Vector3f(0.12f*s, 0.18f*s, 0.12f*s)), headPos,  headRot,  2*s, vel));
+            parts.add(makePart(world, box(world, new Vector3f(0.06f*b*s, 0.18f*b*s, 0.06f*b*s)), llPos,    blRot,    1*s, vel));
+            parts.add(makePart(world, box(world, new Vector3f(0.06f*b*s, 0.18f*b*s, 0.06f*b*s)), rlPos,    brRot,    1*s, vel));
+            parts.add(makePart(world, box(world, new Vector3f(0.05f*b*s, 0.18f*b*s, 0.12f*b*s)), lwPos,    flRot,    1*s, vel));
+            parts.add(makePart(world, box(world, new Vector3f(0.05f*b*s, 0.18f*b*s, 0.12f*b*s)), rwPos,    frRot,    1*s, vel));
         } else if (isBaby) {
             QuadLayout l = layoutFor(bodyProfile, true);
             buildProfiledQuadruped(world, parts, torsoPos, torsoRot, headRot, flRot, frRot, blRot, brRot, s, vel, l);
@@ -361,7 +466,7 @@ public final class RagdollBodyFactory {
 
     // HorseModel is not a QuadrupedModel: its body, neck/head unit and legs have their own pivots.
     // Horse, donkey, mule and both undead horses share the geometry, differing only in render scale.
-    private static void buildEquine(DiscreteDynamicsWorld world, List<RigidBody> parts,
+    private static void buildEquine(PhysicsWorld world, List<PhysicsBody> parts,
                                     Vector3f torsoPos, Quat4f baseQuat, Vector3f vel,
                                     MobPoseCapture.MobPose pose, BodyProfile profile, boolean isBaby) {
         float rs = equineRenderScale(profile);
@@ -408,12 +513,12 @@ public final class RagdollBodyFactory {
             hrPos = offset(torsoPos, torsoRot, v( 0.09375f*rs, -0.33406f*rs,  0.28125f*rs));
         }
 
-        parts.add(makePart(world, new BoxShape(v(0.3125f*bs*rs, 0.3125f*bs*rs, 0.6875f*bs*rs)), torsoPos, torsoRot, 14f*bs*rs, vel));
-        parts.add(makePart(world, new BoxShape(v(0.22f*hs*rs, 0.59f*hs*rs, 0.44f*hs*rs)), headPos, headRot, 5f*hs*rs, vel));
-        parts.add(makePart(world, new BoxShape(v(0.125f*bs*rs, legHalfY, 0.125f*bs*rs)), hlPos, hlRot, 3f*bs*rs, vel));
-        parts.add(makePart(world, new BoxShape(v(0.125f*bs*rs, legHalfY, 0.125f*bs*rs)), hrPos, hrRot, 3f*bs*rs, vel));
-        parts.add(makePart(world, new BoxShape(v(0.125f*bs*rs, legHalfY, 0.125f*bs*rs)), flPos, flRot, 3f*bs*rs, vel));
-        parts.add(makePart(world, new BoxShape(v(0.125f*bs*rs, legHalfY, 0.125f*bs*rs)), frPos, frRot, 3f*bs*rs, vel));
+        parts.add(makePart(world, box(world, v(0.3125f*bs*rs, 0.3125f*bs*rs, 0.6875f*bs*rs)), torsoPos, torsoRot, 14f*bs*rs, vel));
+        parts.add(makePart(world, box(world, v(0.22f*hs*rs, 0.59f*hs*rs, 0.44f*hs*rs)), headPos, headRot, 5f*hs*rs, vel));
+        parts.add(makePart(world, box(world, v(0.125f*bs*rs, legHalfY, 0.125f*bs*rs)), hlPos, hlRot, 3f*bs*rs, vel));
+        parts.add(makePart(world, box(world, v(0.125f*bs*rs, legHalfY, 0.125f*bs*rs)), hrPos, hrRot, 3f*bs*rs, vel));
+        parts.add(makePart(world, box(world, v(0.125f*bs*rs, legHalfY, 0.125f*bs*rs)), flPos, flRot, 3f*bs*rs, vel));
+        parts.add(makePart(world, box(world, v(0.125f*bs*rs, legHalfY, 0.125f*bs*rs)), frPos, frRot, 3f*bs*rs, vel));
     }
 
     private static float equineRenderScale(BodyProfile profile) {
@@ -550,7 +655,7 @@ public final class RagdollBodyFactory {
         };
     }
 
-    private static void buildProfiledQuadruped(DiscreteDynamicsWorld world, List<RigidBody> parts,
+    private static void buildProfiledQuadruped(PhysicsWorld world, List<PhysicsBody> parts,
                                                Vector3f torsoPos, Quat4f torsoRot, Quat4f headRot,
                                                Quat4f flRot, Quat4f frRot, Quat4f blRot, Quat4f brRot,
                                                float s, Vector3f vel, QuadLayout l) {
@@ -559,32 +664,32 @@ public final class RagdollBodyFactory {
         Vector3f frPos   = calcPos(torsoPos, torsoRot, new Vector3f(-l.legX*s, l.legY*s, -l.frontZ*s), frRot, new Vector3f(0f, l.legCenterY*s, 0f));
         Vector3f blPos   = calcPos(torsoPos, torsoRot, new Vector3f( l.legX*s, l.hindLegY*s,  l.hindZ*s), blRot, new Vector3f(0f, l.hindLegCenterY*s, 0f));
         Vector3f brPos   = calcPos(torsoPos, torsoRot, new Vector3f(-l.legX*s, l.hindLegY*s,  l.hindZ*s), brRot, new Vector3f(0f, l.hindLegCenterY*s, 0f));
-        parts.add(makePart(world, new BoxShape(new Vector3f(l.torsoHalfX*s, l.torsoHalfY*s, l.torsoHalfZ*s)), torsoPos, torsoRot, l.torsoMass*s, vel));
-        parts.add(makePart(world, new BoxShape(new Vector3f(l.headX*s, l.headHalfY*s, l.headHalfZ*s)), headPos, headRot, l.headMass*s, vel));
-        parts.add(makePart(world, new BoxShape(new Vector3f(l.legHalfX*s, l.hindLegHalfY*s, l.legHalfZ*s)), blPos, blRot, l.legMass*s, vel));
-        parts.add(makePart(world, new BoxShape(new Vector3f(l.legHalfX*s, l.hindLegHalfY*s, l.legHalfZ*s)), brPos, brRot, l.legMass*s, vel));
-        parts.add(makePart(world, new BoxShape(new Vector3f(l.legHalfX*s, l.legHalfY*s, l.legHalfZ*s)), flPos, flRot, l.legMass*s, vel));
-        parts.add(makePart(world, new BoxShape(new Vector3f(l.legHalfX*s, l.legHalfY*s, l.legHalfZ*s)), frPos, frRot, l.legMass*s, vel));
+        parts.add(makePart(world, box(world, new Vector3f(l.torsoHalfX*s, l.torsoHalfY*s, l.torsoHalfZ*s)), torsoPos, torsoRot, l.torsoMass*s, vel));
+        parts.add(makePart(world, box(world, new Vector3f(l.headX*s, l.headHalfY*s, l.headHalfZ*s)), headPos, headRot, l.headMass*s, vel));
+        parts.add(makePart(world, box(world, new Vector3f(l.legHalfX*s, l.hindLegHalfY*s, l.legHalfZ*s)), blPos, blRot, l.legMass*s, vel));
+        parts.add(makePart(world, box(world, new Vector3f(l.legHalfX*s, l.hindLegHalfY*s, l.legHalfZ*s)), brPos, brRot, l.legMass*s, vel));
+        parts.add(makePart(world, box(world, new Vector3f(l.legHalfX*s, l.legHalfY*s, l.legHalfZ*s)), flPos, flRot, l.legMass*s, vel));
+        parts.add(makePart(world, box(world, new Vector3f(l.legHalfX*s, l.legHalfY*s, l.legHalfZ*s)), frPos, frRot, l.legMass*s, vel));
     }
 
-    // IronGolemModel is humanoid in topology but not proportions — 30-pixel arms, an 18-pixel torso, a
-    // root above the usual ground plane — so the centres below are exact baked cube unions.
-    private static void buildIronGolem(DiscreteDynamicsWorld world, List<RigidBody> parts,
+    // IronGolemModel is humanoid in topology but not proportions (30-pixel arms, an 18-pixel torso, a
+    // root above the usual ground plane), so the centres below are exact baked cube unions.
+    private static void buildIronGolem(PhysicsWorld world, List<PhysicsBody> parts,
                                        Vector3f torsoPos, Quat4f baseQuat, Vector3f vel) {
         Vector3f headPos = offset(torsoPos, baseQuat, v(0f, 0.828125f, -0.25f));
         Vector3f leftLegPos = offset(torsoPos, baseQuat, v(-0.28125f, -1.015625f, 0f));
         Vector3f rightLegPos = offset(torsoPos, baseQuat, v(0.28125f, -1.015625f, 0f));
         Vector3f leftArmPos = offset(torsoPos, baseQuat, v(-0.6875f, -0.359375f, 0.03125f));
         Vector3f rightArmPos = offset(torsoPos, baseQuat, v(0.6875f, -0.359375f, 0.03125f));
-        parts.add(makePart(world, new BoxShape(v(0.5625f, 0.546875f, 0.34375f)), torsoPos, baseQuat, 25f, vel));
-        parts.add(makePart(world, new BoxShape(v(0.25f, 0.34375f, 0.3125f)), headPos, baseQuat, 8f, vel));
-        parts.add(makePart(world, new BoxShape(v(0.1875f, 0.5f, 0.15625f)), leftLegPos, baseQuat, 10f, vel));
-        parts.add(makePart(world, new BoxShape(v(0.1875f, 0.5f, 0.15625f)), rightLegPos, baseQuat, 10f, vel));
-        parts.add(makePart(world, new BoxShape(v(0.125f, 0.9375f, 0.1875f)), leftArmPos, baseQuat, 10f, vel));
-        parts.add(makePart(world, new BoxShape(v(0.125f, 0.9375f, 0.1875f)), rightArmPos, baseQuat, 10f, vel));
+        parts.add(makePart(world, box(world, v(0.5625f, 0.546875f, 0.34375f)), torsoPos, baseQuat, 25f, vel));
+        parts.add(makePart(world, box(world, v(0.25f, 0.34375f, 0.3125f)), headPos, baseQuat, 8f, vel));
+        parts.add(makePart(world, box(world, v(0.1875f, 0.5f, 0.15625f)), leftLegPos, baseQuat, 10f, vel));
+        parts.add(makePart(world, box(world, v(0.1875f, 0.5f, 0.15625f)), rightLegPos, baseQuat, 10f, vel));
+        parts.add(makePart(world, box(world, v(0.125f, 0.9375f, 0.1875f)), leftArmPos, baseQuat, 10f, vel));
+        parts.add(makePart(world, box(world, v(0.125f, 0.9375f, 0.1875f)), rightArmPos, baseQuat, 10f, vel));
     }
 
-    private static void buildTurtle(DiscreteDynamicsWorld world, List<RigidBody> parts,
+    private static void buildTurtle(PhysicsWorld world, List<PhysicsBody> parts,
                                     Vector3f torsoPos, Quat4f baseQuat, Vector3f vel,
                                     boolean baby) {
         float b = baby ? 1f/6f : 1f;
@@ -594,200 +699,200 @@ public final class RagdollBodyFactory {
         Vector3f rightHind = offset(torsoPos, baseQuat, v(0.21875f*b,-0.1875f*b,0.8125f*b));
         Vector3f leftFront = offset(torsoPos, baseQuat, v(-0.71875f*b,-0.125f*b,-0.40625f*b));
         Vector3f rightFront = offset(torsoPos, baseQuat, v(0.71875f*b,-0.125f*b,-0.40625f*b));
-        parts.add(makePart(world, new BoxShape(v(0.59375f*b,0.28125f*b,0.625f*b)), torsoPos, baseQuat, 9f*b, vel));
-        parts.add(makePart(world, new BoxShape(v(0.1875f*b,0.15625f*b,0.1875f*b)), headPos, baseQuat, 1.5f*b, vel));
-        parts.add(makePart(world, new BoxShape(v(0.125f*b,0.03125f*b,0.3125f*b)), leftHind, baseQuat, 1f*b, vel));
-        parts.add(makePart(world, new BoxShape(v(0.125f*b,0.03125f*b,0.3125f*b)), rightHind, baseQuat, 1f*b, vel));
-        parts.add(makePart(world, new BoxShape(v(0.40625f*b,0.03125f*b,0.15625f*b)), leftFront, baseQuat, 1f*b, vel));
-        parts.add(makePart(world, new BoxShape(v(0.40625f*b,0.03125f*b,0.15625f*b)), rightFront, baseQuat, 1f*b, vel));
+        parts.add(makePart(world, box(world, v(0.59375f*b,0.28125f*b,0.625f*b)), torsoPos, baseQuat, 9f*b, vel));
+        parts.add(makePart(world, box(world, v(0.1875f*b,0.15625f*b,0.1875f*b)), headPos, baseQuat, 1.5f*b, vel));
+        parts.add(makePart(world, box(world, v(0.125f*b,0.03125f*b,0.3125f*b)), leftHind, baseQuat, 1f*b, vel));
+        parts.add(makePart(world, box(world, v(0.125f*b,0.03125f*b,0.3125f*b)), rightHind, baseQuat, 1f*b, vel));
+        parts.add(makePart(world, box(world, v(0.40625f*b,0.03125f*b,0.15625f*b)), leftFront, baseQuat, 1f*b, vel));
+        parts.add(makePart(world, box(world, v(0.40625f*b,0.03125f*b,0.15625f*b)), rightFront, baseQuat, 1f*b, vel));
     }
 
-    private static void buildEnderman(DiscreteDynamicsWorld world, List<RigidBody> parts,
+    private static void buildEnderman(PhysicsWorld world, List<PhysicsBody> parts,
                                       Vector3f torsoPos, Quat4f baseQuat, Vector3f vel) {
-        parts.add(makePart(world, new BoxShape(v(.25f,.375f,.125f)), torsoPos, baseQuat, 7f, vel));
-        parts.add(makePart(world, new BoxShape(v(.25f,.25f,.25f)),
+        parts.add(makePart(world, box(world, v(.25f,.375f,.125f)), torsoPos, baseQuat, 7f, vel));
+        parts.add(makePart(world, box(world, v(.25f,.25f,.25f)),
                 offset(torsoPos,baseQuat,v(0,.5625f,0)), baseQuat, 3f, vel));
-        parts.add(makePart(world, new BoxShape(v(.0625f,.9375f,.0625f)),
+        parts.add(makePart(world, box(world, v(.0625f,.9375f,.0625f)),
                 offset(torsoPos,baseQuat,v(-.125f,-1.125f,0)), baseQuat, 4f, vel));
-        parts.add(makePart(world, new BoxShape(v(.0625f,.9375f,.0625f)),
+        parts.add(makePart(world, box(world, v(.0625f,.9375f,.0625f)),
                 offset(torsoPos,baseQuat,v(.125f,-1.125f,0)), baseQuat, 4f, vel));
-        parts.add(makePart(world, new BoxShape(v(.0625f,.9375f,.0625f)),
+        parts.add(makePart(world, box(world, v(.0625f,.9375f,.0625f)),
                 offset(torsoPos,baseQuat,v(-.3125f,-.5625f,0)), baseQuat, 3.5f, vel));
-        parts.add(makePart(world, new BoxShape(v(.0625f,.9375f,.0625f)),
+        parts.add(makePart(world, box(world, v(.0625f,.9375f,.0625f)),
                 offset(torsoPos,baseQuat,v(.3125f,-.5625f,0)), baseQuat, 3.5f, vel));
     }
 
-    private static void buildCamel(DiscreteDynamicsWorld world, List<RigidBody> parts,
+    private static void buildCamel(PhysicsWorld world, List<PhysicsBody> parts,
                                    Vector3f torsoPos, Quat4f q, Vector3f vel, boolean baby) {
         float b=baby?.45f:1f;
-        parts.add(makePart(world,new BoxShape(v(.46875f*b,.375f*b,.84375f*b)),torsoPos,q,18f*b,vel));
-        parts.add(makePart(world,new BoxShape(v(.21875f*b,.6875f*b,.78125f*b)),offset(torsoPos,q,v(0,.4375f*b,-1.125f*b)),q,6f*b,vel));
-        parts.add(makePart(world,new BoxShape(v(.15625f*b,.65625f*b,.15625f*b)),offset(torsoPos,q,v(-.30625f*b,-.96875f*b,.625f*b)),q,4f*b,vel));
-        parts.add(makePart(world,new BoxShape(v(.15625f*b,.65625f*b,.15625f*b)),offset(torsoPos,q,v(.30625f*b,-.96875f*b,.625f*b)),q,4f*b,vel));
-        parts.add(makePart(world,new BoxShape(v(.15625f*b,.65625f*b,.15625f*b)),offset(torsoPos,q,v(-.30625f*b,-.96875f*b,-.625f*b)),q,4f*b,vel));
-        parts.add(makePart(world,new BoxShape(v(.15625f*b,.65625f*b,.15625f*b)),offset(torsoPos,q,v(.30625f*b,-.96875f*b,-.625f*b)),q,4f*b,vel));
+        parts.add(makePart(world,box(world,v(.46875f*b,.375f*b,.84375f*b)),torsoPos,q,18f*b,vel));
+        parts.add(makePart(world,box(world,v(.21875f*b,.6875f*b,.78125f*b)),offset(torsoPos,q,v(0,.4375f*b,-1.125f*b)),q,6f*b,vel));
+        parts.add(makePart(world,box(world,v(.15625f*b,.65625f*b,.15625f*b)),offset(torsoPos,q,v(-.30625f*b,-.96875f*b,.625f*b)),q,4f*b,vel));
+        parts.add(makePart(world,box(world,v(.15625f*b,.65625f*b,.15625f*b)),offset(torsoPos,q,v(.30625f*b,-.96875f*b,.625f*b)),q,4f*b,vel));
+        parts.add(makePart(world,box(world,v(.15625f*b,.65625f*b,.15625f*b)),offset(torsoPos,q,v(-.30625f*b,-.96875f*b,-.625f*b)),q,4f*b,vel));
+        parts.add(makePart(world,box(world,v(.15625f*b,.65625f*b,.15625f*b)),offset(torsoPos,q,v(.30625f*b,-.96875f*b,-.625f*b)),q,4f*b,vel));
     }
 
-    private static void buildLlama(DiscreteDynamicsWorld world, List<RigidBody> parts,
+    private static void buildLlama(PhysicsWorld world, List<PhysicsBody> parts,
                                    Vector3f torsoPos, Quat4f q, Vector3f vel, boolean baby) {
         if (!baby) {
-            parts.add(makePart(world,new BoxShape(v(.375f,.3125f,.5625f)),torsoPos,q,11f,vel));
-            parts.add(makePart(world,new BoxShape(v(.25f,.65625f,.3125f)),offset(torsoPos,q,v(0,.53125f,-.75f)),q,4f,vel));
-            parts.add(makePart(world,new BoxShape(v(.125f,.4375f,.125f)),offset(torsoPos,q,v(-.21875f,-.625f,.3125f)),q,2.5f,vel));
-            parts.add(makePart(world,new BoxShape(v(.125f,.4375f,.125f)),offset(torsoPos,q,v(.21875f,-.625f,.3125f)),q,2.5f,vel));
-            parts.add(makePart(world,new BoxShape(v(.125f,.4375f,.125f)),offset(torsoPos,q,v(-.21875f,-.625f,-.375f)),q,2.5f,vel));
-            parts.add(makePart(world,new BoxShape(v(.125f,.4375f,.125f)),offset(torsoPos,q,v(.21875f,-.625f,-.375f)),q,2.5f,vel));
+            parts.add(makePart(world,box(world,v(.375f,.3125f,.5625f)),torsoPos,q,11f,vel));
+            parts.add(makePart(world,box(world,v(.25f,.65625f,.3125f)),offset(torsoPos,q,v(0,.53125f,-.75f)),q,4f,vel));
+            parts.add(makePart(world,box(world,v(.125f,.4375f,.125f)),offset(torsoPos,q,v(-.21875f,-.625f,.3125f)),q,2.5f,vel));
+            parts.add(makePart(world,box(world,v(.125f,.4375f,.125f)),offset(torsoPos,q,v(.21875f,-.625f,.3125f)),q,2.5f,vel));
+            parts.add(makePart(world,box(world,v(.125f,.4375f,.125f)),offset(torsoPos,q,v(-.21875f,-.625f,-.375f)),q,2.5f,vel));
+            parts.add(makePart(world,box(world,v(.125f,.4375f,.125f)),offset(torsoPos,q,v(.21875f,-.625f,-.375f)),q,2.5f,vel));
         } else {
-            parts.add(makePart(world,new BoxShape(v(.234375f,.142045f,.255682f)),torsoPos,q,5f,vel));
-            parts.add(makePart(world,new BoxShape(v(.178571f,.426136f,.248016f)),offset(torsoPos,q,v(0,.34494f,-.39944f)),q,2f,vel));
-            parts.add(makePart(world,new BoxShape(v(.056818f,.180785f,.056818f)),offset(torsoPos,q,v(-.099432f,-.15496f,.142045f)),q,1f,vel));
-            parts.add(makePart(world,new BoxShape(v(.056818f,.180785f,.056818f)),offset(torsoPos,q,v(.099432f,-.15496f,.142045f)),q,1f,vel));
-            parts.add(makePart(world,new BoxShape(v(.056818f,.180785f,.056818f)),offset(torsoPos,q,v(-.099432f,-.15496f,-.170455f)),q,1f,vel));
-            parts.add(makePart(world,new BoxShape(v(.056818f,.180785f,.056818f)),offset(torsoPos,q,v(.099432f,-.15496f,-.170455f)),q,1f,vel));
+            parts.add(makePart(world,box(world,v(.234375f,.142045f,.255682f)),torsoPos,q,5f,vel));
+            parts.add(makePart(world,box(world,v(.178571f,.426136f,.248016f)),offset(torsoPos,q,v(0,.34494f,-.39944f)),q,2f,vel));
+            parts.add(makePart(world,box(world,v(.056818f,.180785f,.056818f)),offset(torsoPos,q,v(-.099432f,-.15496f,.142045f)),q,1f,vel));
+            parts.add(makePart(world,box(world,v(.056818f,.180785f,.056818f)),offset(torsoPos,q,v(.099432f,-.15496f,.142045f)),q,1f,vel));
+            parts.add(makePart(world,box(world,v(.056818f,.180785f,.056818f)),offset(torsoPos,q,v(-.099432f,-.15496f,-.170455f)),q,1f,vel));
+            parts.add(makePart(world,box(world,v(.056818f,.180785f,.056818f)),offset(torsoPos,q,v(.099432f,-.15496f,-.170455f)),q,1f,vel));
         }
     }
 
-    private static void buildRabbit(DiscreteDynamicsWorld world, List<RigidBody> parts,
+    private static void buildRabbit(PhysicsWorld world, List<PhysicsBody> parts,
                                     Vector3f torsoPos, Quat4f q, Vector3f vel, boolean baby) {
         float bs=baby?.4f:.6f, hs=baby?.5666667f:.6f;
         float headY=baby?.1575f:.141f, headZ=baby?-.1314f:-.2487f;
         float hindX=baby?-.075f:-.1125f, hindY=baby?-.07475f:-.112f, hindZ=baby?.03175f:.0476f;
         float frontX=baby?-.075f:-.1125f, frontY=baby?-.067f:-.10075f, frontZ=baby?-.1185f:-.1777f;
-        parts.add(makePart(world,new BoxShape(v(.1875f*bs,.15625f*bs,.3125f*bs)),torsoPos,q,2.5f*bs,vel));
-        parts.add(makePart(world,new BoxShape(v(.2f*hs,.28125f*hs,.2f*hs)),offset(torsoPos,q,v(0,headY,headZ)),q,1f*hs,vel));
-        parts.add(makePart(world,new BoxShape(v(.125f*bs,.30f*bs,.35f*bs)),offset(torsoPos,q,v(hindX,hindY,hindZ)),q,.8f*bs,vel));
-        parts.add(makePart(world,new BoxShape(v(.125f*bs,.30f*bs,.35f*bs)),offset(torsoPos,q,v(-hindX,hindY,hindZ)),q,.8f*bs,vel));
-        parts.add(makePart(world,new BoxShape(v(.0625f*bs,.21875f*bs,.08333f*bs)),offset(torsoPos,q,v(frontX,frontY,frontZ)),q,.5f*bs,vel));
-        parts.add(makePart(world,new BoxShape(v(.0625f*bs,.21875f*bs,.08333f*bs)),offset(torsoPos,q,v(-frontX,frontY,frontZ)),q,.5f*bs,vel));
+        parts.add(makePart(world,box(world,v(.1875f*bs,.15625f*bs,.3125f*bs)),torsoPos,q,2.5f*bs,vel));
+        parts.add(makePart(world,box(world,v(.2f*hs,.28125f*hs,.2f*hs)),offset(torsoPos,q,v(0,headY,headZ)),q,1f*hs,vel));
+        parts.add(makePart(world,box(world,v(.125f*bs,.30f*bs,.35f*bs)),offset(torsoPos,q,v(hindX,hindY,hindZ)),q,.8f*bs,vel));
+        parts.add(makePart(world,box(world,v(.125f*bs,.30f*bs,.35f*bs)),offset(torsoPos,q,v(-hindX,hindY,hindZ)),q,.8f*bs,vel));
+        parts.add(makePart(world,box(world,v(.0625f*bs,.21875f*bs,.08333f*bs)),offset(torsoPos,q,v(frontX,frontY,frontZ)),q,.5f*bs,vel));
+        parts.add(makePart(world,box(world,v(.0625f*bs,.21875f*bs,.08333f*bs)),offset(torsoPos,q,v(-frontX,frontY,frontZ)),q,.5f*bs,vel));
     }
 
-    private static void buildFrog(DiscreteDynamicsWorld world, List<RigidBody> parts,
+    private static void buildFrog(PhysicsWorld world, List<PhysicsBody> parts,
                                   Vector3f torsoPos, Quat4f q, Vector3f vel) {
-        parts.add(makePart(world,new BoxShape(v(.21875f,.09375f,.28125f)),torsoPos,q,2f,vel));
+        parts.add(makePart(world,box(world,v(.21875f,.09375f,.28125f)),torsoPos,q,2f,vel));
         // Hands and feet are zero-thickness planes in FrogModel; colliding as full footprints made every
         // limb overlap the torso, so the solid cubes are used while the planes still render.
-        parts.add(makePart(world,new BoxShape(v(.21875f,.09375f,.28125f)),offset(torsoPos,q,v(0,.125f,0)),q,1f,vel));
-        parts.add(makePart(world,new BoxShape(v(.09375f,.09375f,.125f)),offset(torsoPos,q,v(-.25f,-.0625f,.21875f)),q,.5f,vel));
-        parts.add(makePart(world,new BoxShape(v(.09375f,.09375f,.125f)),offset(torsoPos,q,v(.25f,-.0625f,.21875f)),q,.5f,vel));
-        parts.add(makePart(world,new BoxShape(v(.0625f,.09375f,.09375f)),offset(torsoPos,q,v(-.25f,-.0625f,-.15625f)),q,.5f,vel));
-        parts.add(makePart(world,new BoxShape(v(.0625f,.09375f,.09375f)),offset(torsoPos,q,v(.25f,-.0625f,-.15625f)),q,.5f,vel));
+        parts.add(makePart(world,box(world,v(.21875f,.09375f,.28125f)),offset(torsoPos,q,v(0,.125f,0)),q,1f,vel));
+        parts.add(makePart(world,box(world,v(.09375f,.09375f,.125f)),offset(torsoPos,q,v(-.25f,-.0625f,.21875f)),q,.5f,vel));
+        parts.add(makePart(world,box(world,v(.09375f,.09375f,.125f)),offset(torsoPos,q,v(.25f,-.0625f,.21875f)),q,.5f,vel));
+        parts.add(makePart(world,box(world,v(.0625f,.09375f,.09375f)),offset(torsoPos,q,v(-.25f,-.0625f,-.15625f)),q,.5f,vel));
+        parts.add(makePart(world,box(world,v(.0625f,.09375f,.09375f)),offset(torsoPos,q,v(.25f,-.0625f,-.15625f)),q,.5f,vel));
     }
 
-    private static void buildHoglin(DiscreteDynamicsWorld world,List<RigidBody> parts,
+    private static void buildHoglin(PhysicsWorld world,List<PhysicsBody> parts,
             Vector3f p,Quat4f q,Vector3f vel,boolean baby){
         float bs=baby?.5f:1f,hs=baby?(1.5f/1.9f):1f;
         float hy=baby?.1163f:-.1423f,hz=baby?-.5974f:-1.1317f;
-        parts.add(makePart(world,new BoxShape(v(.5f*bs,.4375f*bs,.8125f*bs)),p,q,18f*bs,vel));
+        parts.add(makePart(world,box(world,v(.5f*bs,.4375f*bs,.8125f*bs)),p,q,18f*bs,vel));
         // Head cube rotated by vanilla's 50-degree resting pitch, represented by its exact AABB.
-        parts.add(makePart(world,new BoxShape(v(.4375f*hs,.5751f*hs,.5251f*hs)),offset(p,q,v(0,hy,hz)),q,7f*hs,vel));
-        parts.add(makePart(world,new BoxShape(v(.15625f*bs,.34375f*bs,.15625f*bs)),offset(p,q,v(-.15625f*bs,-.71875f*bs,.625f*bs)),q,3f*bs,vel));
-        parts.add(makePart(world,new BoxShape(v(.15625f*bs,.34375f*bs,.15625f*bs)),offset(p,q,v(.15625f*bs,-.71875f*bs,.625f*bs)),q,3f*bs,vel));
-        parts.add(makePart(world,new BoxShape(v(.1875f*bs,.4375f*bs,.1875f*bs)),offset(p,q,v(-.25f*bs,-.625f*bs,-.53125f*bs)),q,4f*bs,vel));
-        parts.add(makePart(world,new BoxShape(v(.1875f*bs,.4375f*bs,.1875f*bs)),offset(p,q,v(.25f*bs,-.625f*bs,-.53125f*bs)),q,4f*bs,vel));
+        parts.add(makePart(world,box(world,v(.4375f*hs,.5751f*hs,.5251f*hs)),offset(p,q,v(0,hy,hz)),q,7f*hs,vel));
+        parts.add(makePart(world,box(world,v(.15625f*bs,.34375f*bs,.15625f*bs)),offset(p,q,v(-.15625f*bs,-.71875f*bs,.625f*bs)),q,3f*bs,vel));
+        parts.add(makePart(world,box(world,v(.15625f*bs,.34375f*bs,.15625f*bs)),offset(p,q,v(.15625f*bs,-.71875f*bs,.625f*bs)),q,3f*bs,vel));
+        parts.add(makePart(world,box(world,v(.1875f*bs,.4375f*bs,.1875f*bs)),offset(p,q,v(-.25f*bs,-.625f*bs,-.53125f*bs)),q,4f*bs,vel));
+        parts.add(makePart(world,box(world,v(.1875f*bs,.4375f*bs,.1875f*bs)),offset(p,q,v(.25f*bs,-.625f*bs,-.53125f*bs)),q,4f*bs,vel));
     }
 
-    private static void buildSniffer(DiscreteDynamicsWorld world,List<RigidBody> parts,
+    private static void buildSniffer(PhysicsWorld world,List<PhysicsBody> parts,
             Vector3f p,Quat4f q,Vector3f vel,boolean baby){
         float bs=baby?.5f:1f,hs=baby?.6f:1f;
-        parts.add(makePart(world,new BoxShape(v(.78125f*bs,.90625f*bs,1.25f*bs)),p,q,28f*bs,vel));
-        parts.add(makePart(world,new BoxShape(v(.469375f*hs,.59375f*hs,.625f*hs)),
+        parts.add(makePart(world,box(world,v(.78125f*bs,.90625f*bs,1.25f*bs)),p,q,28f*bs,vel));
+        parts.add(makePart(world,box(world,v(.469375f*hs,.59375f*hs,.625f*hs)),
                 offset(p,q,baby?v(0,-.28125f,-.905625f):v(0,-.5f,-1.87375f)),q,8f*hs,vel));
         // Six rendered legs share four physics limbs: front and hind articulate; the middle
         // pair remains attached to the torso in the renderer.
         float lx=.46875f*bs,ly=-.84375f*bs;
-        parts.add(makePart(world,new BoxShape(v(.21875f*bs,.3125f*bs,.25f*bs)),offset(p,q,v(-lx,ly,.9375f*bs)),q,4f*bs,vel));
-        parts.add(makePart(world,new BoxShape(v(.21875f*bs,.3125f*bs,.25f*bs)),offset(p,q,v(lx,ly,.9375f*bs)),q,4f*bs,vel));
-        parts.add(makePart(world,new BoxShape(v(.21875f*bs,.3125f*bs,.25f*bs)),offset(p,q,v(-lx,ly,-.9375f*bs)),q,4f*bs,vel));
-        parts.add(makePart(world,new BoxShape(v(.21875f*bs,.3125f*bs,.25f*bs)),offset(p,q,v(lx,ly,-.9375f*bs)),q,4f*bs,vel));
+        parts.add(makePart(world,box(world,v(.21875f*bs,.3125f*bs,.25f*bs)),offset(p,q,v(-lx,ly,.9375f*bs)),q,4f*bs,vel));
+        parts.add(makePart(world,box(world,v(.21875f*bs,.3125f*bs,.25f*bs)),offset(p,q,v(lx,ly,.9375f*bs)),q,4f*bs,vel));
+        parts.add(makePart(world,box(world,v(.21875f*bs,.3125f*bs,.25f*bs)),offset(p,q,v(-lx,ly,-.9375f*bs)),q,4f*bs,vel));
+        parts.add(makePart(world,box(world,v(.21875f*bs,.3125f*bs,.25f*bs)),offset(p,q,v(lx,ly,-.9375f*bs)),q,4f*bs,vel));
     }
 
-    private static void buildRavager(DiscreteDynamicsWorld world,List<RigidBody> parts,
+    private static void buildRavager(PhysicsWorld world,List<PhysicsBody> parts,
             Vector3f p,Quat4f q,Vector3f vel){
-        parts.add(makePart(world,new BoxShape(v(.4375f,.625f,.90625f)),p,q,32f,vel));
+        parts.add(makePart(world,box(world,v(.4375f,.625f,.90625f)),p,q,32f,vel));
         // Use the solid head cube: the whole neck/head subtree AABB reached back through both front legs,
         // and those unconnected bodies expelled one another and flipped the ragdoll.
-        parts.add(makePart(world,new BoxShape(v(.5f,.625f,.5f)),offset(p,q,v(0,-.0625f,-1.5f)),q,13f,vel));
-        parts.add(makePart(world,new BoxShape(v(.25f,1.15625f,.25f)),offset(p,q,v(-.5f,-.46875f,.71875f)),q,8f,vel));
-        parts.add(makePart(world,new BoxShape(v(.25f,1.15625f,.25f)),offset(p,q,v(.5f,-.46875f,.71875f)),q,8f,vel));
-        parts.add(makePart(world,new BoxShape(v(.25f,1.15625f,.25f)),offset(p,q,v(-.5f,-.46875f,-.71875f)),q,8f,vel));
-        parts.add(makePart(world,new BoxShape(v(.25f,1.15625f,.25f)),offset(p,q,v(.5f,-.46875f,-.71875f)),q,8f,vel));
+        parts.add(makePart(world,box(world,v(.5f,.625f,.5f)),offset(p,q,v(0,-.0625f,-1.5f)),q,13f,vel));
+        parts.add(makePart(world,box(world,v(.25f,1.15625f,.25f)),offset(p,q,v(-.5f,-.46875f,.71875f)),q,8f,vel));
+        parts.add(makePart(world,box(world,v(.25f,1.15625f,.25f)),offset(p,q,v(.5f,-.46875f,.71875f)),q,8f,vel));
+        parts.add(makePart(world,box(world,v(.25f,1.15625f,.25f)),offset(p,q,v(-.5f,-.46875f,-.71875f)),q,8f,vel));
+        parts.add(makePart(world,box(world,v(.25f,1.15625f,.25f)),offset(p,q,v(.5f,-.46875f,-.71875f)),q,8f,vel));
     }
 
-    private static void buildPhantom(DiscreteDynamicsWorld world,List<RigidBody> parts,
+    private static void buildPhantom(PhysicsWorld world,List<PhysicsBody> parts,
             Vector3f p,Quat4f q,Vector3f vel,float s){
-        parts.add(makePart(world,new BoxShape(v(.15625f*s,.09375f*s,.28125f*s)),p,q,5f*s,vel));
-        parts.add(makePart(world,new BoxShape(v(.21875f*s,.09375f*s,.15625f*s)),offset(p,q,v(0,-.0625f*s,-.375f*s)),q,2f*s,vel));
-        parts.add(makePart(world,new BoxShape(v(.09375f*s,.0625f*s,.1875f*s)),offset(p,q,v(0,.03125f*s,.46875f*s)),q,.7f*s,vel));
-        parts.add(makePart(world,new BoxShape(v(.03125f*s,.03125f*s,.1875f*s)),offset(p,q,v(0,.03125f*s,.84375f*s)),q,.5f*s,vel));
-        parts.add(makePart(world,new BoxShape(v(.59375f*s,.0625f*s,.28125f*s)),offset(p,q,v(-.75f*s,.03125f*s,0)),q,2f*s,vel));
-        parts.add(makePart(world,new BoxShape(v(.59375f*s,.0625f*s,.28125f*s)),offset(p,q,v(.75f*s,.03125f*s,0)),q,2f*s,vel));
+        parts.add(makePart(world,box(world,v(.15625f*s,.09375f*s,.28125f*s)),p,q,5f*s,vel));
+        parts.add(makePart(world,box(world,v(.21875f*s,.09375f*s,.15625f*s)),offset(p,q,v(0,-.0625f*s,-.375f*s)),q,2f*s,vel));
+        parts.add(makePart(world,box(world,v(.09375f*s,.0625f*s,.1875f*s)),offset(p,q,v(0,.03125f*s,.46875f*s)),q,.7f*s,vel));
+        parts.add(makePart(world,box(world,v(.03125f*s,.03125f*s,.1875f*s)),offset(p,q,v(0,.03125f*s,.84375f*s)),q,.5f*s,vel));
+        parts.add(makePart(world,box(world,v(.59375f*s,.0625f*s,.28125f*s)),offset(p,q,v(-.75f*s,.03125f*s,0)),q,2f*s,vel));
+        parts.add(makePart(world,box(world,v(.59375f*s,.0625f*s,.28125f*s)),offset(p,q,v(.75f*s,.03125f*s,0)),q,2f*s,vel));
     }
 
-    private static void buildParrot(DiscreteDynamicsWorld world,List<RigidBody> parts,
+    private static void buildParrot(PhysicsWorld world,List<PhysicsBody> parts,
             Vector3f p,Quat4f q,Vector3f vel){
-        parts.add(makePart(world,new BoxShape(v(.09375f,.1875f,.09375f)),p,q,1.2f,vel));
-        parts.add(makePart(world,new BoxShape(v(.09375f,.1875f,.1875f)),offset(p,q,v(0,.238125f,.015f)),q,.5f,vel));
-        parts.add(makePart(world,new BoxShape(v(.03125f,.0625f,.03125f)),offset(p,q,v(-.0625f,-.21875f,.121875f)),q,.2f,vel));
-        parts.add(makePart(world,new BoxShape(v(.03125f,.0625f,.03125f)),offset(p,q,v(.0625f,-.21875f,.121875f)),q,.2f,vel));
-        parts.add(makePart(world,new BoxShape(v(.03125f,.15625f,.09375f)),offset(p,q,v(-.09375f,.00375f,.015f)),q,.25f,vel));
-        parts.add(makePart(world,new BoxShape(v(.03125f,.15625f,.09375f)),offset(p,q,v(.09375f,.00375f,.015f)),q,.25f,vel));
+        parts.add(makePart(world,box(world,v(.09375f,.1875f,.09375f)),p,q,1.2f,vel));
+        parts.add(makePart(world,box(world,v(.09375f,.1875f,.1875f)),offset(p,q,v(0,.238125f,.015f)),q,.5f,vel));
+        parts.add(makePart(world,box(world,v(.03125f,.0625f,.03125f)),offset(p,q,v(-.0625f,-.21875f,.121875f)),q,.2f,vel));
+        parts.add(makePart(world,box(world,v(.03125f,.0625f,.03125f)),offset(p,q,v(.0625f,-.21875f,.121875f)),q,.2f,vel));
+        parts.add(makePart(world,box(world,v(.03125f,.15625f,.09375f)),offset(p,q,v(-.09375f,.00375f,.015f)),q,.25f,vel));
+        parts.add(makePart(world,box(world,v(.03125f,.15625f,.09375f)),offset(p,q,v(.09375f,.00375f,.015f)),q,.25f,vel));
     }
 
-    private static void buildCubeMob(DiscreteDynamicsWorld world,List<RigidBody> parts,
+    private static void buildCubeMob(PhysicsWorld world,List<PhysicsBody> parts,
             Vector3f p,Quat4f q,Vector3f vel){
-        parts.add(makePart(world,new BoxShape(v(.25f,.25f,.25f)),p,q,2f,vel));
+        parts.add(makePart(world,box(world,v(.25f,.25f,.25f)),p,q,2f,vel));
         for(int i=1;i<6;i++){
-            RigidBody proxy=makePart(world,new BoxShape(v(.005f,.005f,.005f)),p,q,.01f,vel);
-            proxy.setCollisionFlags(proxy.getCollisionFlags()|CollisionFlags.NO_CONTACT_RESPONSE);
+            PhysicsBody proxy=makePart(world,box(world,v(.005f,.005f,.005f)),p,q,.01f,vel);
+            proxy.setContactResponse(false);
             parts.add(proxy);
         }
     }
 
-    private static RigidBody proxy(DiscreteDynamicsWorld w,Vector3f p,Quat4f q,Vector3f vel){
-        RigidBody b=makePart(w,new BoxShape(v(.005f,.005f,.005f)),p,q,.01f,vel);
-        b.setCollisionFlags(b.getCollisionFlags()|CollisionFlags.NO_CONTACT_RESPONSE);return b;
+    private static PhysicsBody proxy(PhysicsWorld w,Vector3f p,Quat4f q,Vector3f vel){
+        PhysicsBody b=makePart(w,box(w,v(.005f,.005f,.005f)),p,q,.01f,vel);
+        b.setContactResponse(false);return b;
     }
 
-    private static void buildSilverfish(DiscreteDynamicsWorld w,List<RigidBody> a,Vector3f p,Quat4f q,Vector3f vel){
-        a.add(makePart(w,new BoxShape(v(.1875f,.125f,.09375f)),p,q,1.2f,vel));
-        a.add(makePart(w,new BoxShape(v(.125f,.09375f,.125f)),offset(p,q,v(0,-.03125f,-.21875f)),q,.6f,vel));
-        a.add(makePart(w,new BoxShape(v(.09375f,.09375f,.09375f)),offset(p,q,v(0,-.03125f,.1875f)),q,.4f,vel));
-        a.add(makePart(w,new BoxShape(v(.0625f,.0625f,.09375f)),offset(p,q,v(0,-.0625f,.375f)),q,.3f,vel));
-        a.add(makePart(w,new BoxShape(v(.0625f,.03125f,.0625f)),offset(p,q,v(0,-.09375f,.53125f)),q,.2f,vel));
-        a.add(makePart(w,new BoxShape(v(.03125f,.03125f,.0625f)),offset(p,q,v(0,-.09375f,.65625f)),q,.15f,vel));
+    private static void buildSilverfish(PhysicsWorld w,List<PhysicsBody> a,Vector3f p,Quat4f q,Vector3f vel){
+        a.add(makePart(w,box(w,v(.1875f,.125f,.09375f)),p,q,1.2f,vel));
+        a.add(makePart(w,box(w,v(.125f,.09375f,.125f)),offset(p,q,v(0,-.03125f,-.21875f)),q,.6f,vel));
+        a.add(makePart(w,box(w,v(.09375f,.09375f,.09375f)),offset(p,q,v(0,-.03125f,.1875f)),q,.4f,vel));
+        a.add(makePart(w,box(w,v(.0625f,.0625f,.09375f)),offset(p,q,v(0,-.0625f,.375f)),q,.3f,vel));
+        a.add(makePart(w,box(w,v(.0625f,.03125f,.0625f)),offset(p,q,v(0,-.09375f,.53125f)),q,.2f,vel));
+        a.add(makePart(w,box(w,v(.03125f,.03125f,.0625f)),offset(p,q,v(0,-.09375f,.65625f)),q,.15f,vel));
     }
 
-    private static void buildEndermite(DiscreteDynamicsWorld w,List<RigidBody> a,Vector3f p,Quat4f q,Vector3f vel){
-        a.add(makePart(w,new BoxShape(v(.1875f,.125f,.15625f)),p,q,1f,vel));
-        a.add(makePart(w,new BoxShape(v(.125f,.09375f,.0625f)),offset(p,q,v(0,-.03125f,-.21875f)),q,.5f,vel));
-        a.add(makePart(w,new BoxShape(v(.09375f,.09375f,.03125f)),offset(p,q,v(0,-.03125f,.1875f)),q,.3f,vel));
-        a.add(makePart(w,new BoxShape(v(.03125f,.0625f,.03125f)),offset(p,q,v(0,-.0625f,.25f)),q,.15f,vel));
+    private static void buildEndermite(PhysicsWorld w,List<PhysicsBody> a,Vector3f p,Quat4f q,Vector3f vel){
+        a.add(makePart(w,box(w,v(.1875f,.125f,.15625f)),p,q,1f,vel));
+        a.add(makePart(w,box(w,v(.125f,.09375f,.0625f)),offset(p,q,v(0,-.03125f,-.21875f)),q,.5f,vel));
+        a.add(makePart(w,box(w,v(.09375f,.09375f,.03125f)),offset(p,q,v(0,-.03125f,.1875f)),q,.3f,vel));
+        a.add(makePart(w,box(w,v(.03125f,.0625f,.03125f)),offset(p,q,v(0,-.0625f,.25f)),q,.15f,vel));
         a.add(proxy(w,p,q,vel));a.add(proxy(w,p,q,vel));
     }
 
-    private static void buildAllay(DiscreteDynamicsWorld w,List<RigidBody> a,Vector3f p,Quat4f q,Vector3f vel){
-        a.add(makePart(w,new BoxShape(v(.09375f,.1625f,.06875f)),p,q,1f,vel));
-        a.add(makePart(w,new BoxShape(v(.15625f,.15625f,.15625f)),offset(p,q,v(0,.311875f,0)),q,.6f,vel));
+    private static void buildAllay(PhysicsWorld w,List<PhysicsBody> a,Vector3f p,Quat4f q,Vector3f vel){
+        a.add(makePart(w,box(w,v(.09375f,.1625f,.06875f)),p,q,1f,vel));
+        a.add(makePart(w,box(w,v(.15625f,.15625f,.15625f)),offset(p,q,v(0,.311875f,0)),q,.6f,vel));
         // Wings are zero-thickness decorative planes. Giving them colliders makes the tiny
         // Allay skeleton lever itself apart, so their reserved slots are non-contact proxies.
         a.add(proxy(w,p,q,vel));
         a.add(proxy(w,p,q,vel));
-        a.add(makePart(w,new BoxShape(v(.03125f,.125f,.0625f)),offset(p,q,v(-.125f,.03125f,0)),q,.25f,vel));
-        a.add(makePart(w,new BoxShape(v(.03125f,.125f,.0625f)),offset(p,q,v(.125f,.03125f,0)),q,.25f,vel));
+        a.add(makePart(w,box(w,v(.03125f,.125f,.0625f)),offset(p,q,v(-.125f,.03125f,0)),q,.25f,vel));
+        a.add(makePart(w,box(w,v(.03125f,.125f,.0625f)),offset(p,q,v(.125f,.03125f,0)),q,.25f,vel));
     }
 
-    private static void buildStrider(DiscreteDynamicsWorld w,List<RigidBody> a,Vector3f p,Quat4f q,Vector3f vel,boolean baby){
-        float s=baby?.5f:1f;a.add(makePart(w,new BoxShape(v(.5f*s,.4375f*s,.5f*s)),p,q,8f*s,vel));
+    private static void buildStrider(PhysicsWorld w,List<PhysicsBody> a,Vector3f p,Quat4f q,Vector3f vel,boolean baby){
+        float s=baby?.5f:1f;a.add(makePart(w,box(w,v(.5f*s,.4375f*s,.5f*s)),p,q,8f*s,vel));
         a.add(proxy(w,p,q,vel));
-        a.add(makePart(w,new BoxShape(v(.125f*s,.5f*s,.125f*s)),offset(p,q,v(-.25f*s,-.8125f*s,0)),q,2f*s,vel));
-        a.add(makePart(w,new BoxShape(v(.125f*s,.5f*s,.125f*s)),offset(p,q,v(.25f*s,-.8125f*s,0)),q,2f*s,vel));
+        a.add(makePart(w,box(w,v(.125f*s,.5f*s,.125f*s)),offset(p,q,v(-.25f*s,-.8125f*s,0)),q,2f*s,vel));
+        a.add(makePart(w,box(w,v(.125f*s,.5f*s,.125f*s)),offset(p,q,v(.25f*s,-.8125f*s,0)),q,2f*s,vel));
         a.add(proxy(w,p,q,vel));a.add(proxy(w,p,q,vel));
     }
 
-    private static void buildSnowGolem(DiscreteDynamicsWorld w,List<RigidBody> a,Vector3f p,Quat4f q,Vector3f vel){
-        a.add(makePart(w,new BoxShape(v(.28125f,.28125f,.28125f)),p,q,4f,vel));
-        a.add(makePart(w,new BoxShape(v(.21875f,.21875f,.21875f)),offset(p,q,v(0,.5f,0)),q,2f,vel));
-        a.add(makePart(w,new BoxShape(v(.34375f,.34375f,.34375f)),offset(p,q,v(0,-.625f,0)),q,5f,vel));
+    private static void buildSnowGolem(PhysicsWorld w,List<PhysicsBody> a,Vector3f p,Quat4f q,Vector3f vel){
+        a.add(makePart(w,box(w,v(.28125f,.28125f,.28125f)),p,q,4f,vel));
+        a.add(makePart(w,box(w,v(.21875f,.21875f,.21875f)),offset(p,q,v(0,.5f,0)),q,2f,vel));
+        a.add(makePart(w,box(w,v(.34375f,.34375f,.34375f)),offset(p,q,v(0,-.625f,0)),q,5f,vel));
         a.add(proxy(w,p,q,vel));
         // Stick arms are renderer props. Thin angled colliders were both unstable and mapped
         // poorly to their rotated vanilla cubes.
@@ -795,16 +900,16 @@ public final class RagdollBodyFactory {
         a.add(proxy(w,p,q,vel));
     }
 
-    private static void buildBlaze(DiscreteDynamicsWorld w,List<RigidBody> a,Vector3f p,Quat4f q,Vector3f vel){
-        a.add(makePart(w,new BoxShape(v(.25f,.25f,.25f)),p,q,4f,vel));
+    private static void buildBlaze(PhysicsWorld w,List<PhysicsBody> a,Vector3f p,Quat4f q,Vector3f vel){
+        a.add(makePart(w,box(w,v(.25f,.25f,.25f)),p,q,4f,vel));
         // The twelve rods orbit through one another in the vanilla animation. Grouping them
         // into broad colliders caused permanent self-overlap and violent solver ejection.
         for(int i=0;i<5;i++) a.add(proxy(w,p,q,vel));
     }
 
-    private static void buildSpider(DiscreteDynamicsWorld w,List<RigidBody> a,Vector3f p,Quat4f q,Vector3f vel,float s){
-        a.add(makePart(w,new BoxShape(v(.3125f*s,.25f*s,.5625f*s)),p,q,5f*s,vel));
-        a.add(makePart(w,new BoxShape(v(.25f*s,.25f*s,.25f*s)),offset(p,q,v(0,0,-.8125f*s)),q,2f*s,vel));
+    private static void buildSpider(PhysicsWorld w,List<PhysicsBody> a,Vector3f p,Quat4f q,Vector3f vel,float s){
+        a.add(makePart(w,box(w,v(.3125f*s,.25f*s,.5625f*s)),p,q,5f*s,vel));
+        a.add(makePart(w,box(w,v(.25f*s,.25f*s,.25f*s)),offset(p,q,v(0,0,-.8125f*s)),q,2f*s,vel));
         addSpiderLegBody(w,a,p,q,vel,s, 4, 2,  7,-(float)Math.PI/4,(float)Math.PI/4);
         addSpiderLegBody(w,a,p,q,vel,s,-4, 2, -7, (float)Math.PI/4,-(float)Math.PI/4);
         addSpiderLegBody(w,a,p,q,vel,s, 4, 1,  7,-(float)Math.PI/8,.58119464f);
@@ -815,67 +920,154 @@ public final class RagdollBodyFactory {
         addSpiderLegBody(w,a,p,q,vel,s,-4,-1, -7,-(float)Math.PI/4,-(float)Math.PI/4);
     }
 
-    private static void buildShulker(DiscreteDynamicsWorld w,List<RigidBody> a,Vector3f p,Quat4f q,Vector3f vel){
-        a.add(makePart(w,new BoxShape(v(.5f,.25f,.5f)),p,q,8f,vel));
-        a.add(makePart(w,new BoxShape(v(.5f,.375f,.5f)),offset(p,q,v(0,.625f,0)),q,7f,vel));
+    private static void buildShulker(PhysicsWorld w,List<PhysicsBody> a,Vector3f p,Quat4f q,Vector3f vel){
+        a.add(makePart(w,box(w,v(.5f,.25f,.5f)),p,q,8f,vel));
+        a.add(makePart(w,box(w,v(.5f,.375f,.5f)),offset(p,q,v(0,.625f,0)),q,7f,vel));
         for(int i=0;i<4;i++) a.add(proxy(w,p,q,vel));
     }
 
-    private static void buildGhast(DiscreteDynamicsWorld w,List<RigidBody> a,Vector3f p,Quat4f q,Vector3f vel){
+    private static void buildGhast(PhysicsWorld w,List<PhysicsBody> a,Vector3f p,Quat4f q,Vector3f vel){
         // GhastRenderer scales the one-block model by 4.5.
-        a.add(makePart(w,new BoxShape(v(2.25f,2.25f,2.25f)),p,q,24f,vel));
+        a.add(makePart(w,box(w,v(2.25f,2.25f,2.25f)),p,q,24f,vel));
         int[] lengths={8,13,9,11,11,10,12,9,12};
         for(int i=0;i<9;i++) addGhastTentacleBody(w,a,p,q,vel,i,lengths[i]);
     }
 
-    private static void addSpiderLegBody(DiscreteDynamicsWorld w,List<RigidBody> a,Vector3f p,Quat4f q,Vector3f vel,float s,float pivotX,float pivotZ,float cubeCenterX,float yRot,float zRot){
+    private static void addSpiderLegBody(PhysicsWorld w,List<PhysicsBody> a,Vector3f p,Quat4f q,Vector3f vel,float s,float pivotX,float pivotZ,float cubeCenterX,float yRot,float zRot){
         org.joml.Vector3f center=new org.joml.Vector3f(cubeCenterX,0,0);
         new Quaternionf().rotationZYX(zRot,yRot,0).transform(center);
         Vector3f local=v(-(pivotX+center.x)*s/16f,-center.y*s/16f,(pivotZ+center.z-6f)*s/16f);
-        BoxShape shape=new BoxShape(v(.37f*s,.028f*s,.028f*s));shape.setMargin(.006f*s);
+        PhysicsShape shape=box(w,v(.37f*s,.028f*s,.028f*s));
         a.add(makePart(w,shape,offset(p,q,local),modelPartRotation(q,0,yRot,zRot),.35f*s,vel));
     }
 
-    private static void addGhastTentacleBody(DiscreteDynamicsWorld w,List<RigidBody> a,Vector3f p,Quat4f q,Vector3f vel,int i,int length){
+    private static void addGhastTentacleBody(PhysicsWorld w,List<PhysicsBody> a,Vector3f p,Quat4f q,Vector3f vel,int i,int length){
         float pivotX=((i%3)-(i/3%2)*.5f-.75f)*5f,pivotZ=(i/3-1)*5f;
         org.joml.Vector3f center=new org.joml.Vector3f(0,length*.5f,0);
         new Quaternionf().rotationX(.4f).transform(center);
         float scale=4.5f;Vector3f local=v(-(pivotX+center.x)*scale/16f,-(7f+center.y)*scale/16f,(pivotZ+center.z)*scale/16f);
-        BoxShape shape=new BoxShape(v(.18f,length*scale/32f,.18f));shape.setMargin(.01f);
+        PhysicsShape shape=box(w,v(.18f,length*scale/32f,.18f));
         a.add(makePart(w,shape,offset(p,q,local),modelPartRotation(q,.4f,0,0),1.2f,vel));
     }
 
-    private static void buildVex(DiscreteDynamicsWorld w,List<RigidBody> a,Vector3f p,Quat4f q,Vector3f vel){
-        a.add(makePart(w,new BoxShape(v(.09375f,.15625f,.0625f)),p,q,1f,vel));
-        a.add(makePart(w,new BoxShape(v(.15625f,.15625f,.15625f)),offset(p,q,v(0,.28125f,0)),q,.7f,vel));
+    private static void buildVex(PhysicsWorld w,List<PhysicsBody> a,Vector3f p,Quat4f q,Vector3f vel){
+        a.add(makePart(w,box(w,v(.09375f,.15625f,.0625f)),p,q,1f,vel));
+        a.add(makePart(w,box(w,v(.15625f,.15625f,.15625f)),offset(p,q,v(0,.28125f,0)),q,.7f,vel));
         a.add(proxy(w,p,q,vel));a.add(proxy(w,p,q,vel));
-        a.add(makePart(w,new BoxShape(v(.05625f,.1125f,.05625f)),offset(p,q,v(-.125f,-.109375f,0)),q,.25f,vel));
-        a.add(makePart(w,new BoxShape(v(.05625f,.1125f,.05625f)),offset(p,q,v(.125f,-.109375f,0)),q,.25f,vel));
+        a.add(makePart(w,box(w,v(.05625f,.1125f,.05625f)),offset(p,q,v(-.125f,-.109375f,0)),q,.25f,vel));
+        a.add(makePart(w,box(w,v(.05625f,.1125f,.05625f)),offset(p,q,v(.125f,-.109375f,0)),q,.25f,vel));
     }
 
-    private static void buildWarden(DiscreteDynamicsWorld w,List<RigidBody> a,Vector3f p,Quat4f q,Vector3f vel){
-        a.add(makePart(w,new BoxShape(v(.5625f,.65625f,.34375f)),p,q,18f,vel));
-        a.add(makePart(w,new BoxShape(v(.5f,.5f,.3125f)),offset(p,q,v(0,1.15625f,0)),q,8f,vel));
-        a.add(makePart(w,new BoxShape(v(.1875f,.40625f,.1875f)),offset(p,q,v(-.36875f,-1.0625f,0)),q,4f,vel));
-        a.add(makePart(w,new BoxShape(v(.1875f,.40625f,.1875f)),offset(p,q,v(.36875f,-1.0625f,0)),q,4f,vel));
-        a.add(makePart(w,new BoxShape(v(.25f,.875f,.25f)),offset(p,q,v(-.8125f,-.21875f,.0625f)),q,6f,vel));
-        a.add(makePart(w,new BoxShape(v(.25f,.875f,.25f)),offset(p,q,v(.8125f,-.21875f,.0625f)),q,6f,vel));
+    private static void buildWarden(PhysicsWorld w,List<PhysicsBody> a,Vector3f p,Quat4f q,Vector3f vel){
+        a.add(makePart(w,box(w,v(.5625f,.65625f,.34375f)),p,q,18f,vel));
+        a.add(makePart(w,box(w,v(.5f,.5f,.3125f)),offset(p,q,v(0,1.15625f,0)),q,8f,vel));
+        a.add(makePart(w,box(w,v(.1875f,.40625f,.1875f)),offset(p,q,v(-.36875f,-1.0625f,0)),q,4f,vel));
+        a.add(makePart(w,box(w,v(.1875f,.40625f,.1875f)),offset(p,q,v(.36875f,-1.0625f,0)),q,4f,vel));
+        a.add(makePart(w,box(w,v(.25f,.875f,.25f)),offset(p,q,v(-.8125f,-.21875f,.0625f)),q,6f,vel));
+        a.add(makePart(w,box(w,v(.25f,.875f,.25f)),offset(p,q,v(.8125f,-.21875f,.0625f)),q,6f,vel));
+    }
+
+
+    // Guardian and elder guardian: shell is the torso, tail segments the chain; spikes are renderer-only.
+    private static void buildGuardian(PhysicsWorld w,List<PhysicsBody> a,Vector3f p,Quat4f q,Vector3f vel,float s){
+        a.add(makePart(w,box(w,v(.4375f*s,.4375f*s,.5f*s)),p,q,14f*s*s*s,vel));
+        a.add(makePart(w,box(w,v(.125f*s,.125f*s,.25f*s)),offset(p,q,v(0,0,.6875f*s)),q,2.5f*s*s*s,vel));
+        a.add(makePart(w,box(w,v(.09375f*s,.09375f*s,.21875f*s)),offset(p,q,v(0,0,1.09375f*s)),q,1.6f*s*s*s,vel));
+        a.add(makePart(w,box(w,v(.0625f*s,.140625f*s,.1875f*s)),offset(p,q,v(0,0,1.625f*s)),q,1.1f*s*s*s,vel));
+        a.add(proxy(w,p,q,vel));a.add(proxy(w,p,q,vel));
+    }
+
+    static float guardianScale(BodyProfile profile){ return profile==BodyProfile.ELDER_GUARDIAN?2.35f:1f; }
+
+    // Squid: the mantle plus all eight tentacles, which is nine bodies. Tentacle k hangs from a point
+    // 5px out on the circle at angle k*2pi/8, matching SquidModel's authored ring.
+    private static void buildSquid(PhysicsWorld w,List<PhysicsBody> a,Vector3f p,Quat4f q,Vector3f vel){
+        a.add(makePart(w,box(w,v(.375f,.5f,.375f)),p,q,9f,vel));
+        for(int k=0;k<8;k++){
+            double ang=k*Math.PI*2.0/8.0;
+            float lx=-(float)Math.cos(ang)*.3125f, lz=(float)Math.sin(ang)*.3125f;
+            a.add(makePart(w,box(w,v(.0625f,.5625f,.0625f)),offset(p,q,v(lx,-1f,lz)),q,.7f,vel));
+        }
+    }
+
+    // Dolphin, axolotl and every small fish share one shape: a trunk, a nose-end and a tail, with the
+    // fins left as renderer geometry because a zero-thickness plane makes a useless collider.
+    private static void buildDolphin(PhysicsWorld w,List<PhysicsBody> a,Vector3f p,Quat4f q,Vector3f vel){
+        a.add(makePart(w,box(w,v(.25f,.21875f,.40625f)),p,q,7f,vel));
+        a.add(makePart(w,box(w,v(.25f,.21875f,.1875f)),offset(p,q,v(0,0,-.59375f)),q,3f,vel));
+        a.add(makePart(w,box(w,v(.125f,.15625f,.34375f)),offset(p,q,v(0,-.0625f,.625f)),q,2.5f,vel));
+        a.add(proxy(w,p,q,vel));a.add(proxy(w,p,q,vel));a.add(proxy(w,p,q,vel));
+    }
+
+    private static void buildAxolotl(PhysicsWorld w,List<PhysicsBody> a,Vector3f p,Quat4f q,Vector3f vel){
+        a.add(makePart(w,box(w,v(.25f,.15625f,.3125f)),p,q,2.2f,vel));
+        a.add(makePart(w,box(w,v(.25f,.15625f,.15625f)),offset(p,q,v(0,0,-.46875f)),q,1f,vel));
+        a.add(makePart(w,box(w,v(.03125f,.15625f,.375f)),offset(p,q,v(0,0,.6875f)),q,.6f,vel));
+        a.add(proxy(w,p,q,vel));a.add(proxy(w,p,q,vel));a.add(proxy(w,p,q,vel));
+    }
+
+    // Half extents of the trunk and of the tail, then the tail's offset behind the trunk centre and the
+    // trunk mass, in blocks, taken straight off each vanilla fish model's cube bounds.
+    private static float[] fishDimensions(BodyProfile profile){
+        switch(profile){
+            case SALMON:        return new float[]{.046875f,.078125f,.171875f, .046875f,.078125f,.125f,   .59375f, 1.1f};
+            case TROPICAL_FISH: return new float[]{.03125f,.046875f,.09375f,   .015625f,.046875f,.09375f, .375f,   .5f};
+            case PUFFERFISH:    return new float[]{.046875f,.03125f,.046875f,  0f,0f,0f,                  0f,      .5f};
+            case TADPOLE:       return new float[]{.046875f,.03125f,.046875f,  .015625f,.03125f,.109375f, .3125f,  .35f};
+            default:            return new float[]{.03125f,.078125f,.171875f,  .015625f,.0625f,.0625f,    .46875f, .8f};
+        }
+    }
+
+    private static void buildFish(PhysicsWorld w,List<PhysicsBody> a,Vector3f p,Quat4f q,Vector3f vel,BodyProfile profile){
+        float[] d=fishDimensions(profile);float m=d[7];
+        a.add(makePart(w,box(w,v(d[0],d[1],d[2])),p,q,m,vel));
+        // The pufferfish is a single ball with no tail, so its second slot is a non-contact proxy.
+        if(d[6]==0f) a.add(proxy(w,p,q,vel));
+        else a.add(makePart(w,box(w,v(d[3],d[4],d[5])),offset(p,q,v(0,0,d[6])),q,m*.35f,vel));
+        for(int i=0;i<4;i++) a.add(proxy(w,p,q,vel));
+    }
+
+    // Wither. Every extent is doubled because WitherBossRenderer draws the model at scale 2. The torso
+    // collider spans the shoulder bar and the ribcage together; the renderer draws the two separately.
+    private static void buildWither(PhysicsWorld w,List<PhysicsBody> a,Vector3f p,Quat4f q,Vector3f vel){
+        a.add(makePart(w,box(w,v(.625f,.40625f,.09375f)),p,q,40f,vel));
+        a.add(makePart(w,box(w,v(.25f,.25f,.25f)),offset(p,q,v(0,1.3f,-.125f)),q,10f,vel));
+        a.add(makePart(w,box(w,v(.09375f,.1875f,.09375f)),offset(p,q,v(.0625f,-1.1615f,.2535f)),q,6f,vel));
+        a.add(proxy(w,p,q,vel));
+        a.add(makePart(w,box(w,v(.1875f,.1875f,.1875f)),offset(p,q,v(-1.125f,.925f,-.25f)),q,7f,vel));
+        a.add(makePart(w,box(w,v(.1875f,.1875f,.1875f)),offset(p,q,v(1.125f,.925f,-.25f)),q,7f,vel));
+    }
+
+    // Ender dragon at MAX_PARTS bodies: neck and tail are one rigid body each, and the renderer
+    // still draws every segment along its body's local Z.
+    private static void buildEnderDragon(PhysicsWorld w,List<PhysicsBody> a,Vector3f p,Quat4f q,Vector3f vel){
+        a.add(makePart(w,box(w,v(.75f,.9375f,2f)),p,q,400f,vel));
+        a.add(makePart(w,box(w,v(.5f,.625f,.9375f)),offset(p,q,v(0,-.3125f,-5.9375f)),q,60f,vel));
+        a.add(makePart(w,box(w,v(.25f,1.59375f,.65625f)),offset(p,q,v(-.75f,-1.78125f,-1.78125f)),q,45f,vel));
+        a.add(makePart(w,box(w,v(.25f,1.59375f,.65625f)),offset(p,q,v(.75f,-1.78125f,-1.78125f)),q,45f,vel));
+        a.add(makePart(w,box(w,v(1.75f,.25f,1.9375f)),offset(p,q,v(-2.5f,.5f,.3125f)),q,70f,vel));
+        a.add(makePart(w,box(w,v(1.75f,.25f,1.9375f)),offset(p,q,v(2.5f,.5f,.3125f)),q,70f,vel));
+        a.add(makePart(w,box(w,v(.5625f,2.28125f,.875f)),offset(p,q,v(-1f,-2.21875f,.75f)),q,65f,vel));
+        a.add(makePart(w,box(w,v(.5625f,2.28125f,.875f)),offset(p,q,v(1f,-2.21875f,.75f)),q,65f,vel));
+        a.add(makePart(w,box(w,v(.3125f,.4375f,.9375f)),offset(p,q,v(0,-.3125f,-3.5f)),q,55f,vel));
+        a.add(makePart(w,box(w,v(.3125f,.4375f,3.75f)),offset(p,q,v(0,.3125f,5.6875f)),q,90f,vel));
     }
 
     // Joint builders
 
-    private static void buildJoints(DiscreteDynamicsWorld world, List<RigidBody> parts,
-                                    List<TypedConstraint> joints,
+    private static void buildJoints(PhysicsWorld world, List<PhysicsBody> parts,
+                                    List<PhysicsConstraint> joints,
                                     MobModelHelper.ModelType modelType, float s, BodyProfile bodyProfile,
                                     boolean isBaby, boolean babyBigHead) {
         if (parts.size() < 6) return;
-        RigidBody torso = parts.get(RagdollPart.TORSO.index);
-        RigidBody head  = parts.get(RagdollPart.HEAD.index);
-        RigidBody lLeg  = parts.get(RagdollPart.LEFT_LEG.index);
-        RigidBody rLeg  = parts.get(RagdollPart.RIGHT_LEG.index);
-        RigidBody lArm  = parts.get(RagdollPart.LEFT_ARM.index);
-        RigidBody rArm  = parts.get(RagdollPart.RIGHT_ARM.index);
-        Transform tTorso = wt(torso), tHead = wt(head), tLLeg = wt(lLeg), tRLeg = wt(rLeg), tLArm = wt(lArm), tRArm = wt(rArm);
+        PhysicsBody torso = parts.get(RagdollPart.TORSO.index);
+        PhysicsBody head  = parts.get(RagdollPart.HEAD.index);
+        PhysicsBody lLeg  = parts.get(RagdollPart.LEFT_LEG.index);
+        PhysicsBody rLeg  = parts.get(RagdollPart.RIGHT_LEG.index);
+        PhysicsBody lArm  = parts.get(RagdollPart.LEFT_ARM.index);
+        PhysicsBody rArm  = parts.get(RagdollPart.RIGHT_ARM.index);
+        PhysTransform tTorso = wt(torso), tHead = wt(head), tLLeg = wt(lLeg), tRLeg = wt(rLeg), tLArm = wt(lArm), tRArm = wt(rArm);
+        int firstJoint = joints.size();
         Function<Vector3f, Vector3f> tw = local -> {
             Vector3f out = rotQ(tTorso.getRotation(new Quat4f()), local);
             out.add(tTorso.origin);
@@ -918,38 +1110,187 @@ public final class RagdollBodyFactory {
             case GHAST: buildGhastJoints(world,joints,parts,tw); break;
             case VEX: buildVexJoints(world,joints,torso,head,lLeg,rLeg,lArm,rArm,tw); break;
             case WARDEN: buildWardenJoints(world,joints,torso,head,lLeg,rLeg,lArm,rArm,tw); break;
+            case GUARDIAN: buildGuardianJoints(world,joints,torso,head,lLeg,rLeg,lArm,rArm,tw,guardianScale(bodyProfile)); break;
+            case SQUID: buildSquidJoints(world,joints,parts,tw); break;
+            case DOLPHIN: buildFinnedJoints(world,joints,torso,head,lLeg,rLeg,lArm,rArm,tw,-.34f,.34f); break;
+            case AXOLOTL: buildFinnedJoints(world,joints,torso,head,lLeg,rLeg,lArm,rArm,tw,-.29f,.32f); break;
+            case FISH: buildFishJoints(world,joints,torso,head,lLeg,rLeg,lArm,rArm,tw,bodyProfile); break;
+            case WITHER: buildWitherJoints(world,joints,torso,head,lLeg,rLeg,lArm,rArm,tw); break;
+            case ENDER_DRAGON: buildEnderDragonJoints(world,joints,parts,tw); break;
             default:        buildHumanoidJoints (world, joints, torso, head, lLeg, rLeg, lArm, rArm, tHead, tLLeg, tRLeg, tLArm, tRArm, tw, s, isBaby, babyBigHead); break;
+        }
+
+        // Every skeleton, not just the humanoid: each one hangs its head off the torso as its first
+        // joint, so that one takes the stiffer spring and the limbs behind it the loose one.
+        applyRelaxation(joints, firstJoint, 1f);
+
+        applyAerodynamicDrag(parts);
+    }
+
+    // Clamp on a part's drag ratio, so thin light parts (ghast tentacles, dragon wings) don't hang in the air.
+    private static final float DRAG_RATIO_FLOOR = 0.2f;
+    private static final float DRAG_RATIO_CEILING = 12f;
+
+    // Split linear damping by each part's area-over-mass so light broad limbs trail the torso in a fall.
+    // Mass-weighted about the configured figure, so total drag is unchanged; works for every skeleton.
+    private static void applyAerodynamicDrag(List<PhysicsBody> parts) {
+        float base = (float) RagdollifiedConfig.get(RagdollifiedConfig.LINEAR_DAMPING);
+        float spread = (float) RagdollifiedConfig.get(RagdollifiedConfig.DIFFERENTIAL_DRAG);
+        if (base <= 0f || spread <= 0f) return;
+        float angular = (float) RagdollifiedConfig.get(RagdollifiedConfig.ANGULAR_DAMPING);
+
+        int count = parts.size();
+        float[] scale = new float[count];
+        float[] mass = new float[count];
+        float areaTotal = 0f;
+        float massTotal = 0f;
+        for (int i = 0; i < count; i++) {
+            PhysicsBody body = parts.get(i);
+            float invMass = body.getInvMass();
+            if (invMass <= 0f) continue;
+            float area = meanProjectedArea(body);
+            if (area <= 0f) continue;
+            mass[i] = 1f / invMass;
+            scale[i] = area / mass[i];
+            areaTotal += area;
+            massTotal += mass[i];
+        }
+        if (areaTotal <= 0f || massTotal <= 0f) return;
+
+        // The mass-weighted mean of area/mass reduces to total area over total mass, so dividing by
+        // it leaves each part a multiplier either side of 1: about 0.42 for a torso, 3.1 for an arm.
+        float mean = areaTotal / massTotal;
+        float weighted = 0f;
+        for (int i = 0; i < count; i++) {
+            if (scale[i] <= 0f) continue;
+            float ratio = Math.max(DRAG_RATIO_FLOOR, Math.min(DRAG_RATIO_CEILING, scale[i] / mean));
+            // Exaggerate by a power, not linear interpolation, which can go negative and add energy.
+            scale[i] = spread == 1f ? ratio : (float) Math.pow(ratio, spread);
+            weighted += mass[i] * scale[i];
+        }
+        if (weighted <= 0f) return;
+
+        // Normalise by the mass-weighted mean so total drag stays at the configured figure.
+        float norm = massTotal / weighted;
+        for (int i = 0; i < count; i++) {
+            if (scale[i] <= 0f) continue;
+            parts.get(i).setDamping(base * scale[i] * norm, angular);
         }
     }
 
-    private static void buildHumanoidJoints(DiscreteDynamicsWorld world, List<TypedConstraint> joints,
-            RigidBody torso, RigidBody head, RigidBody lLeg, RigidBody rLeg, RigidBody lArm, RigidBody rArm,
-            Transform tHead, Transform tLLeg, Transform tRLeg, Transform tLArm, Transform tRArm,
+    // Mean projected area of a box over all orientations: a quarter of its surface area.
+    private static float meanProjectedArea(PhysicsBody body) {
+        PhysicsShape shape = body.getShape();
+        if (shape == null || !shape.isBox()) return 0f;
+        Vector3f half = new Vector3f();
+        shape.getHalfExtents(half);
+        float a = 2f * half.x, b = 2f * half.y, c = 2f * half.z;
+        return (a * b + b * c + c * a) * 0.5f;
+    }
+
+    private static void buildHumanoidJoints(PhysicsWorld world, List<PhysicsConstraint> joints,
+            PhysicsBody torso, PhysicsBody head, PhysicsBody lLeg, PhysicsBody rLeg, PhysicsBody lArm, PhysicsBody rArm,
+            PhysTransform tHead, PhysTransform tLLeg, PhysTransform tRLeg, PhysTransform tLArm, PhysTransform tRArm,
             Function<Vector3f, Vector3f> tw, float s, boolean isBaby, boolean babyBigHead) {
         // Anchor offsets track the scaled extents from buildHumanoid so baby joints sit at the shrunken
         // boundaries: head on the head scale, torso and limbs on the body scale. Angular limits unchanged.
         float bs = isBaby ? 0.5f : 1.0f;
         float hd = isBaby ? (babyBigHead ? 0.75f : 0.5f) : 1.0f;
-        Vector3f torsoTop = tw.apply(new Vector3f(0f, 0.4f*bs, 0f));
-        Vector3f headBot  = rotQ(tHead.getRotation(new Quat4f()), new Vector3f(0f,-0.2f*hd,0f)); headBot.add(tHead.origin);
-        joints.add(joint(world, torso, head, mid(torsoTop,headBot), v(0,0,0), v(0,0,0), v(-30,-20,-30), v(30,50,30)));
-        Vector3f lHip = tw.apply(new Vector3f(-0.1f*bs,-0.40f*bs,0f));
-        Vector3f lLegTop = rotQ(tLLeg.getRotation(new Quat4f()), new Vector3f(0f,0.45f*bs,0f)); lLegTop.add(tLLeg.origin);
-        joints.add(joint(world, torso, lLeg, mid(lHip,lLegTop), v(-0.05f*bs,0f,-0.05f*bs), v(0.05f*bs,0f,0.05f*bs), v(-35,-25,-30), v(75,25,30)));
-        Vector3f rHip = tw.apply(new Vector3f(0.1f*bs,-0.40f*bs,0f));
-        Vector3f rLegTop = rotQ(tRLeg.getRotation(new Quat4f()), new Vector3f(0f,0.45f*bs,0f)); rLegTop.add(tRLeg.origin);
-        joints.add(joint(world, torso, rLeg, mid(rHip,rLegTop), v(-0.05f*bs,0f,-0.05f*bs), v(0.05f*bs,0f,0.05f*bs), v(-35,-25,-30), v(75,25,30)));
-        Vector3f lSh = tw.apply(new Vector3f(-0.35f*bs,0.22f*bs,0f));
-        Vector3f lAT = rotQ(tLArm.getRotation(new Quat4f()), new Vector3f(0f,0.35f*bs,0f)); lAT.add(tLArm.origin);
-        joints.add(joint(world, torso, lArm, mid(lSh,lAT), v(-0.02f*bs,-0.02f*bs,-0.02f*bs), v(0.02f*bs,0.02f*bs,0.02f*bs), v(-110,-45,-85), v(110,45,85)));
-        Vector3f rSh = tw.apply(new Vector3f(0.35f*bs,0.22f*bs,0f));
-        Vector3f rAT = rotQ(tRArm.getRotation(new Quat4f()), new Vector3f(0f,0.35f*bs,0f)); rAT.add(tRArm.origin);
-        joints.add(joint(world, torso, rArm, mid(rSh,rAT), v(-0.02f*bs,-0.02f*bs,-0.02f*bs), v(0.02f*bs,0.02f*bs,0.02f*bs), v(-110,-45,-85), v(110,45,85)));
+        // Humanoid joint cones are the only player-tunable limits (config 'humanoidJointLimits').
+        float[] neck = RagdollifiedConfig.getJointLimits(RagdollifiedConfig.NECK_LIMITS);
+        float[] hip = RagdollifiedConfig.getJointLimits(RagdollifiedConfig.HIP_LIMITS);
+        float[] shoulder = RagdollifiedConfig.getJointLimits(RagdollifiedConfig.SHOULDER_LIMITS);
+        // Anchors are measured off the built bodies, so captured proportions (like illager heads) line up.
+        Vector3f torsoHalf = halfExtentsOf(torso, new Vector3f(0.25f*bs, 0.375f*bs, 0.15f*bs));
+        Vector3f headHalf = halfExtentsOf(head, new Vector3f(0.25f*hd, 0.25f*hd, 0.25f*hd));
+        Vector3f legHalf = halfExtentsOf(lLeg, new Vector3f(0.125f*bs, 0.375f*bs, 0.125f*bs));
+        Vector3f armHalf = halfExtentsOf(lArm, new Vector3f(0.125f*bs, 0.375f*bs, 0.125f*bs));
+        Vector3f torsoTop = tw.apply(new Vector3f(0f, torsoHalf.y, 0f));
+        Vector3f headBot  = rotQ(tHead.getRotation(new Quat4f()), new Vector3f(0f,-headHalf.y,0f)); headBot.add(tHead.origin);
+        joints.add(joint(world, torso, head, mid(torsoTop,headBot), v(0,0,0), v(0,0,0), lo(neck), hi(neck)));
+        Vector3f lHip = tw.apply(new Vector3f(-0.11875f*bs,-torsoHalf.y,0f));
+        Vector3f lLegTop = rotQ(tLLeg.getRotation(new Quat4f()), new Vector3f(0f,legHalf.y,0f)); lLegTop.add(tLLeg.origin);
+        joints.add(joint(world, torso, lLeg, mid(lHip,lLegTop), v(-0.05f*bs,0f,-0.05f*bs), v(0.05f*bs,0f,0.05f*bs), lo(hip), hi(hip)));
+        Vector3f rHip = tw.apply(new Vector3f(0.11875f*bs,-torsoHalf.y,0f));
+        Vector3f rLegTop = rotQ(tRLeg.getRotation(new Quat4f()), new Vector3f(0f,legHalf.y,0f)); rLegTop.add(tRLeg.origin);
+        joints.add(joint(world, torso, rLeg, mid(rHip,rLegTop), v(-0.05f*bs,0f,-0.05f*bs), v(0.05f*bs,0f,0.05f*bs), lo(hip), hi(hip)));
+        // Both ends name the same physical point (the shoulder pivot, measured once off the torso
+        // and once off the arm), so their midpoint is that pivot however the arm was posed.
+        Vector3f lSh = tw.apply(new Vector3f(-(torsoHalf.x + armHalf.x*0.5f),armHalf.y - 0.125f*bs,0f));
+        Vector3f lAT = rotQ(tLArm.getRotation(new Quat4f()), new Vector3f(armHalf.x*0.5f,armHalf.y - 0.125f*bs,0f)); lAT.add(tLArm.origin);
+        // keepCollision: arms sit flush against the torso, so their contact is free and stops them clipping the chest.
+        joints.add(joint(world, torso, lArm, mid(lSh,lAT), v(-0.02f*bs,-0.02f*bs,-0.02f*bs), v(0.02f*bs,0.02f*bs,0.02f*bs), lo(shoulder), hi(shoulder), true));
+        Vector3f rSh = tw.apply(new Vector3f(torsoHalf.x + armHalf.x*0.5f,armHalf.y - 0.125f*bs,0f));
+        Vector3f rAT = rotQ(tRArm.getRotation(new Quat4f()), new Vector3f(-armHalf.x*0.5f,armHalf.y - 0.125f*bs,0f)); rAT.add(tRArm.origin);
+        joints.add(joint(world, torso, rArm, mid(rSh,rAT), v(-0.02f*bs,-0.02f*bs,-0.02f*bs), v(0.02f*bs,0.02f*bs,0.02f*bs), lo(shoulder), hi(shoulder), true));
+
     }
 
-    private static void buildIronGolemJoints(DiscreteDynamicsWorld world, List<TypedConstraint> joints,
-            RigidBody torso, RigidBody head, RigidBody leftArm, RigidBody rightArm,
-            RigidBody leftLeg, RigidBody rightLeg, Function<Vector3f, Vector3f> tw) {
+    // The size a body was actually built with. Falls back to the authored figure for a backend that
+    // does not publish a box, so this can never be the thing that stops a joint being made.
+    private static Vector3f halfExtentsOf(PhysicsBody body, Vector3f authored) {
+        try {
+            PhysicsShape shape = body.getShape();
+            if (shape != null && shape.isBox()) {
+                Vector3f out = new Vector3f();
+                shape.getHalfExtents(out);
+                if (out.x > 1.0e-4f && out.y > 1.0e-4f && out.z > 1.0e-4f) return out;
+            }
+        } catch (Exception ignored) {
+            // Fall through to the authored size.
+        }
+        return authored;
+    }
+
+    // Every joint gets a weak spring toward its authored pose; the neck's is this much stiffer,
+    // so a free head doesn't roll to an unnatural angle. See relaxJoints.
+    public static final float NECK_RELAX_SCALE = 16f;
+
+    // Apply relaxation springs scaled by scale (1 = configured, 0 = off); re-callable at runtime.
+    // The neck keeps its multiple either way.
+    public static void applyRelaxation(List<PhysicsConstraint> joints, int firstJoint, float scale) {
+        relaxJoints(joints, firstJoint, firstJoint + 1, NECK_RELAX_SCALE * scale);
+        relaxJoints(joints, firstJoint + 1, joints.size(), scale);
+    }
+
+    private static void relaxJoints(List<PhysicsConstraint> joints, int from, int to, float scale) {
+        float frequency = (float) RagdollifiedConfig.get(RagdollifiedConfig.JOINT_RELAX_FREQUENCY) * scale;
+        float damping = (float) RagdollifiedConfig.get(RagdollifiedConfig.JOINT_RELAX_DAMPING);
+        float torque = (float) RagdollifiedConfig.get(RagdollifiedConfig.JOINT_RELAX_TORQUE);
+        for (int i = Math.max(0, from); i < Math.min(to, joints.size()); i++) {
+            joints.get(i).relaxToRest(frequency, damping, torque);
+        }
+    }
+
+    // Drive every joint toward a fresh random target instead of the rest pose; call on an interval.
+    // strengthScale multiplies spring frequency (<=0 releases); spreadRadians is the cone half-angle.
+    public static void applyFlail(List<PhysicsConstraint> joints, int firstJoint,
+                                  float strengthScale, float spreadRadians, java.util.Random rng) {
+        float frequency = (float) RagdollifiedConfig.get(RagdollifiedConfig.JOINT_RELAX_FREQUENCY) * strengthScale;
+        float damping = (float) RagdollifiedConfig.get(RagdollifiedConfig.JOINT_RELAX_DAMPING);
+        float torque = (float) RagdollifiedConfig.get(RagdollifiedConfig.JOINT_RELAX_TORQUE);
+        for (int i = Math.max(0, firstJoint); i < joints.size(); i++) {
+            // Random axis rather than random Euler angles, which bunch targets toward the cube's corners.
+            float ax = (float) rng.nextGaussian();
+            float ay = (float) rng.nextGaussian();
+            float az = (float) rng.nextGaussian();
+            float len = (float) Math.sqrt(ax * ax + ay * ay + az * az);
+            if (len < 1.0e-6f) { ax = 0f; ay = 1f; az = 0f; len = 1f; }
+            float angle = spreadRadians * (rng.nextFloat() * 2f - 1f);
+            float half = angle * 0.5f;
+            float sin = (float) Math.sin(half) / len;
+            joints.get(i).driveToOrientation(ax * sin, ay * sin, az * sin, (float) Math.cos(half),
+                    frequency, damping, torque);
+        }
+    }
+
+    private static Vector3f lo(float[] limits) { return v(limits[0], limits[1], limits[2]); }
+
+    private static Vector3f hi(float[] limits) { return v(limits[3], limits[4], limits[5]); }
+
+    private static void buildIronGolemJoints(PhysicsWorld world, List<PhysicsConstraint> joints,
+            PhysicsBody torso, PhysicsBody head, PhysicsBody leftArm, PhysicsBody rightArm,
+            PhysicsBody leftLeg, PhysicsBody rightLeg, Function<Vector3f, Vector3f> tw) {
         Vector3f zero = v(0,0,0);
         Vector3f lin = v(-0.015f,-0.015f,-0.015f);
         Vector3f liu = v(0.015f,0.015f,0.015f);
@@ -965,9 +1306,9 @@ public final class RagdollBodyFactory {
                 v(-110,-20,-35), v(110,20,35)));
     }
 
-    private static void buildTurtleJoints(DiscreteDynamicsWorld world, List<TypedConstraint> joints,
-            RigidBody torso, RigidBody head, RigidBody leftFront, RigidBody rightFront,
-            RigidBody leftHind, RigidBody rightHind, Function<Vector3f, Vector3f> tw,
+    private static void buildTurtleJoints(PhysicsWorld world, List<PhysicsConstraint> joints,
+            PhysicsBody torso, PhysicsBody head, PhysicsBody leftFront, PhysicsBody rightFront,
+            PhysicsBody leftHind, PhysicsBody rightHind, Function<Vector3f, Vector3f> tw,
             boolean baby) {
         float b = baby ? 1f/6f : 1f;
         Vector3f lin = v(-.015f*b,-.015f*b,-.015f*b), liu = v(.015f*b,.015f*b,.015f*b);
@@ -983,9 +1324,9 @@ public final class RagdollBodyFactory {
                 v(-25,-30,-25),v(25,30,25)));
     }
 
-    private static void buildEndermanJoints(DiscreteDynamicsWorld world, List<TypedConstraint> joints,
-            RigidBody torso, RigidBody head, RigidBody leftArm, RigidBody rightArm,
-            RigidBody leftLeg, RigidBody rightLeg, Function<Vector3f, Vector3f> tw) {
+    private static void buildEndermanJoints(PhysicsWorld world, List<PhysicsConstraint> joints,
+            PhysicsBody torso, PhysicsBody head, PhysicsBody leftArm, PhysicsBody rightArm,
+            PhysicsBody leftLeg, PhysicsBody rightLeg, Function<Vector3f, Vector3f> tw) {
         Vector3f lin=v(-.015f,-.015f,-.015f), liu=v(.015f,.015f,.015f);
         joints.add(joint(world,torso,head,tw.apply(v(0,.35f,0)),lin,liu,v(-35,-35,-25),v(45,35,25)));
         joints.add(joint(world,torso,leftLeg,tw.apply(v(-.125f,-.28f,0)),lin,liu,v(-55,-12,-15),v(70,12,15)));
@@ -994,8 +1335,8 @@ public final class RagdollBodyFactory {
         joints.add(joint(world,torso,rightArm,tw.apply(v(.3125f,.375f,0)),lin,liu,v(-120,-25,-40),v(120,25,40)));
     }
 
-    private static void buildCamelJoints(DiscreteDynamicsWorld world,List<TypedConstraint> joints,
-            RigidBody torso,RigidBody head,RigidBody lf,RigidBody rf,RigidBody lh,RigidBody rh,
+    private static void buildCamelJoints(PhysicsWorld world,List<PhysicsConstraint> joints,
+            PhysicsBody torso,PhysicsBody head,PhysicsBody lf,PhysicsBody rf,PhysicsBody lh,PhysicsBody rh,
             Function<Vector3f,Vector3f> tw,boolean baby){
         float b=baby?.45f:1f; Vector3f l=v(-.015f*b,-.015f*b,-.015f*b),u=v(.015f*b,.015f*b,.015f*b);
         joints.add(joint(world,torso,head,tw.apply(v(0,.25f*b,-.72f*b)),l,u,v(-45,-30,-25),v(55,30,25)));
@@ -1005,8 +1346,8 @@ public final class RagdollBodyFactory {
         joints.add(joint(world,torso,rh,tw.apply(v(.31f*b,-.36f*b,.62f*b)),l,u,v(-55,-12,-15),v(55,12,15)));
     }
 
-    private static void buildLlamaJoints(DiscreteDynamicsWorld world,List<TypedConstraint> joints,
-            RigidBody torso,RigidBody head,RigidBody lf,RigidBody rf,RigidBody lh,RigidBody rh,
+    private static void buildLlamaJoints(PhysicsWorld world,List<PhysicsConstraint> joints,
+            PhysicsBody torso,PhysicsBody head,PhysicsBody lf,PhysicsBody rf,PhysicsBody lh,PhysicsBody rh,
             Function<Vector3f,Vector3f> tw,boolean baby){
         float x=baby?.10f:.22f,y=baby?-.14f:-.31f,fz=baby?-.17f:-.375f,hz=baby?.142f:.3125f;
         Vector3f l=v(-.015f,-.015f,-.015f),u=v(.015f,.015f,.015f);
@@ -1017,8 +1358,8 @@ public final class RagdollBodyFactory {
         joints.add(joint(world,torso,rh,tw.apply(v(x,y,hz)),l,u,v(-50,-12,-15),v(55,12,15)));
     }
 
-    private static void buildRabbitJoints(DiscreteDynamicsWorld world,List<TypedConstraint> joints,
-            RigidBody torso,RigidBody head,RigidBody lf,RigidBody rf,RigidBody lh,RigidBody rh,
+    private static void buildRabbitJoints(PhysicsWorld world,List<PhysicsConstraint> joints,
+            PhysicsBody torso,PhysicsBody head,PhysicsBody lf,PhysicsBody rf,PhysicsBody lh,PhysicsBody rh,
             Function<Vector3f,Vector3f> tw,boolean baby){
         float k=baby?.667f:1f; Vector3f l=v(-.008f,-.008f,-.008f),u=v(.008f,.008f,.008f);
         joints.add(joint(world,torso,head,tw.apply(v(0,.12f*k,-.18f*k)),l,u,v(-40,-35,-25),v(55,35,25)));
@@ -1028,8 +1369,8 @@ public final class RagdollBodyFactory {
         joints.add(joint(world,torso,rh,tw.apply(v(.11f*k,-.04f*k,.08f*k)),l,u,v(-70,-20,-25),v(70,20,25)));
     }
 
-    private static void buildFrogJoints(DiscreteDynamicsWorld world,List<TypedConstraint> joints,
-            RigidBody torso,RigidBody head,RigidBody lf,RigidBody rf,RigidBody lh,RigidBody rh,
+    private static void buildFrogJoints(PhysicsWorld world,List<PhysicsConstraint> joints,
+            PhysicsBody torso,PhysicsBody head,PhysicsBody lf,PhysicsBody rf,PhysicsBody lh,PhysicsBody rh,
             Function<Vector3f,Vector3f> tw){
         Vector3f l=v(-.008f,-.008f,-.008f),u=v(.008f,.008f,.008f);
         // Anchors are the real FrogModel pivots relative to the solid body's cube centre. All four limb
@@ -1041,8 +1382,8 @@ public final class RagdollBodyFactory {
         joints.add(joint(world,torso,rh,tw.apply(v(.21875f,.03125f,.21875f)),l,u,v(-60,-35,-40),v(60,35,40)));
     }
 
-    private static void buildHoglinJoints(DiscreteDynamicsWorld w,List<TypedConstraint> js,
-            RigidBody torso,RigidBody head,RigidBody lf,RigidBody rf,RigidBody lh,RigidBody rh,
+    private static void buildHoglinJoints(PhysicsWorld w,List<PhysicsConstraint> js,
+            PhysicsBody torso,PhysicsBody head,PhysicsBody lf,PhysicsBody rf,PhysicsBody lh,PhysicsBody rh,
             Function<Vector3f,Vector3f> tw,boolean baby){
         float b=baby?.5f:1f;Vector3f l=v(-.015f*b,-.015f*b,-.015f*b),u=v(.015f*b,.015f*b,.015f*b);
         js.add(joint(w,torso,head,tw.apply(baby?v(0,.18f,-.45f):v(0,0,-.72f)),l,u,v(-40,-25,-20),v(45,25,20)));
@@ -1052,8 +1393,8 @@ public final class RagdollBodyFactory {
         js.add(joint(w,torso,rh,tw.apply(v(.15625f*b,-.375f*b,.625f*b)),l,u,v(-50,-12,-15),v(55,12,15)));
     }
 
-    private static void buildSnifferJoints(DiscreteDynamicsWorld w,List<TypedConstraint> js,
-            RigidBody torso,RigidBody head,RigidBody lf,RigidBody rf,RigidBody lh,RigidBody rh,
+    private static void buildSnifferJoints(PhysicsWorld w,List<PhysicsConstraint> js,
+            PhysicsBody torso,PhysicsBody head,PhysicsBody lf,PhysicsBody rf,PhysicsBody lh,PhysicsBody rh,
             Function<Vector3f,Vector3f> tw,boolean baby){
         float b=baby?.5f:1f;Vector3f l=v(-.02f*b,-.02f*b,-.02f*b),u=v(.02f*b,.02f*b,.02f*b);
         js.add(joint(w,torso,head,tw.apply(baby?v(0,-.15f,-.58f):v(0,-.25f,-1.25f)),l,u,v(-35,-25,-20),v(40,25,20)));
@@ -1064,8 +1405,8 @@ public final class RagdollBodyFactory {
         js.add(joint(w,torso,rh,tw.apply(v(x,y,.9375f*b)),l,u,v(-45,-10,-12),v(50,10,12)));
     }
 
-    private static void buildRavagerJoints(DiscreteDynamicsWorld w,List<TypedConstraint> js,
-            RigidBody torso,RigidBody head,RigidBody lf,RigidBody rf,RigidBody lh,RigidBody rh,
+    private static void buildRavagerJoints(PhysicsWorld w,List<PhysicsConstraint> js,
+            PhysicsBody torso,PhysicsBody head,PhysicsBody lf,PhysicsBody rf,PhysicsBody lh,PhysicsBody rh,
             Function<Vector3f,Vector3f> tw){
         Vector3f l=v(-.02f,-.02f,-.02f),u=v(.02f,.02f,.02f);
         js.add(joint(w,torso,head,tw.apply(v(0,0,-1f)),l,u,v(-30,-20,-18),v(35,20,18)));
@@ -1075,8 +1416,8 @@ public final class RagdollBodyFactory {
         js.add(joint(w,torso,rh,tw.apply(v(.5f,.6f,.71875f)),l,u,v(-40,-8,-10),v(45,8,10)));
     }
 
-    private static void buildPhantomJoints(DiscreteDynamicsWorld w,List<TypedConstraint> js,
-            RigidBody torso,RigidBody head,RigidBody lw,RigidBody rw,RigidBody tailBase,RigidBody tailTip,
+    private static void buildPhantomJoints(PhysicsWorld w,List<PhysicsConstraint> js,
+            PhysicsBody torso,PhysicsBody head,PhysicsBody lw,PhysicsBody rw,PhysicsBody tailBase,PhysicsBody tailTip,
             Function<Vector3f,Vector3f> tw,float s){
         Vector3f l=v(-.01f*s,-.01f*s,-.01f*s),u=v(.01f*s,.01f*s,.01f*s);
         js.add(joint(w,torso,head,tw.apply(v(0,0,-.28f*s)),l,u,v(-30,-25,-20),v(35,25,20)));
@@ -1086,8 +1427,8 @@ public final class RagdollBodyFactory {
         js.add(joint(w,tailBase,tailTip,tw.apply(v(0,.03f*s,.66f*s)),l,u,v(-35,-15,-15),v(35,15,15)));
     }
 
-    private static void buildParrotJoints(DiscreteDynamicsWorld w,List<TypedConstraint> js,
-            RigidBody torso,RigidBody head,RigidBody lw,RigidBody rw,RigidBody ll,RigidBody rl,
+    private static void buildParrotJoints(PhysicsWorld w,List<PhysicsConstraint> js,
+            PhysicsBody torso,PhysicsBody head,PhysicsBody lw,PhysicsBody rw,PhysicsBody ll,PhysicsBody rl,
             Function<Vector3f,Vector3f> tw){
         Vector3f l=v(-.005f,-.005f,-.005f),u=v(.005f,.005f,.005f);
         js.add(joint(w,torso,head,tw.apply(v(0,.14f,0)),l,u,v(-35,-30,-25),v(45,30,25)));
@@ -1097,8 +1438,8 @@ public final class RagdollBodyFactory {
         js.add(joint(w,torso,rl,tw.apply(v(.0625f,-.16f,.12f)),l,u,v(-35,-15,-15),v(40,15,15)));
     }
 
-    private static void buildCubeMobJoints(DiscreteDynamicsWorld w,List<TypedConstraint> js,
-            RigidBody torso,RigidBody head,RigidBody la,RigidBody ra,RigidBody ll,RigidBody rl,
+    private static void buildCubeMobJoints(PhysicsWorld w,List<PhysicsConstraint> js,
+            PhysicsBody torso,PhysicsBody head,PhysicsBody la,PhysicsBody ra,PhysicsBody ll,PhysicsBody rl,
             Function<Vector3f,Vector3f> tw){
         Vector3f z=v(0,0,0),a=v(-1,-1,-1),b=v(1,1,1);Vector3f anchor=tw.apply(z);
         js.add(joint(w,torso,head,anchor,z,z,a,b));
@@ -1106,8 +1447,8 @@ public final class RagdollBodyFactory {
         js.add(joint(w,torso,ll,anchor,z,z,a,b));js.add(joint(w,torso,rl,anchor,z,z,a,b));
     }
 
-    private static void buildSegmentJoints(DiscreteDynamicsWorld w,List<TypedConstraint> js,
-            RigidBody torso,RigidBody head,RigidBody s3,RigidBody s4,RigidBody s5,RigidBody s6,
+    private static void buildSegmentJoints(PhysicsWorld w,List<PhysicsConstraint> js,
+            PhysicsBody torso,PhysicsBody head,PhysicsBody s3,PhysicsBody s4,PhysicsBody s5,PhysicsBody s6,
             Function<Vector3f,Vector3f> tw,boolean endermite){
         Vector3f l=v(-.004f,-.004f,-.004f),u=v(.004f,.004f,.004f),al=v(-25,-20,-20),au=v(25,20,20);
         js.add(joint(w,head,torso,tw.apply(v(0,0,-.08f)),l,u,al,au));
@@ -1117,32 +1458,32 @@ public final class RagdollBodyFactory {
         else{js.add(joint(w,s4,s5,tw.apply(v(0,-.07f,.46f)),l,u,al,au));js.add(joint(w,s5,s6,tw.apply(v(0,-.09f,.59f)),l,u,al,au));}
     }
 
-    private static void buildAllayJoints(DiscreteDynamicsWorld w,List<TypedConstraint> js,RigidBody t,RigidBody h,RigidBody lw,RigidBody rw,RigidBody la,RigidBody ra,Function<Vector3f,Vector3f> tw){
+    private static void buildAllayJoints(PhysicsWorld w,List<PhysicsConstraint> js,PhysicsBody t,PhysicsBody h,PhysicsBody lw,PhysicsBody rw,PhysicsBody la,PhysicsBody ra,Function<Vector3f,Vector3f> tw){
         Vector3f l=v(-.004f,-.004f,-.004f),u=v(.004f,.004f,.004f);
         js.add(joint(w,t,h,tw.apply(v(0,.17f,0)),l,u,v(-35,-30,-25),v(45,30,25)));
         js.add(joint(w,t,la,tw.apply(v(-.1f,.12f,0)),l,u,v(-80,-30,-50),v(80,30,50)));js.add(joint(w,t,ra,tw.apply(v(.1f,.12f,0)),l,u,v(-80,-30,-50),v(80,30,50)));
         addFixedProxyJoints(w,js,t,tw,lw,rw);
     }
 
-    private static void buildStriderJoints(DiscreteDynamicsWorld w,List<TypedConstraint> js,RigidBody t,RigidBody proxyHead,RigidBody ll,RigidBody rl,RigidBody p1,RigidBody p2,Function<Vector3f,Vector3f> tw,boolean baby){
+    private static void buildStriderJoints(PhysicsWorld w,List<PhysicsConstraint> js,PhysicsBody t,PhysicsBody proxyHead,PhysicsBody ll,PhysicsBody rl,PhysicsBody p1,PhysicsBody p2,Function<Vector3f,Vector3f> tw,boolean baby){
         float s=baby?.5f:1f;Vector3f z=v(0,0,0),a=v(-1,-1,-1),b=v(1,1,1),l=v(-.01f*s,-.01f*s,-.01f*s),u=v(.01f*s,.01f*s,.01f*s);
         js.add(joint(w,t,ll,tw.apply(v(-.25f*s,-.4f*s,0)),l,u,v(-55,-12,-15),v(55,12,15)));js.add(joint(w,t,rl,tw.apply(v(.25f*s,-.4f*s,0)),l,u,v(-55,-12,-15),v(55,12,15)));
         js.add(joint(w,t,proxyHead,tw.apply(z),z,z,a,b));js.add(joint(w,t,p1,tw.apply(z),z,z,a,b));js.add(joint(w,t,p2,tw.apply(z),z,z,a,b));
     }
 
-    private static void buildSnowGolemJoints(DiscreteDynamicsWorld w,List<TypedConstraint> js,RigidBody t,RigidBody h,RigidBody lower,RigidBody proxy,RigidBody la,RigidBody ra,Function<Vector3f,Vector3f> tw){
+    private static void buildSnowGolemJoints(PhysicsWorld w,List<PhysicsConstraint> js,PhysicsBody t,PhysicsBody h,PhysicsBody lower,PhysicsBody proxy,PhysicsBody la,PhysicsBody ra,Function<Vector3f,Vector3f> tw){
         Vector3f l=v(-.01f,-.01f,-.01f),u=v(.01f,.01f,.01f);
         js.add(joint(w,t,h,tw.apply(v(0,.28f,0)),l,u,v(-30,-30,-20),v(40,30,20)));js.add(joint(w,t,lower,tw.apply(v(0,-.3f,0)),l,u,v(-20,-15,-15),v(20,15,15)));
         addFixedProxyJoints(w,js,t,tw,proxy,la,ra);
     }
 
-    private static void buildRadialJoints(DiscreteDynamicsWorld w,List<TypedConstraint> js,RigidBody t,RigidBody a,RigidBody b,RigidBody c,RigidBody d,RigidBody e,Function<Vector3f,Vector3f> tw){
+    private static void buildRadialJoints(PhysicsWorld w,List<PhysicsConstraint> js,PhysicsBody t,PhysicsBody a,PhysicsBody b,PhysicsBody c,PhysicsBody d,PhysicsBody e,Function<Vector3f,Vector3f> tw){
         Vector3f l=v(-.01f,-.01f,-.01f),u=v(.01f,.01f,.01f),al=v(-45,-45,-45),au=v(45,45,45),p=tw.apply(v(0,0,0));
         js.add(joint(w,t,a,p,l,u,al,au));js.add(joint(w,t,b,p,l,u,al,au));js.add(joint(w,t,c,p,l,u,al,au));js.add(joint(w,t,d,p,l,u,al,au));js.add(joint(w,t,e,p,l,u,al,au));
     }
 
-    private static void buildSpiderJoints(DiscreteDynamicsWorld w,List<TypedConstraint> js,List<RigidBody> parts,Function<Vector3f,Vector3f> tw,float s){
-        RigidBody t=parts.get(0),h=parts.get(1);
+    private static void buildSpiderJoints(PhysicsWorld w,List<PhysicsConstraint> js,List<PhysicsBody> parts,Function<Vector3f,Vector3f> tw,float s){
+        PhysicsBody t=parts.get(0),h=parts.get(1);
         Vector3f l=v(-.01f*s,-.01f*s,-.01f*s),u=v(.01f*s,.01f*s,.01f*s);
         js.add(joint(w,t,h,tw.apply(v(0,0,-.42f*s)),l,u,v(-25,-30,-20),v(30,30,20)));
         float[] px={4,-4,4,-4,4,-4,4,-4},pz={2,2,1,1,0,0,-1,-1};
@@ -1152,8 +1493,8 @@ public final class RagdollBodyFactory {
         }
     }
 
-    private static void buildGhastJoints(DiscreteDynamicsWorld w,List<TypedConstraint> js,List<RigidBody> parts,Function<Vector3f,Vector3f> tw){
-        RigidBody body=parts.get(0);Vector3f l=v(-.01f,-.01f,-.01f),u=v(.01f,.01f,.01f);
+    private static void buildGhastJoints(PhysicsWorld w,List<PhysicsConstraint> js,List<PhysicsBody> parts,Function<Vector3f,Vector3f> tw){
+        PhysicsBody body=parts.get(0);Vector3f l=v(-.01f,-.01f,-.01f),u=v(.01f,.01f,.01f);
         for(int i=0;i<9;i++){
             float px=((i%3)-(i/3%2)*.5f-.75f)*5f,pz=(i/3-1)*5f,scale=4.5f;
             Vector3f anchor=tw.apply(v(-px*scale/16f,-7f*scale/16f,pz*scale/16f));
@@ -1161,13 +1502,13 @@ public final class RagdollBodyFactory {
         }
     }
 
-    private static void buildShulkerJoints(DiscreteDynamicsWorld w,List<TypedConstraint> js,RigidBody t,RigidBody lid,RigidBody p2,RigidBody p3,RigidBody p4,RigidBody p5,Function<Vector3f,Vector3f> tw){
+    private static void buildShulkerJoints(PhysicsWorld w,List<PhysicsConstraint> js,PhysicsBody t,PhysicsBody lid,PhysicsBody p2,PhysicsBody p3,PhysicsBody p4,PhysicsBody p5,Function<Vector3f,Vector3f> tw){
         Vector3f l=v(-.006f,-.006f,-.006f),u=v(.006f,.006f,.006f);
         js.add(joint(w,t,lid,tw.apply(v(0,.25f,0)),l,u,v(-18,-12,-18),v(18,12,18)));
         addFixedProxyJoints(w,js,t,tw,p2,p3,p4,p5);
     }
 
-    private static void buildVexJoints(DiscreteDynamicsWorld w,List<TypedConstraint> js,RigidBody t,RigidBody h,RigidBody p2,RigidBody p3,RigidBody la,RigidBody ra,Function<Vector3f,Vector3f> tw){
+    private static void buildVexJoints(PhysicsWorld w,List<PhysicsConstraint> js,PhysicsBody t,PhysicsBody h,PhysicsBody p2,PhysicsBody p3,PhysicsBody la,PhysicsBody ra,Function<Vector3f,Vector3f> tw){
         Vector3f l=v(-.003f,-.003f,-.003f),u=v(.003f,.003f,.003f);
         js.add(joint(w,t,h,tw.apply(v(0,.16f,0)),l,u,v(-35,-30,-25),v(45,30,25)));
         js.add(joint(w,t,la,tw.apply(v(-.09f,.04f,0)),l,u,v(-100,-35,-65),v(100,35,65)));
@@ -1175,7 +1516,7 @@ public final class RagdollBodyFactory {
         addFixedProxyJoints(w,js,t,tw,p2,p3);
     }
 
-    private static void buildWardenJoints(DiscreteDynamicsWorld w,List<TypedConstraint> js,RigidBody t,RigidBody h,RigidBody ll,RigidBody rl,RigidBody la,RigidBody ra,Function<Vector3f,Vector3f> tw){
+    private static void buildWardenJoints(PhysicsWorld w,List<PhysicsConstraint> js,PhysicsBody t,PhysicsBody h,PhysicsBody ll,PhysicsBody rl,PhysicsBody la,PhysicsBody ra,Function<Vector3f,Vector3f> tw){
         Vector3f l=v(-.015f,-.015f,-.015f),u=v(.015f,.015f,.015f);
         js.add(joint(w,t,h,tw.apply(v(0,.65f,0)),l,u,v(-35,-35,-25),v(45,35,25)));
         js.add(joint(w,t,ll,tw.apply(v(-.37f,-.65f,0)),l,u,v(-45,-15,-18),v(65,15,18)));
@@ -1184,14 +1525,14 @@ public final class RagdollBodyFactory {
         js.add(joint(w,t,ra,tw.apply(v(.56f,.15f,.06f)),l,u,v(-100,-35,-45),v(100,35,45)));
     }
 
-    private static void addFixedProxyJoints(DiscreteDynamicsWorld w,List<TypedConstraint> js,RigidBody t,Function<Vector3f,Vector3f> tw,RigidBody... proxies){
+    private static void addFixedProxyJoints(PhysicsWorld w,List<PhysicsConstraint> js,PhysicsBody t,Function<Vector3f,Vector3f> tw,PhysicsBody... proxies){
         Vector3f z=v(0,0,0),tinyLow=v(-1,-1,-1),tinyHigh=v(1,1,1),anchor=tw.apply(z);
-        for(RigidBody proxy:proxies) js.add(joint(w,t,proxy,anchor,z,z,tinyLow,tinyHigh));
+        for(PhysicsBody proxy:proxies) js.add(joint(w,t,proxy,anchor,z,z,tinyLow,tinyHigh));
     }
 
-    private static void buildEquineJoints(DiscreteDynamicsWorld world, List<TypedConstraint> joints,
-            RigidBody torso, RigidBody head, RigidBody fl, RigidBody fr, RigidBody hl, RigidBody hr,
-            Transform tHead, Transform tFL, Transform tFR, Transform tHL, Transform tHR,
+    private static void buildEquineJoints(PhysicsWorld world, List<PhysicsConstraint> joints,
+            PhysicsBody torso, PhysicsBody head, PhysicsBody fl, PhysicsBody fr, PhysicsBody hl, PhysicsBody hr,
+            PhysTransform tHead, PhysTransform tFL, PhysTransform tFR, PhysTransform tHL, PhysTransform tHR,
             Function<Vector3f, Vector3f> tw, BodyProfile profile, boolean isBaby) {
         float rs = equineRenderScale(profile);
         float bs = isBaby ? 0.5f : 1.0f;
@@ -1212,9 +1553,9 @@ public final class RagdollBodyFactory {
         joints.add(joint(world, torso, hr, tw.apply(v( jointX,jointY,hindJointZ)), linL, linU, angL, angU));
     }
 
-    private static void buildCreeperJoints(DiscreteDynamicsWorld world, List<TypedConstraint> joints,
-            RigidBody torso, RigidBody head, RigidBody fl, RigidBody fr, RigidBody bl, RigidBody br,
-            Transform tHead, Function<Vector3f, Vector3f> tw, float s) {
+    private static void buildCreeperJoints(PhysicsWorld world, List<PhysicsConstraint> joints,
+            PhysicsBody torso, PhysicsBody head, PhysicsBody fl, PhysicsBody fr, PhysicsBody bl, PhysicsBody br,
+            PhysTransform tHead, Function<Vector3f, Vector3f> tw, float s) {
         Vector3f headBot = rotQ(tHead.getRotation(new Quat4f()), new Vector3f(0f,-0.25f*s,0f)); headBot.add(tHead.origin);
         joints.add(joint(world, torso, head, mid(tw.apply(new Vector3f(0f,0.5f*s,0f)), headBot), v(0,0,0), v(0,0,0), v(-20,-20,-20), v(20,20,20)));
         float ll = 14;
@@ -1225,9 +1566,9 @@ public final class RagdollBodyFactory {
         joints.add(joint(world, torso, br, tw.apply(new Vector3f(-0.11f*s,-0.375f*s, 0.22f*s)), lin, liu, al, au));
     }
 
-    private static void buildQuadJoints(DiscreteDynamicsWorld world, List<TypedConstraint> joints,
-            RigidBody torso, RigidBody head, RigidBody fl, RigidBody fr, RigidBody hl, RigidBody hr,
-            Transform tHead, Transform tFL, Transform tFR, Transform tHL, Transform tHR,
+    private static void buildQuadJoints(PhysicsWorld world, List<PhysicsConstraint> joints,
+            PhysicsBody torso, PhysicsBody head, PhysicsBody fl, PhysicsBody fr, PhysicsBody hl, PhysicsBody hr,
+            PhysTransform tHead, PhysTransform tFL, PhysTransform tFR, PhysTransform tHL, PhysTransform tHR,
             Function<Vector3f, Vector3f> tw, float s, BodyProfile bodyProfile, boolean isBaby) {
         float ll = 40, hl2 = 35;
         QuadLayout q = layoutFor(bodyProfile, isBaby);
@@ -1242,9 +1583,9 @@ public final class RagdollBodyFactory {
         joints.add(joint(world, torso, hr, tw.apply(new Vector3f(-q.legX*s, q.hindLegY*s, q.hindZ*s)), lin, liu, angL, angU));
     }
 
-    private static void buildChickenJoints(DiscreteDynamicsWorld world, List<TypedConstraint> joints,
-            RigidBody torso, RigidBody head, RigidBody lw, RigidBody rw, RigidBody ll, RigidBody rl,
-            Transform tHead, Transform tLW, Transform tRW, Transform tLL, Transform tRL,
+    private static void buildChickenJoints(PhysicsWorld world, List<PhysicsConstraint> joints,
+            PhysicsBody torso, PhysicsBody head, PhysicsBody lw, PhysicsBody rw, PhysicsBody ll, PhysicsBody rl,
+            PhysTransform tHead, PhysTransform tLW, PhysTransform tRW, PhysTransform tLL, PhysTransform tRL,
             Function<Vector3f, Vector3f> tw, float s) {
         float wl = 28, legl = 35, hl = 30;
         Vector3f torsoTop = tw.apply(new Vector3f(0f,0.25f*s,-0.15f*s));
@@ -1259,10 +1600,10 @@ public final class RagdollBodyFactory {
     }
 
     // Bat and bee joints anchor at body-origin midpoints rather than torso-local offsets, so they hold
-    // at any model-specific build scale — the shared `s` here is the unscaled body scale.
-    private static void buildBatJoints(DiscreteDynamicsWorld world, List<TypedConstraint> joints,
-            RigidBody torso, RigidBody head, RigidBody lWing, RigidBody rWing, RigidBody lStub, RigidBody rStub,
-            Transform tHead, Transform tLWing, Transform tRWing, Transform tLStub, Transform tRStub,
+    // at any model-specific build scale; the shared `s` here is the unscaled body scale.
+    private static void buildBatJoints(PhysicsWorld world, List<PhysicsConstraint> joints,
+            PhysicsBody torso, PhysicsBody head, PhysicsBody lWing, PhysicsBody rWing, PhysicsBody lStub, PhysicsBody rStub,
+            PhysTransform tHead, PhysTransform tLWing, PhysTransform tRWing, PhysTransform tLStub, PhysTransform tRStub,
             Function<Vector3f, Vector3f> tw, float s) {
         Vector3f torsoO = tw.apply(v(0f, 0f, 0f));
         joints.add(joint(world, torso, head, mid(torsoO, tHead.origin), v(0,0,0), v(0,0,0), v(-40,-40,-40), v(40,40,40)));
@@ -1274,9 +1615,9 @@ public final class RagdollBodyFactory {
         joints.add(joint(world, torso, rStub, tRStub.origin, v(0,0,0), v(0,0,0), v(-1,-1,-1), v(1,1,1)));
     }
 
-    private static void buildBeeJoints(DiscreteDynamicsWorld world, List<TypedConstraint> joints,
-            RigidBody torso, RigidBody head, RigidBody lWing, RigidBody rWing, RigidBody lStub, RigidBody rStub,
-            Transform tHead, Transform tLWing, Transform tRWing, Transform tLStub, Transform tRStub,
+    private static void buildBeeJoints(PhysicsWorld world, List<PhysicsConstraint> joints,
+            PhysicsBody torso, PhysicsBody head, PhysicsBody lWing, PhysicsBody rWing, PhysicsBody lStub, PhysicsBody rStub,
+            PhysTransform tHead, PhysTransform tLWing, PhysTransform tRWing, PhysTransform tLStub, PhysTransform tRStub,
             Function<Vector3f, Vector3f> tw, float s) {
         Vector3f torsoO = tw.apply(v(0f, 0f, 0f));
         joints.add(joint(world, torso, head, mid(torsoO, tHead.origin), v(0,0,0), v(0,0,0), v(-30,-30,-30), v(30,30,30)));
@@ -1289,90 +1630,186 @@ public final class RagdollBodyFactory {
 
     // Low-level helpers
 
-    public static RigidBody makePart(DiscreteDynamicsWorld world, CollisionShape shape,
-                                     Vector3f position, Quat4f rotation,
-                                     float mass, Vector3f initialVel) {
-        float effectiveMass = mass * (float) RagdollifiedConfig.get(RagdollifiedConfig.MASS_SCALE);
-        Transform t = new Transform();
-        t.setIdentity();
-        t.origin.set(position);
-        t.setRotation(rotation);
-
-        Vector3f inertia = new Vector3f();
-        shape.calculateLocalInertia(effectiveMass, inertia);
-
-        RigidBodyConstructionInfo info = new RigidBodyConstructionInfo(
-                effectiveMass, new DefaultMotionState(t), shape, inertia);
-        info.linearDamping  = (float) RagdollifiedConfig.get(RagdollifiedConfig.LINEAR_DAMPING);
-        info.angularDamping = (float) RagdollifiedConfig.get(RagdollifiedConfig.ANGULAR_DAMPING);
-        info.restitution    = (float) RagdollifiedConfig.get(RagdollifiedConfig.RESTITUTION);
-        info.friction       = (float) RagdollifiedConfig.get(RagdollifiedConfig.FRICTION);
-        info.additionalDamping = true;
-
-        RigidBody body = new RigidBody(info);
-
+    public static PhysicsBody makePart(PhysicsWorld world, PhysicsShape shape,
+                                       Vector3f position, Quat4f rotation,
+                                       float mass, Vector3f initialVel) {
+        BodyProperties properties = PART_PROPERTIES.reset();
+        properties.mass = mass * (float) RagdollifiedConfig.get(RagdollifiedConfig.MASS_SCALE);
+        properties.linearDamping = (float) RagdollifiedConfig.get(RagdollifiedConfig.LINEAR_DAMPING);
+        properties.angularDamping = (float) RagdollifiedConfig.get(RagdollifiedConfig.ANGULAR_DAMPING);
+        properties.restitution = (float) RagdollifiedConfig.get(RagdollifiedConfig.RESTITUTION);
+        properties.friction = (float) RagdollifiedConfig.get(RagdollifiedConfig.FRICTION);
+        properties.sleepingLinearThreshold = 0.3f;
+        properties.sleepingAngularThreshold = 0.3f;
+        // Sleeping stays off: a slept body also stops receiving gravity, so one that woke from a
+        // floor break with zero velocity floated. Manual settle detection is authoritative.
+        properties.allowSleeping = false;
         // No initial-velocity clamp: the per-tick clamp handles excess, while capping at construction
         // would erase death-time momentum, and sprint speed alone already exceeds any low cap.
-        body.setLinearVelocity(new Vector3f(initialVel));
+        properties.linearVelocity.set(initialVel);
 
-        body.setDamping((float) RagdollifiedConfig.get(RagdollifiedConfig.LINEAR_DAMPING),
-                (float) RagdollifiedConfig.get(RagdollifiedConfig.ANGULAR_DAMPING));
-        body.setSleepingThresholds(0.3f, 0.3f);
-        // Disable Bullet auto-deactivation: a slept body also stops receiving gravity, so one that woke
-        // from a floor break with zero velocity floated. Manual settle detection is authoritative.
-        body.setActivationState(CollisionObject.DISABLE_DEACTIVATION);
-        if (shape instanceof BoxShape box) {
-            Vector3f halfExtents = new Vector3f();
-            box.getHalfExtentsWithoutMargin(halfExtents);
-            float smallestHalfExtent = Math.min(
-                    halfExtents.x, Math.min(halfExtents.y, halfExtents.z));
-            body.setCcdSweptSphereRadius(Math.max(0.005f, smallestHalfExtent * 0.8f));
-            body.setCcdMotionThreshold(0.15f);
+        if (shape.isBox()) {
+            shape.getHalfExtents(scratchHalfExtents);
+            float smallestHalfExtent = Math.min(scratchHalfExtents.x,
+                    Math.min(scratchHalfExtents.y, scratchHalfExtents.z));
+            properties.ccdSweptSphereRadius = Math.max(0.005f, smallestHalfExtent * 0.8f);
+            properties.ccdMotionThreshold = 0.15f;
         }
 
-        world.addRigidBody(body);
+        PhysicsBody body = world.createDynamicBody(shape, position, rotation, properties);
+        if (body == null) {
+            // A native backend refuses bodies once its preallocated pool is full. Saying so here is
+            // what turns that into a legible log line rather than a null dereference a frame later.
+            throw new IllegalStateException(
+                    "physics backend refused a ragdoll body (body budget exhausted?)");
+        }
+        world.addBody(body);
         return body;
     }
 
-    public static RigidBody makeStaticBody(DiscreteDynamicsWorld world, CollisionShape shape, Transform t) {
-        RigidBody rb = new RigidBody(new RigidBodyConstructionInfo(0f, new DefaultMotionState(t), shape, new Vector3f()));
-        rb.setCollisionFlags(rb.getCollisionFlags() | CollisionFlags.STATIC_OBJECT);
-        world.addRigidBody(rb);
-        return rb;
+    // Reused across the six bodies of one ragdoll. Body building runs only on the physics worker.
+    private static final BodyProperties PART_PROPERTIES = new BodyProperties();
+    private static final Vector3f scratchHalfExtents = new Vector3f();
+
+
+    private static void buildGuardianJoints(PhysicsWorld w,List<PhysicsConstraint> js,PhysicsBody t,PhysicsBody t0,PhysicsBody t1,PhysicsBody t2,PhysicsBody p4,PhysicsBody p5,Function<Vector3f,Vector3f> tw,float s){
+        Vector3f l=v(-.01f*s,-.01f*s,-.01f*s),u=v(.01f*s,.01f*s,.01f*s),al=v(-30,-25,-25),au=v(30,25,25);
+        js.add(joint(w,t,t0,tw.apply(v(0,0,.5f*s)),l,u,al,au));
+        js.add(joint(w,t0,t1,tw.apply(v(0,0,.875f*s)),l,u,al,au));
+        js.add(joint(w,t1,t2,tw.apply(v(0,0,1.3125f*s)),l,u,al,au));
+        addFixedProxyJoints(w,js,t,tw,p4,p5);
     }
 
-    public static Generic6DofConstraint joint(DiscreteDynamicsWorld world,
-                                              RigidBody a, RigidBody b, Vector3f anchor,
+    private static void buildSquidJoints(PhysicsWorld w,List<PhysicsConstraint> js,List<PhysicsBody> parts,Function<Vector3f,Vector3f> tw){
+        PhysicsBody body=parts.get(0);Vector3f l=v(-.008f,-.008f,-.008f),u=v(.008f,.008f,.008f);
+        for(int k=0;k<8;k++){
+            double ang=k*Math.PI*2.0/8.0;
+            Vector3f anchor=tw.apply(v(-(float)Math.cos(ang)*.3125f,-.4375f,(float)Math.sin(ang)*.3125f));
+            js.add(jointAtCurrentPose(w,body,parts.get(k+1),anchor,l,u,v(-55,-25,-55),v(55,25,55)));
+        }
+    }
+
+    // Trunk / nose / tail chain shared by the dolphin and the axolotl: headZ and tailZ are the anchor
+    // planes between the trunk and each end, in the factory's local Z.
+    private static void buildFinnedJoints(PhysicsWorld w,List<PhysicsConstraint> js,PhysicsBody t,PhysicsBody head,PhysicsBody tail,PhysicsBody p3,PhysicsBody p4,PhysicsBody p5,Function<Vector3f,Vector3f> tw,float headZ,float tailZ){
+        Vector3f l=v(-.006f,-.006f,-.006f),u=v(.006f,.006f,.006f);
+        js.add(joint(w,t,head,tw.apply(v(0,0,headZ)),l,u,v(-25,-25,-20),v(25,25,20)));
+        js.add(joint(w,t,tail,tw.apply(v(0,0,tailZ)),l,u,v(-30,-30,-25),v(30,30,25)));
+        addFixedProxyJoints(w,js,t,tw,p3,p4,p5);
+    }
+
+    private static void buildFishJoints(PhysicsWorld w,List<PhysicsConstraint> js,PhysicsBody t,PhysicsBody tail,PhysicsBody p2,PhysicsBody p3,PhysicsBody p4,PhysicsBody p5,Function<Vector3f,Vector3f> tw,BodyProfile profile){
+        float[] d=fishDimensions(profile);
+        Vector3f l=v(-.004f,-.004f,-.004f),u=v(.004f,.004f,.004f);
+        if(d[6]==0f) addFixedProxyJoints(w,js,t,tw,tail);
+        else js.add(joint(w,t,tail,tw.apply(v(0,0,d[2])),l,u,v(-30,-25,-20),v(30,25,20)));
+        addFixedProxyJoints(w,js,t,tw,p2,p3,p4,p5);
+    }
+
+    private static void buildWitherJoints(PhysicsWorld w,List<PhysicsConstraint> js,PhysicsBody t,PhysicsBody h,PhysicsBody tail,PhysicsBody proxy,PhysicsBody lh,PhysicsBody rh,Function<Vector3f,Vector3f> tw){
+        Vector3f l=v(-.02f,-.02f,-.02f),u=v(.02f,.02f,.02f);
+        js.add(joint(w,t,h,tw.apply(v(0,.73f,-.125f)),l,u,v(-35,-40,-25),v(45,40,25)));
+        js.add(joint(w,t,lh,tw.apply(v(-.78f,.85f,-.25f)),l,u,v(-30,-40,-30),v(30,40,30)));
+        js.add(joint(w,t,rh,tw.apply(v(.78f,.85f,-.25f)),l,u,v(-30,-40,-30),v(30,40,30)));
+        js.add(joint(w,t,tail,tw.apply(v(.0625f,-.69f,.2535f)),l,u,v(-40,-20,-20),v(40,20,20)));
+        addFixedProxyJoints(w,js,t,tw,proxy);
+    }
+
+    private static void buildEnderDragonJoints(PhysicsWorld w,List<PhysicsConstraint> js,List<PhysicsBody> parts,Function<Vector3f,Vector3f> tw){
+        PhysicsBody body=parts.get(0),head=parts.get(1),neck=parts.get(8),tail=parts.get(9);
+        Vector3f l=v(-.05f,-.05f,-.05f),u=v(.05f,.05f,.05f);
+        js.add(joint(w,body,neck,tw.apply(v(0,-.15f,-2.28f)),l,u,v(-30,-35,-20),v(30,35,20)));
+        js.add(joint(w,neck,head,tw.apply(v(0,-.3125f,-4.72f)),l,u,v(-35,-40,-25),v(35,40,25)));
+        js.add(joint(w,body,tail,tw.apply(v(0,.31f,1.97f)),l,u,v(-30,-35,-20),v(30,35,20)));
+        js.add(joint(w,body,parts.get(2),tw.apply(v(-.75f,-.4375f,-1.375f)),l,u,v(-45,-20,-30),v(45,20,30)));
+        js.add(joint(w,body,parts.get(3),tw.apply(v(.75f,-.4375f,-1.375f)),l,u,v(-45,-20,-30),v(45,20,30)));
+        js.add(joint(w,body,parts.get(6),tw.apply(v(-1f,-.1875f,1.125f)),l,u,v(-45,-20,-30),v(45,20,30)));
+        js.add(joint(w,body,parts.get(7),tw.apply(v(1f,-.1875f,1.125f)),l,u,v(-45,-20,-30),v(45,20,30)));
+        js.add(joint(w,body,parts.get(4),tw.apply(v(-.75f,.5f,.3125f)),l,u,v(-25,-20,-55),v(25,20,55)));
+        js.add(joint(w,body,parts.get(5),tw.apply(v(.75f,.5f,.3125f)),l,u,v(-25,-20,-55),v(25,20,55)));
+    }
+
+    private static PhysicsShape box(PhysicsWorld world, Vector3f halfExtents) {
+        return world.createBoxShape(halfExtents.x, halfExtents.y, halfExtents.z);
+    }
+
+    public static PhysicsBody makeStaticBody(PhysicsWorld world, PhysicsShape shape, PhysTransform t) {
+        PhysicsBody body = world.createStaticBody(shape, t);
+        world.addBody(body);
+        return body;
+    }
+
+    public static PhysicsConstraint joint(PhysicsWorld world,
+                                              PhysicsBody a, PhysicsBody b, Vector3f anchor,
                                               Vector3f linL, Vector3f linU,
                                               Vector3f angLDeg, Vector3f angUDeg) {
-        Transform ta = wt(a), tb = wt(b);
-        Transform localA = new Transform(); localA.setIdentity();
-        localA.origin.set(toLocal(ta, anchor));
-        Transform localB = new Transform(); localB.setIdentity();
-        localB.origin.set(toLocal(tb, anchor));
+        return joint(world, a, b, anchor, linL, linU, angLDeg, angUDeg, false, false);
+    }
 
-        Generic6DofConstraint c = new Generic6DofConstraint(a, b, localA, localB, true);
-        c.setLinearLowerLimit(linL);
-        c.setLinearUpperLimit(linU);
-        c.setAngularLowerLimit(rad(angLDeg));
-        c.setAngularUpperLimit(rad(angUDeg));
+    // keepCollision leaves the two parts colliding with each other; see PhysicsConstraint. Only safe
+    // for a pair whose authored shapes do not already overlap.
+    public static PhysicsConstraint joint(PhysicsWorld world,
+                                              PhysicsBody a, PhysicsBody b, Vector3f anchor,
+                                              Vector3f linL, Vector3f linU,
+                                              Vector3f angLDeg, Vector3f angUDeg,
+                                              boolean keepCollision) {
+        return joint(world, a, b, anchor, linL, linU, angLDeg, angUDeg, keepCollision, false);
+    }
+
+    // Build one joint and add it to the world. bakeCurrentPose makes the built pose the neutral (for
+    // rigs that aren't axis-aligned); never set it on a humanoid, or its death pose becomes permanent.
+    public static PhysicsConstraint joint(PhysicsWorld world,
+                                              PhysicsBody a, PhysicsBody b, Vector3f anchor,
+                                              Vector3f linL, Vector3f linU,
+                                              Vector3f angLDeg, Vector3f angUDeg,
+                                              boolean keepCollision, boolean bakeCurrentPose) {
+        PhysTransform ta = wt(a), tb = wt(b);
+        PhysTransform localA = new PhysTransform(); localA.setIdentity();
+        localA.origin.set(toLocal(ta, anchor));
+        PhysTransform localB = new PhysTransform(); localB.setIdentity();
+        localB.origin.set(toLocal(tb, anchor));
+        if (bakeCurrentPose) {
+            localB.basis.transpose(tb.basis);
+            localB.basis.mul(ta.basis);
+        }
+
+        Vector3f[] angular = angularLimits(angLDeg, angUDeg);
+        PhysicsConstraint c = world.createSixDofConstraint(a, b, localA, localB,
+                linL, linU, angular[0], angular[1]);
+        c.setKeepsCollision(keepCollision);
 
         a.activate(); b.activate();
-        world.addConstraint(c, true);
+        world.addConstraint(c);
         return c;
     }
 
-    private static Generic6DofConstraint jointAtCurrentPose(DiscreteDynamicsWorld world,
-            RigidBody a,RigidBody b,Vector3f anchor,Vector3f linL,Vector3f linU,
-            Vector3f angLDeg,Vector3f angUDeg){
-        Transform ta=wt(a),tb=wt(b);Transform localA=new Transform();localA.setIdentity();localA.origin.set(toLocal(ta,anchor));
-        Transform localB=new Transform();localB.setIdentity();localB.origin.set(toLocal(tb,anchor));
-        // Give both local frames the same initial world orientation, or a leg baked at 45 degrees reads
-        // as already violating its limit and the solver snaps it toward identity on the first step.
-        localB.basis.transpose(tb.basis);localB.basis.mul(ta.basis);
-        Generic6DofConstraint c=new Generic6DofConstraint(a,b,localA,localB,true);
-        c.setLinearLowerLimit(linL);c.setLinearUpperLimit(linU);c.setAngularLowerLimit(rad(angLDeg));c.setAngularUpperLimit(rad(angUDeg));
-        a.activate();b.activate();world.addConstraint(c,true);return c;
+    private static PhysicsConstraint jointAtCurrentPose(PhysicsWorld world,
+            PhysicsBody a, PhysicsBody b, Vector3f anchor, Vector3f linL, Vector3f linU,
+            Vector3f angLDeg, Vector3f angUDeg) {
+        return joint(world, a, b, anchor, linL, linU, angLDeg, angUDeg, false, true);
+    }
+
+    // The widest a limit is allowed to get once scaled. Past this a joint stops resisting at all and
+    // the axis may as well have been freed outright, which freeAngularAxes does deliberately.
+    private static final float MAX_LIMIT_DEG = 175f;
+
+    // Angular limits in radians: authored degrees, twist/roll widened by rangeScale or freed entirely.
+    // Pitch is left unscaled. Returns lower limits at [0] and upper at [1].
+    private static Vector3f[] angularLimits(Vector3f lowerDeg, Vector3f upperDeg) {
+        if (RagdollifiedConfig.get(RagdollifiedConfig.FREE_ANGULAR_AXES)) {
+            // lower > upper is how both backends spell "free axis"; see PhysicsWorld.
+            return new Vector3f[]{v(1f, 1f, 1f), v(-1f, -1f, -1f)};
+        }
+        float scale = (float) RagdollifiedConfig.get(RagdollifiedConfig.JOINT_RANGE_SCALE);
+        if (scale == 1f) return new Vector3f[]{rad(lowerDeg), rad(upperDeg)};
+        return new Vector3f[]{
+                rad(v(lowerDeg.x, clampLimitDeg(lowerDeg.y * scale), clampLimitDeg(lowerDeg.z * scale))),
+                rad(v(upperDeg.x, clampLimitDeg(upperDeg.y * scale), clampLimitDeg(upperDeg.z * scale)))
+        };
+    }
+
+    private static float clampLimitDeg(float deg) {
+        return Math.max(-MAX_LIMIT_DEG, Math.min(MAX_LIMIT_DEG, deg));
     }
 
     // Math utilities (package-visible for tests, private use)
@@ -1385,8 +1822,28 @@ public final class RagdollBodyFactory {
         return new Quat4f(x, y, z, w);
     }
 
-    // The renderer converts Bullet space to model space with a 180-degree Z turn, so conjugating the
-    // baked rotation by that turn gives the Bullet orientation that renders as the original angle.
+    // The orientation this part was drawn at, or the plain body rotation when nothing was captured.
+    private static Quat4f poseRot(MobPoseCapture.MobPose pose, RagdollPart part, Quat4f baseQuat) {
+        return pose == null ? baseQuat : pose.rotationFor(part, baseQuat);
+    }
+
+    // Where the part's body goes: the centre it was drawn at, falling back to the authored placement
+    // for a part with no captured transform.
+    private static Vector3f posePos(MobPoseCapture.MobPose pose, RagdollPart part, Vector3f authored) {
+        if (pose == null) return authored;
+        Vector3f captured = pose.centerFor(part);
+        return captured != null ? captured : authored;
+    }
+
+    // Body size as drawn, falling back to authored; the humanoid rig is a topology, not fixed proportions.
+    private static Vector3f poseBox(MobPoseCapture.MobPose pose, RagdollPart part, Vector3f authored) {
+        if (pose == null) return authored;
+        Vector3f captured = pose.extentsFor(part);
+        return captured != null ? new Vector3f(captured) : authored;
+    }
+
+    // The renderer converts physics space to model space with a 180-degree Z turn, so conjugating the
+    // baked rotation by that turn gives the physics orientation that renders as the original angle.
     private static Quat4f modelPartRotation(Quat4f base,float xRot,float yRot,float zRot){
         Quaternionf combined=new Quaternionf(base.x,base.y,base.z,base.w);
         Quaternionf flip=new Quaternionf().rotationZ((float)Math.PI);
@@ -1416,11 +1873,11 @@ public final class RagdollBodyFactory {
         return result;
     }
 
-    private static Transform wt(RigidBody b) {
-        Transform t = new Transform(); b.getMotionState().getWorldTransform(t); return t;
+    private static PhysTransform wt(PhysicsBody b) {
+        PhysTransform t = new PhysTransform(); b.getWorldTransform(t); return t;
     }
 
-    private static Vector3f toLocal(Transform wt, Vector3f worldPt) {
+    private static Vector3f toLocal(PhysTransform wt, Vector3f worldPt) {
         Vector3f d = new Vector3f(worldPt); d.sub(wt.origin);
         return rotQ(new Quat4f(-wt.getRotation(new Quat4f()).x, -wt.getRotation(new Quat4f()).y,
                                -wt.getRotation(new Quat4f()).z,  wt.getRotation(new Quat4f()).w), d);

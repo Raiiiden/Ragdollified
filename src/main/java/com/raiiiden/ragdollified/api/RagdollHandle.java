@@ -31,8 +31,8 @@ public final class RagdollHandle {
 
     public boolean isPersistent() { return ClientRagdollManager.isPersistent(entityId); }
 
-    // Treat this body as a fresh death ragdoll: pose kept, lifetime restarted, rest pose
-    // reported again for the corpse. For bodies an integration kept alive before the death.
+    // Treat this body as a fresh death ragdoll: pose kept, lifetime restarted, rest pose reported
+    // again to settle listeners. For bodies an integration kept alive before the death.
     public RagdollHandle restartDeathLifetime() {
         ClientRagdollManager.restartDeathLifetime(entityId);
         return this;

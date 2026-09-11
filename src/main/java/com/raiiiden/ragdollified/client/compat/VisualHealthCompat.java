@@ -19,7 +19,7 @@ public final class VisualHealthCompat {
     private static boolean available = false;
 
     // EntityHealthTracker statics
-    private static Method updateTier;   // (LivingEntity) — recomputes the tier from current health
+    private static Method updateTier;   // (LivingEntity): recomputes the tier from current health
     private static Method getTier;      // (int entityId) -> int
     // DamageRenderCheck.shouldRender(LivingEntity, DamageCheck...) plus its ALL constant, so the
     // user's "damage players / passive mobs / villagers" toggles apply to ragdolls too.
@@ -82,7 +82,7 @@ public final class VisualHealthCompat {
     }
 
     // Snapshot an entity's damage state for the ragdoll about to replace it. Safe to call from
-    // every spawn path — a repeat call at the same tier keeps the already-resolved textures.
+    // every spawn path: a repeat call at the same tier keeps the already-resolved textures.
     public static void capture(Object key, LivingEntity entity) {
         if (!available || entity == null) return;
         try {

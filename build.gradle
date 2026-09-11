@@ -2,10 +2,9 @@ plugins {
     id 'eclipse'
     id 'idea'
     id 'maven-publish'
-    id 'net.neoforged.gradle' version '[6.0,6.2)'
+    id 'net.minecraftforge.gradle' version '[6.0.18,6.2)'
     id 'org.parchmentmc.librarian.forgegradle' version '1.+'
     id 'org.spongepowered.mixin' version '0.7.+'
-    id 'com.github.johnrengelman.shadow' version '8.1.1'
 }
 
 version = "${minecraft_version}-${mod_version}"
@@ -19,6 +18,10 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(17)
 
 configurations {
     includedLibs
+    // jolt-jni's JVM classes, unpacked into the mod's own class output rather than put on the
+    // classpath as a library. See unpackJoltJniClasses for why that distinction decides whether
+    // the engine works at all.
+    joltJniClasses
 }
 
 println "Java: ${System.getProperty 'java.version'}, JVM: ${System.getProperty 'java.vm.version'} (${System.getProperty 'java.vendor'}), Arch: ${System.getProperty 'os.arch'}"
@@ -31,6 +34,11 @@ sourceSets {
     }
 
     datagen
+
+    // A bench for the physics engine, outside Minecraft. Nothing here ships: it depends on jolt-jni
+    // and nothing else, so it builds and runs without a Minecraft classpath and answers questions
+    // about joint behaviour and step cost in seconds instead of a game launch each.
+    tools
 }
 
 minecraft {
@@ -123,24 +131,68 @@ repositories {
             includeGroup "curse.maven"
         }
     }
+    // jolt-jni and its prebuilt natives are published here.
+    mavenCentral()
 }
 
 dependencies {
     minecraft "net.minecraftforge:forge:${minecraft_version}-${forge_version}"
 
+    // JBullet stays shipped as the fallback engine: it needs no native library, so it is what runs
+    // when Jolt's cannot be loaded on a user's platform.
     minecraftLibrary "cz.advel.jbullet:jbullet:20101010-1"
     includedLibs "cz.advel.jbullet:jbullet:20101010-1"
+    // vecmath is the engine-neutral math vocabulary the physics seam speaks, and it is part of the
+    // public addon API surface (RagdollTransform, RagdollifiedApi), so it outlives JBullet here.
     minecraftLibrary 'javax.vecmath:vecmath:1.5.2'
     includedLibs 'javax.vecmath:vecmath:1.5.2'
 
+    // jolt-jni JVM classes. Every platform artifact carries the same classes; which one provides
+    // them is arbitrary. The natives below are what differ.
+    //
+    // compileOnly, deliberately: at runtime these classes must come from the mod's own class output
+    // and from nowhere else, so that they share a classloader with the code that loads the native
+    // library. unpackJoltJniClasses puts them there; a second copy on the library classpath would
+    // give the loader something to delegate to and put us back where we started.
+    compileOnly "com.github.stephengold:jolt-jni-Windows64:${jolt_version}"
+    joltJniClasses "com.github.stephengold:jolt-jni-Windows64:${jolt_version}"
+
+    // Native binaries for every platform a 1.20.1 client realistically runs on. All are bundled and
+    // the loader extracts the matching one at runtime; see JoltNatives.
+    //
+    // Both configurations, and the pairing matters: includedLibs is packaging only, so declaring the
+    // natives there alone ships them correctly but leaves them off the dev run's classpath — the
+    // game then starts with the jolt-jni classes present, finds no library to extract, and silently
+    // falls back to JBullet. minecraftLibrary is what puts them in front of runClient.
+    [
+            "Windows64",
+            "Linux64",
+            "Linux_ARM64",
+            "MacOSX64",
+            "MacOSX_ARM64"
+    ].each { platform ->
+        def coordinate = "com.github.stephengold:jolt-jni-${platform}:${jolt_version}:${jolt_natives}"
+        minecraftLibrary coordinate
+        includedLibs coordinate
+    }
+
     datagenImplementation sourceSets.main.output
+
+    // The rig talks to jolt-jni directly and needs a native to load, so it takes both the classes
+    // and every platform's binary; it picks the one matching the machine it runs on.
+    toolsImplementation "com.github.stephengold:jolt-jni-Windows64:${jolt_version}"
+    toolsRuntimeOnly "com.github.stephengold:jolt-jni-Windows64:${jolt_version}:${jolt_natives}"
+    toolsRuntimeOnly "com.github.stephengold:jolt-jni-Linux64:${jolt_version}:${jolt_natives}"
+    toolsRuntimeOnly "com.github.stephengold:jolt-jni-MacOSX64:${jolt_version}:${jolt_natives}"
+    toolsRuntimeOnly "com.github.stephengold:jolt-jni-MacOSX_ARM64:${jolt_version}:${jolt_natives}"
 
     annotationProcessor "org.spongepowered:mixin:${mixin_version}:processor"
     implementation fg.deobf("curse.maven:configured-457570:5180900")
     //implementation fg.deobf("curse.maven:better-blood-overlay-1332112:8405671")
     //implementation fg.deobf("curse.maven:visual-health-1473785:8368722")
     //implementation fg.deobf("curse.maven:curios-309927:6418456")
-    //implementation fg.deobf("curse.maven:timeless-and-classics-zero-1028108:6654541")
+    compileOnly fg.deobf("curse.maven:timeless-and-classics-zero-1028108:6654541")
+    runtimeOnly fg.deobf("curse.maven:timeless-and-classics-zero-1028108:6654541")
     // EMF 3.0.7 has a hard runtime dependency on ETF 7+. CurseForge keeps both loader files
     // under this historical project slug; file 7249541 is the Forge ETF 7.0.6 jar for 1.20.1.
     runtimeOnly fg.deobf("curse.maven:entity-texture-features-fabric-568563:7249541")
@@ -150,21 +202,64 @@ dependencies {
     //implementation fg.deobf("curse.maven:spark-361579:4738952")
     //implementation fg.deobf("curse.maven:lesraisins-armor-1021131:7343690")
     //implementation fg.deobf("curse.maven:customnpcs-unofficial-1052708:7694841")
+    //runtimeOnly fg.deobf("curse.maven:accuratehitboxes-1495830:8677048")
+    compileOnly fg.deobf("curse.maven:accuratehitboxes-1495830:8677048")
 }
 
 tasks.withType(ProcessResources).configureEach {
     var replaceProperties = [
-        minecraft_version: minecraft_version, minecraft_version_range: minecraft_version_range,
-        forge_version: forge_version, forge_version_range: forge_version_range,
-        loader_version_range: loader_version_range,
-        mod_id: mod_id, mod_name: mod_name, mod_license: mod_license, mod_version: mod_version,
-        mod_authors: mod_authors, mod_description: mod_description
+            minecraft_version: minecraft_version, minecraft_version_range: minecraft_version_range,
+            forge_version: forge_version, forge_version_range: forge_version_range,
+            loader_version_range: loader_version_range,
+            mod_id: mod_id, mod_name: mod_name, mod_license: mod_license, mod_version: mod_version,
+            mod_authors: mod_authors, mod_description: mod_description
     ]
     inputs.properties replaceProperties
 
     filesMatching(['META-INF/mods.toml', 'pack.mcmeta', "${mod_id}.mixins.json".toString()]) {
         expand replaceProperties + [project: project]
     }
+}
+
+// JNI binds a native library to the classloader of the class that called System.load, and it can
+// only satisfy native methods declared by classes from that same loader. FML's dev launcher gives
+// the mod exactly two class roots — build/resources/main and build/classes/java/main — and puts
+// every declared library on a different loader. So jolt-jni's classes are unpacked into the mod's
+// own class output: with them on the library classpath instead, System.load succeeds, every
+// com.github.stephengold.joltjni native method stays unbound, and the first call throws
+// UnsatisfiedLinkError. This also carries them into the shipped jar, since the jar task already
+// packages the source set's output.
+// Drops the humanoid on a floor and prints how far each limb moves and what the step costs.
+// Options are system properties: -Drig.mode=free-rot, -Drig.selfCollide=true, -Drig.collisionSteps=N,
+// -Drig.velocitySteps=N, -Drig.positionSteps=N. See RagdollRig for what each one answers.
+tasks.register('runRagdollRig', JavaExec) {
+    group = 'verification'
+    description = 'Runs the standalone ragdoll physics bench (no Minecraft required).'
+    classpath = sourceSets.tools.runtimeClasspath
+    mainClass = 'com.raiiiden.ragdollified.tools.RagdollRig'
+    // Forward any -Drig.* the caller passed to Gradle.
+    doFirst {
+        System.properties.each { key, value ->
+            if (key.toString().startsWith('rig.')) systemProperty(key.toString(), value)
+        }
+    }
+}
+
+tasks.register('unpackJoltJniClasses', Copy) {
+    dependsOn tasks.named('compileJava')
+    from({ configurations.joltJniClasses.collect { zipTree(it) } }) {
+        exclude 'META-INF/**'
+        // jolt-jni is a named module. Left in place, its module-info would make the mod's own class
+        // output read as that module, and every package the mod actually uses — Minecraft, Forge,
+        // JOML — becomes invisible to the compiler on the next build.
+        exclude 'module-info.class'
+    }
+    into layout.buildDirectory.dir('classes/java/main')
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+}
+
+tasks.named('classes').configure {
+    dependsOn tasks.named('unpackJoltJniClasses')
 }
 
 tasks.named('jar', Jar).configure {

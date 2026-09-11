@@ -1,8 +1,7 @@
 package com.raiiiden.ragdollified.client;
 
-import com.bulletphysics.collision.narrowphase.ManifoldPoint;
-import com.bulletphysics.collision.narrowphase.PersistentManifold;
-import com.bulletphysics.dynamics.RigidBody;
+import com.raiiiden.ragdollified.physics.ContactPair;
+import com.raiiiden.ragdollified.physics.PhysicsBody;
 import com.raiiiden.ragdollified.RagdollPart;
 import com.raiiiden.ragdollified.Ragdollified;
 import com.raiiiden.ragdollified.api.RagdollCollision;
@@ -44,6 +43,7 @@ public final class RagdollCollisionTracker {
     private static final Vector3f velocityA = new Vector3f();
     private static final Vector3f velocityB = new Vector3f();
     private static final Vector3f relative = new Vector3f();
+    private static final Vector3f normal = new Vector3f();
 
     public static void addListener(RagdollCollisionListener listener, double minImpactSpeed) {
         if (listener == null) return;
@@ -78,38 +78,45 @@ public final class RagdollCollisionTracker {
     }
 
     // Physics worker, after the step: turn every newly formed contact into a queued event.
-    public static void collect(ClientJbulletWorld physicsWorld,
-                               IdentityHashMap<RigidBody, ClientRagdoll> bodyOwners) {
+    public static void collect(ClientPhysicsWorld physicsWorld,
+                               IdentityHashMap<PhysicsBody, ClientRagdoll> bodyOwners) {
         if (!active) return;
-        List<PersistentManifold> manifolds = physicsWorld.getDispatcher().getInternalManifoldPointer();
-        for (PersistentManifold manifold : manifolds) {
-            int numContacts = manifold.getNumContacts();
-            if (numContacts == 0) continue;
-            RigidBody a = (RigidBody) manifold.getBody0();
-            RigidBody b = (RigidBody) manifold.getBody1();
-            ClientRagdoll ownerA = bodyOwners.get(a);
-            ClientRagdoll ownerB = bodyOwners.get(b);
-            // Joint jitter between two parts of the same body is not a collision worth reporting.
-            if (ownerA == null && ownerB == null) continue;
-            if (ownerA != null && ownerA == ownerB) continue;
+        owners = bodyOwners;
+        physicsWorld.getPhysics().forEachContactPair(RagdollCollisionTracker::collectPair);
+        owners = null;
+    }
 
-            for (int i = 0; i < numContacts; i++) {
-                ManifoldPoint point = manifold.getContactPoint(i);
-                if (point.getLifeTime() > 1) continue;
-                if (ownerA != null) report(ownerA, a, ownerB, b, point, false);
-                if (ownerB != null) report(ownerB, b, ownerA, a, point, true);
-            }
+    // Handed to the visitor for the duration of one collect() call; the physics worker is the only
+    // thread that runs collect, so a field is enough to carry it into the callback.
+    private static IdentityHashMap<PhysicsBody, ClientRagdoll> owners;
+
+    private static void collectPair(ContactPair pair) {
+        int numContacts = pair.contactCount();
+        if (numContacts == 0) return;
+        PhysicsBody a = pair.bodyA();
+        PhysicsBody b = pair.bodyB();
+        ClientRagdoll ownerA = owners.get(a);
+        ClientRagdoll ownerB = owners.get(b);
+        // Joint jitter between two parts of the same body is not a collision worth reporting.
+        if (ownerA == null && ownerB == null) return;
+        if (ownerA != null && ownerA == ownerB) return;
+
+        for (int i = 0; i < numContacts; i++) {
+            pair.selectContact(i);
+            if (!pair.isNewContact()) continue;
+            if (ownerA != null) report(ownerA, a, ownerB, b, pair, false);
+            if (ownerB != null) report(ownerB, b, ownerA, a, pair, true);
         }
     }
 
-    private static void report(ClientRagdoll owner, RigidBody body,
-                               ClientRagdoll otherOwner, RigidBody other,
-                               ManifoldPoint point, boolean flipNormal) {
+    private static void report(ClientRagdoll owner, PhysicsBody body,
+                               ClientRagdoll otherOwner, PhysicsBody other,
+                               ContactPair pair, boolean flipNormal) {
         int partIndex = owner.partIndexOf(body);
         RagdollPart part = RagdollPart.byIndex(partIndex);
         if (part == null) return;
 
-        contactPoint.set(point.positionWorldOnB);
+        pair.getPositionOnB(contactPoint);
         if (!owner.readImpactVelocity(partIndex, contactPoint, velocityA)) velocityA.set(0f, 0f, 0f);
         if (otherOwner == null || !otherOwner.readImpactVelocity(
                 otherOwner.partIndexOf(other), contactPoint, velocityB)) {
@@ -117,7 +124,8 @@ public final class RagdollCollisionTracker {
         }
         relative.sub(velocityA, velocityB);
 
-        float nx = point.normalWorldOnB.x, ny = point.normalWorldOnB.y, nz = point.normalWorldOnB.z;
+        pair.getNormalOnB(normal);
+        float nx = normal.x, ny = normal.y, nz = normal.z;
         if (flipNormal) { nx = -nx; ny = -ny; nz = -nz; }
         double impactSpeed = Math.abs(relative.x * nx + relative.y * ny + relative.z * nz);
         if (impactSpeed < lowestThreshold) return;
@@ -142,8 +150,17 @@ public final class RagdollCollisionTracker {
                 new Vec3(contactPoint.x, contactPoint.y, contactPoint.z),
                 new Vec3(nx, ny, nz),
                 impactSpeed, relative.length(),
-                point.appliedImpulse, Math.max(0.0, -point.getDistance()),
+                appliedImpulse(pair, body, impactSpeed), Math.max(0.0, -pair.distance()),
                 blockPos, otherEntityId, otherPart));
+    }
+
+    // Jolt doesn't expose solver impulse, so estimate it from the momentum the part lost into the contact.
+    private static float appliedImpulse(ContactPair pair, PhysicsBody body, double impactSpeed) {
+        float solverImpulse = pair.appliedImpulse();
+        if (solverImpulse != 0f) return solverImpulse;
+        float invMass = body.getInvMass();
+        if (invMass <= 0f) return 0f;
+        return (float) (impactSpeed / invMass);
     }
 
     private static void enqueue(RagdollCollision collision) {

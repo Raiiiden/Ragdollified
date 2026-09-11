@@ -54,7 +54,7 @@ public class GeckoLibArmorHelper {
                                            HumanoidModel<?> baseModel) {
         if (!isGeckoLibAvailable()) return;
 
-        // GeckoLib requires a LivingEntity — use a proxy ArmorStand if the real entity isn't one
+        // GeckoLib requires a LivingEntity: use a proxy ArmorStand if the real entity isn't one
         LivingEntity livingEntity;
         if (entity instanceof LivingEntity le) {
             livingEntity = le;
@@ -197,7 +197,7 @@ public class GeckoLibArmorHelper {
             try {
                 armorModel.renderToBuffer(
                         poseStack,           // PoseStack
-                        null,                // VertexConsumer - GeckoLib gets this internally
+                        null,                // VertexConsumer: GeckoLib gets this internally
                         light,               // packedLight
                         overlay,             // packedOverlay
                         1.0f,                // red

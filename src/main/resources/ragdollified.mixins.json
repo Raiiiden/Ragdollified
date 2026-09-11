@@ -6,7 +6,8 @@
   "client": [
     "ClientLevelBlockChangeMixin",
     "HideDeadEntityMixin",
-    "CameraAccessor"
+    "CameraAccessor",
+    "ModelPartCaptureMixin"
   ],
   "minVersion": "0.8.5"
 }

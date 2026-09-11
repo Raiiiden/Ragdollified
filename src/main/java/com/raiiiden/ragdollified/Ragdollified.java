@@ -27,9 +27,6 @@ public class Ragdollified {
         var modEventBus = FMLJavaModLoadingContext.get().getModEventBus();
 
         MinecraftForge.EVENT_BUS.register(this);
-        com.raiiiden.ragdollified.entity.ModEntities.register(modEventBus);
-        com.raiiiden.ragdollified.item.ModItems.register(modEventBus);
-        com.raiiiden.ragdollified.menu.ModMenus.register(modEventBus);
         ServerRagdollHitTracker.registerOptionalTaczHandler(MinecraftForge.EVENT_BUS);
         DistExecutor.unsafeRunWhenOn(Dist.CLIENT, () -> () ->
                 com.raiiiden.ragdollified.client.RagdollHitTracker.registerOptionalTaczHandler(MinecraftForge.EVENT_BUS));
@@ -65,6 +62,5 @@ public class Ragdollified {
     @SubscribeEvent
     public void onRegisterCommands(RegisterCommandsEvent event) {
         SpawnRagdollCommand.register(event.getDispatcher());
-        com.raiiiden.ragdollified.command.RetrieveCorpseCommand.register(event.getDispatcher());
     }
 }

@@ -46,6 +46,17 @@ public final class RagdollSpawnState {
     public static Vec3 captureLinearVelocity(LivingEntity entity) {
         VelocitySample sample = PRE_HIT_VELOCITIES.remove(key(entity));
         Vec3 movement = sample != null ? sample.velocity : entity.getDeltaMovement();
+
+        // LivingHurtEvent never fires client-side and remote mobs' delta movement is usually empty,
+        // so distance covered last tick is the reliable speed measure.
+        if (sample == null) {
+            Vec3 travelled = new Vec3(
+                    entity.getX() - entity.xOld,
+                    entity.getY() - entity.yOld,
+                    entity.getZ() - entity.zOld);
+            if (travelled.lengthSqr() > movement.lengthSqr()) movement = travelled;
+        }
+
         return movement.scale(TICKS_PER_SECOND);
     }
 

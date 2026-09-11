@@ -16,15 +16,14 @@ import net.minecraftforge.fml.common.Mod;
 @Mod.EventBusSubscriber(modid = Ragdollified.MODID)
 public class PhysicsHooks {
 
-    // HIGHEST so the ragdoll's worn armor is read into the spawn packet BEFORE CorpseManager
-    // (LOWEST) clears the player's inventory into the corpse — otherwise the ragdoll spawns bare.
+    // HIGHEST so worn armor is read before a looting addon clears the inventory at LOWEST.
     @SubscribeEvent(priority = EventPriority.HIGHEST)
     public static void onLivingDeath(LivingDeathEvent event) {
         LivingEntity entity = event.getEntity();
         if (entity.level().isClientSide) return;
 
         // Large and medium slimes are replacement/split deaths, not the end of the mob family.
-        // Only the size-one child leaves a corpse; this covers MagmaCube as it extends Slime.
+        // Only the size-one child leaves a body; this covers MagmaCube as it extends Slime.
         if (entity instanceof net.minecraft.world.entity.monster.Slime slime && slime.getSize() > 1) return;
 
         boolean isPlayer = entity instanceof ServerPlayer;
@@ -134,19 +133,31 @@ public class PhysicsHooks {
             Vec3 impulse = RagdollHitMapper.computeImpulse(
                     hitInfo.direction, hitInfo.isHeadShot, hitInfo.isTaczBullet, hitInfo.isMelee, hitInfo.damage);
             if (impulse != null) {
-                RagdollPart part = RagdollHitMapper.map(entity, hitInfo.hitPos, hitInfo.direction, hitInfo.isHeadShot);
-                hitPartIndex = RagdollHitMapper.isCenteredHit(entity, hitInfo.hitPos, hitInfo.isHeadShot, part)
+                RagdollHitMapper.Resolution resolution = RagdollHitMapper.resolve(
+                        entity, hitInfo.hitPos, hitInfo.direction, hitInfo.isHeadShot);
+                RagdollPart part = resolution.part;
+                // Where the shooter stood decides which side of the body takes it, before anything
+                // else reads the impact point, including the centred test below.
+                resolution = resolution.withImpact(RagdollHitMapper.biasTowardShooter(
+                        entity, part, resolution.impact, hitInfo.direction,
+                        RagdollifiedConfig.get(RagdollifiedConfig.HIT_ATTACKER_SIDE_BIAS)));
+                // Judged at the impact point for the same reason the lever arm is: whether a shot
+                // went through the middle of the chest is a fact about the body, not about the muzzle.
+                hitPartIndex = RagdollHitMapper.isCenteredHit(
+                        entity, resolution.impact, hitInfo.isHeadShot, part)
                         ? (byte) RagdollHitMapper.CENTER_HIT_PART_INDEX
                         : (byte) part.index;
                 hitImpulseX = (float) impulse.x;
                 hitImpulseY = (float) impulse.y;
                 hitImpulseZ = (float) impulse.z;
-                if (hitInfo.hitPos != null) {
+                // The point the shot entered the body, not where it started (that gave a gun-sized lever arm).
+                if (resolution.impact != null) {
                     Vec3 origin = entity.position();
-                    hitOffsetX = (float) (hitInfo.hitPos.x - origin.x);
-                    hitOffsetY = (float) (hitInfo.hitPos.y - origin.y);
-                    hitOffsetZ = (float) (hitInfo.hitPos.z - origin.z);
+                    hitOffsetX = (float) (resolution.impact.x - origin.x);
+                    hitOffsetY = (float) (resolution.impact.y - origin.y);
+                    hitOffsetZ = (float) (resolution.impact.z - origin.z);
                 }
+                logResolvedHit(entity, resolution, impulse, hitPartIndex);
             }
         }
 
@@ -176,7 +187,33 @@ public class PhysicsHooks {
                 villagerType, villagerProfession, villagerLevel
         );
 
+        // Ask amputation addons what's already missing so the ragdoll spawns without it (humanoids only).
+        int severedMask = com.raiiiden.ragdollified.api.RagdollifiedServerApi.resolveSeveredPartMask(entity);
+        if (severedMask != 0) packet.severedMask(severedMask);
+
         ServerRagdollSyncManager.registerDeath(entity, packet);
+    }
+
+    // Config-gated log of where a shot landed: the part hit and the impact point in the mob's frame
+    // (X right, Y up from feet, Z forward), comparable against RagdollHitMapper's layout tables.
+    private static void logResolvedHit(LivingEntity entity, RagdollHitMapper.Resolution resolution,
+                                       Vec3 impulse, byte sentPartIndex) {
+        if (!RagdollifiedConfig.get(RagdollifiedConfig.HIT_LOG_RESOLVED)) return;
+        Vec3 local = RagdollHitMapper.toBodyLocal(entity, resolution.impact);
+        Ragdollified.LOGGER.info(
+                "hit {} via {}: part={}{} at right={} up={} fwd={} (yaw {}), impulse=({}, {}, {}) |J|={}",
+                entity.getType().getDescriptionId(),
+                resolution.source,
+                resolution.part,
+                sentPartIndex == RagdollHitMapper.CENTER_HIT_PART_INDEX ? " [centred]" : "",
+                local == null ? "?" : String.format("%.3f", local.x),
+                local == null ? "?" : String.format("%.3f", local.y),
+                local == null ? "?" : String.format("%.3f", local.z),
+                String.format("%.1f", entity.getVisualRotationYInDegrees()),
+                String.format("%.2f", impulse.x),
+                String.format("%.2f", impulse.y),
+                String.format("%.2f", impulse.z),
+                String.format("%.2f", impulse.length()));
     }
 
 }

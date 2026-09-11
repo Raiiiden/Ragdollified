@@ -1,14 +1,11 @@
 package com.raiiiden.ragdollified.client;
 
 import com.raiiiden.ragdollified.Ragdollified;
-import com.raiiiden.ragdollified.client.compat.BetterBloodOverlayCompat;
 import com.raiiiden.ragdollified.client.compat.GeckoLibArmorHelper;
 import com.raiiiden.ragdollified.config.RagdollifiedConfig;
-import com.raiiiden.ragdollified.entity.CorpseEntity;
 import net.minecraftforge.client.event.ClientPlayerNetworkEvent;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.event.TickEvent;
-import net.minecraftforge.event.entity.EntityLeaveLevelEvent;
 import net.minecraftforge.event.level.LevelEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
@@ -27,9 +24,9 @@ public class ClientTickHandler {
             // tick still runs is dropped: skipping a tick beats doubling up later.
             ClientRagdollManager.submitTick();
 
-            // Corpse bridge — report the local player's ragdoll settle to the server and
-            // hand off rendering from the physics ragdoll to the posed corpse entity.
-            ClientRagdollManager.tickCorpseClient();
+            // Settle bridge: hand every locally simulated player ragdoll's rest pose to the
+            // registered API listeners. No-op while nothing has registered.
+            ClientRagdollManager.tickSettleReports();
             ClientRagdollManager.tickRagdollSyncClient();
 
             ClientRagdollManager.tickRagdollStreamClient();
@@ -37,7 +34,7 @@ public class ClientTickHandler {
             // Hand the physics worker's queued contacts to API listeners on this thread.
             RagdollCollisionTracker.dispatchPending();
 
-            // Cleanup every 5 seconds (still on render thread — cheap)
+            // Cleanup every 5 seconds (still on render thread, cheap)
             if (tickCounter >= 100) {
                 ClientMobTextureCache.cleanup();
                 tickCounter = 0;
@@ -51,16 +48,6 @@ public class ClientTickHandler {
             ClientRagdollManager.onWorldUnload();
             RagdollCollisionTracker.clear();
             GeckoLibArmorHelper.onWorldUnload();
-        }
-    }
-
-    // A corpse keeps the blood and damage of the ragdoll it replaced, so free its wound textures when it
-    // goes but keep the capture. The removal reason cannot distinguish gone from merely out of range.
-    @SubscribeEvent
-    public static void onCorpseLeaveLevel(EntityLeaveLevelEvent event) {
-        if (!event.getLevel().isClientSide()) return;
-        if (event.getEntity() instanceof CorpseEntity corpse) {
-            BetterBloodOverlayCompat.releaseTextures(corpse.getUUID());
         }
     }
 

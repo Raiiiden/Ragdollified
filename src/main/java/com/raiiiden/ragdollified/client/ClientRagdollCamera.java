@@ -91,12 +91,10 @@ public final class ClientRagdollCamera {
 
         float partialTick = (float) event.getPartialTick();
         RagdollTransform transform;
-        if (current.options.smoothed()) {
-            current.ragdoll.updateSmoothedRenderState(snapshot, partialTick, frame);
-            transform = current.ragdoll.getSmoothedTransform(current.part);
-        } else {
-            transform = snapshot.getInterpolatedTransform(current.part, partialTick);
-        }
+        current.ragdoll.updateSmoothedRenderState(snapshot, partialTick, frame);
+        transform = current.options.smoothed()
+                ? current.ragdoll.getSmoothedTransform(current.part)
+                : current.ragdoll.getPlaybackTransform(current.part);
         if (transform == null) return;
 
         apply(event, minecraft, transform, current.options);
@@ -107,7 +105,7 @@ public final class ClientRagdollCamera {
     }
 
     // True when the local camera is inside this ragdoll's head, so the renderer can skip it.
-    // Local only — every other client still draws the full body.
+    // Local only: every other client still draws the full body.
     public static boolean isHeadHidden(int ragdollId) {
         return headViewRagdollId == ragdollId;
     }
@@ -217,7 +215,7 @@ public final class ClientRagdollCamera {
     }
 
     // Push the eye to the nearest spot with clear space around it, giving up if nothing within
-    // MAX_ESCAPE is free — a wildly displaced camera reads worse than a briefly clipped one.
+    // MAX_ESCAPE is free: a wildly displaced camera reads worse than a briefly clipped one.
     private static Vec3 escapeSolids(Level level, Vec3 position) {
         if (isClear(level, position)) return position;
         for (double distance = ESCAPE_STEP; distance <= MAX_ESCAPE; distance += ESCAPE_STEP) {
@@ -230,7 +228,7 @@ public final class ClientRagdollCamera {
         return position;
     }
 
-    // Block collisions only — entities never occlude the camera, and neither does the border.
+    // Block collisions only: entities never occlude the camera, and neither does the border.
     private static boolean isClear(Level level, Vec3 position) {
         AABB box = new AABB(
                 position.x - NEAR_RADIUS, position.y - NEAR_RADIUS, position.z - NEAR_RADIUS,

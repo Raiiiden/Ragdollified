@@ -1,5 +1,6 @@
 package com.raiiiden.ragdollified.client;
 
+import com.mojang.blaze3d.vertex.BufferBuilder;
 import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.blaze3d.vertex.VertexConsumer;
 import com.raiiiden.ragdollified.*;
@@ -37,6 +38,7 @@ import net.minecraft.client.resources.DefaultPlayerSkin;
 
 import javax.vecmath.Vector3f;
 import java.lang.reflect.Field;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -68,7 +70,7 @@ public class ClientRagdollRenderer {
     private static DrownedModel<?> drownedModel;
     private static CreeperModel<?> creeperModel;
     // PiglinModel adds the ear, nose and tusk cubes on top of HumanoidModel, so piglins and
-    // zombified piglins use it — on the bare model they look like bald zombies.
+    // zombified piglins use it: on the bare model they look like bald zombies.
     private static net.minecraft.client.model.PiglinModel<?> piglinModel;
 
     // Overlay models: second-layer copies baked from inflated layer definitions, mirroring the base
@@ -134,6 +136,17 @@ public class ClientRagdollRenderer {
     private static ModelPart ghastRoot;
     private static ModelPart vexRoot;
     private static ModelPart wardenRoot;
+    private static ModelPart guardianRoot;
+    private static ModelPart squidRoot;
+    private static ModelPart dolphinRoot;
+    private static ModelPart axolotlRoot;
+    private static ModelPart codRoot;
+    private static ModelPart salmonRoot;
+    private static ModelPart tropicalFishRoot;
+    private static ModelPart pufferfishRoot;
+    private static ModelPart tadpoleRoot;
+    private static ModelPart witherRoot;
+    private static ModelPart dragonRoot;
 
     private static final ResourceLocation CAT_COLLAR_TEXTURE =
             new ResourceLocation("minecraft", "textures/entity/cat/cat_collar.png");
@@ -295,11 +308,25 @@ public class ClientRagdollRenderer {
             ghastRoot = GhastModel.createBodyLayer().bakeRoot();
             vexRoot = VexModel.createBodyLayer().bakeRoot();
             wardenRoot = WardenModel.createBodyLayer().bakeRoot();
+            guardianRoot = GuardianModel.createBodyLayer().bakeRoot();
+            squidRoot = SquidModel.createBodyLayer().bakeRoot();
+            dolphinRoot = DolphinModel.createBodyLayer().bakeRoot();
+            axolotlRoot = AxolotlModel.createBodyLayer().bakeRoot();
+            codRoot = CodModel.createBodyLayer().bakeRoot();
+            salmonRoot = SalmonModel.createBodyLayer().bakeRoot();
+            // Tropical fish come in two body shapes; the small "flopper" body is the one this rig is
+            // measured against, so every tropical fish corpse uses it.
+            tropicalFishRoot = TropicalFishModelA.createBodyLayer(CubeDeformation.NONE).bakeRoot();
+            // Death deflates a pufferfish, so the small model is the right one for a corpse.
+            pufferfishRoot = PufferfishSmallModel.createBodyLayer().bakeRoot();
+            tadpoleRoot = TadpoleModel.createBodyLayer().bakeRoot();
+            witherRoot = WitherBossModel.createBodyLayer(CubeDeformation.NONE).bakeRoot();
+            dragonRoot = net.minecraft.client.renderer.entity.EnderDragonRenderer.createBodyLayer().bakeRoot();
 
             mobArmorInner = freshMobArmor(0.5F);
             mobArmorOuter = freshMobArmor(1.0F);
 
-            // Set all model parts visible once — no need to do this every frame
+            // Set all model parts visible once; no need to do this every frame
             setAllPartsVisible(normalModel);
             setAllPartsVisible(slimModel);
             setAllPartsVisible(standardHumanoidModel);
@@ -398,7 +425,8 @@ public class ClientRagdollRenderer {
         com.raiiiden.ragdollified.client.compat.BetterBloodOverlayCompat.releasePending();
 
         var ragdolls = ClientRagdollManager.getAll();
-        if (ragdolls.isEmpty()) {
+        var detachedLimbs = ClientDetachedLimbManager.getAll();
+        if (ragdolls.isEmpty() && detachedLimbs.isEmpty()) {
             recordRenderFrame(0, 0, 0);
             return;
         }
@@ -413,9 +441,12 @@ public class ClientRagdollRenderer {
         Vec3 camPos = camera.getPosition();
         float partialTick = event.getPartialTick();
 
-        MultiBufferSource.BufferSource buffer = Minecraft.getInstance().renderBuffers().bufferSource();
+        MultiBufferSource.BufferSource buffer = ragdollBuffer();
+        double renderDistance = RagdollifiedConfig.RENDER_DISTANCE.get();
+        double cullDistSq = renderDistance * renderDistance;
 
-        int rendered = 0;
+        // Collect then draw back to front, since translucent player bodies composite in submission order.
+        drawList.clear();
         int culled = 0;
         for (ClientRagdoll ragdoll : ragdolls) {
             // One snapshot per ragdoll per frame, so everything drawn off it stays coherent even if
@@ -428,38 +459,189 @@ public class ClientRagdollRenderer {
             ragdoll.updateSmoothedRenderState(
                     snap, partialTick, ClientRagdollCamera.currentRenderFrame());
 
-            // Distance culling — 48 blocks. Use the smoothed torso pos so the cull
+            // Distance culling. Use the smoothed torso pos so the cull
             // boundary itself doesn't jitter (caused pop-in artifacts at the edge).
             Vector3f torsoPos = ragdoll.getSmoothedTorsoPos();
             double distSq = camPos.distanceToSqr(torsoPos.x, torsoPos.y, torsoPos.z);
-            double renderDistance = RagdollifiedConfig.RENDER_DISTANCE.get();
-            if (distSq > renderDistance * renderDistance) {
+            if (distSq > cullDistSq) {
                 culled++;
                 continue;
             }
 
-            int light = getLightLevel(torsoPos);
+            drawList.add(Drawable.ragdoll(ragdoll, snap, distSq, getLightLevel(torsoPos)));
+        }
 
+        for (ClientDetachedLimb limb : detachedLimbs) {
+            ClientDetachedLimb.Snapshot snapshot = limb.getSnapshot();
+            if (snapshot == null || snapshot.destroyed) continue;
+            limb.updateSmoothedRenderState(snapshot, partialTick, ClientRagdollCamera.currentRenderFrame());
+            RagdollTransform transform = limb.getSmoothedTransform();
+            if (transform == null) continue;
+
+            double distSq = camPos.distanceToSqr(
+                    transform.position.x, transform.position.y, transform.position.z);
+            if (distSq > cullDistSq) {
+                culled++;
+                continue;
+            }
+
+            drawList.add(Drawable.limb(limb, transform, distSq, getLightLevel(transform.position)));
+        }
+
+        // Farthest first. Loose limbs are in the same ordering as the bodies rather than a pass of
+        // their own, since an arm on the floor overlaps the corpse it came off more than anything.
+        drawList.sort(FARTHEST_FIRST);
+
+        int rendered = 0;
+        for (Drawable drawable : drawList) {
             poseStack.pushPose();
             try {
                 poseStack.translate(-camPos.x, -camPos.y, -camPos.z);
-
-                if (ragdoll.isPlayer()) {
-                    renderPlayerRagdoll(ragdoll, snap, poseStack, buffer, light, partialTick, distSq);
-                } else {
-                    renderMobRagdoll(ragdoll, snap, poseStack, buffer, light, partialTick, distSq);
-                }
+                drawable.draw(poseStack, buffer, partialTick);
                 rendered++;
             } catch (Exception e) {
-                Ragdollified.LOGGER.error("Error rendering ragdoll {}", ragdoll.getId(), e);
+                Ragdollified.LOGGER.error("Error rendering {}", drawable.describe(), e);
             } finally {
                 poseStack.popPose();
             }
         }
+        drawList.clear();
 
         buffer.endBatch();
 
         recordRenderFrame(System.nanoTime() - renderStart, rendered, culled);
+    }
+
+    // Our own buffer source, not vanilla's, so endBatch() only flushes what this pass submitted.
+    private static MultiBufferSource.BufferSource ragdollBuffer() {
+        if (ragdollBuffer == null) {
+            ragdollBuffer = MultiBufferSource.immediate(new BufferBuilder(2048));
+        }
+        return ragdollBuffer;
+    }
+
+    private static MultiBufferSource.BufferSource ragdollBuffer;
+
+    private static final List<Drawable> drawList = new ArrayList<>();
+    private static final java.util.Comparator<Drawable> FARTHEST_FIRST =
+            (a, b) -> Double.compare(b.distSq, a.distSq);
+
+    // One body or loose limb to draw this frame, with its distance for back-to-front sorting.
+    // Exactly one of ragdoll and limb is set.
+    private static final class Drawable {
+        private ClientRagdoll ragdoll;
+        private ClientRagdoll.TransformSnapshot snapshot;
+        private ClientDetachedLimb limb;
+        private RagdollTransform limbTransform;
+        private double distSq;
+        private int light;
+
+        static Drawable ragdoll(ClientRagdoll ragdoll, ClientRagdoll.TransformSnapshot snapshot,
+                                double distSq, int light) {
+            Drawable d = new Drawable();
+            d.ragdoll = ragdoll;
+            d.snapshot = snapshot;
+            d.distSq = distSq;
+            d.light = light;
+            return d;
+        }
+
+        static Drawable limb(ClientDetachedLimb limb, RagdollTransform transform,
+                             double distSq, int light) {
+            Drawable d = new Drawable();
+            d.limb = limb;
+            d.limbTransform = transform;
+            d.distSq = distSq;
+            d.light = light;
+            return d;
+        }
+
+        void draw(PoseStack poseStack, MultiBufferSource buffer, float partialTick) {
+            if (limb != null) {
+                renderDetachedLimb(limb, limbTransform, poseStack, buffer, light);
+            } else if (ragdoll.isPlayer()) {
+                renderPlayerRagdoll(ragdoll, snapshot, poseStack, buffer, light, partialTick, distSq);
+            } else {
+                renderMobRagdoll(ragdoll, snapshot, poseStack, buffer, light, partialTick, distSq);
+            }
+        }
+
+        String describe() {
+            return limb != null ? "detached limb " + limb.getLimbId() : "ragdoll " + ragdoll.getId();
+        }
+    }
+
+    // Detached limbs
+
+    // Draw one loose limb from the body's model part, skipping armor, curios, blood and overlays.
+    private static void renderDetachedLimb(ClientDetachedLimb limb, RagdollTransform transform,
+                                           PoseStack poseStack, MultiBufferSource buffer, int light) {
+        RagdollPart part = limb.getPart();
+        poseStack.translate(transform.position.x, transform.position.y, transform.position.z);
+
+        HumanoidScale scale = limb.isBaby() ? HumanoidScale.BABY_UNIFORM : HumanoidScale.ADULT;
+
+        if (limb.isPlayer()) {
+            ResourceLocation skin = limb.getPlayerSkin();
+            if (skin == null) skin = net.minecraft.client.resources.DefaultPlayerSkin.getDefaultSkin();
+            PlayerModel<AbstractClientPlayer> model = limb.isPlayerSkinSlim() ? slimModel : normalModel;
+            if (model == null) return;
+            VertexConsumer vc = buffer.getBuffer(RenderType.entityTranslucent(skin));
+            drawLimbPart(poseStack, vc, limbPart(model, part), transform, light, part, scale);
+            // The second skin layer is a sibling of the limb, not a child, so it needs its own pass
+            // exactly as the whole-body renderer gives it one.
+            drawLimbPart(poseStack, vc, playerOverlayPart(model, part), transform, light, part, scale);
+            return;
+        }
+
+        HumanoidModel<?> model = ClientMobModelCache.getModel(limb.getMobType());
+        if (model == null) {
+            model = MobModelHelper.mobPath(limb.getMobType()).contains("piglin")
+                    ? piglinModel : standardHumanoidModel;
+        }
+        if (model == null) return;
+
+        ResourceLocation texture = limb.getTexture();
+        if (texture == null) {
+            texture = getFallbackTexture(limb.getMobType());
+            limb.setTexture(texture);
+        }
+        VertexConsumer vc = buffer.getBuffer(RenderType.entityCutoutNoCull(texture));
+        drawLimbPart(poseStack, vc, limbPart(model, part), transform, light, part, scale);
+        if (part == RagdollPart.HEAD) {
+            drawLimbPart(poseStack, vc, model.hat, transform, light, part, scale);
+        }
+    }
+
+    // Passing the limb's own transform as the torso reference collapses the relative translate to
+    // zero, which is what is wanted: the pose stack already sits at the limb.
+    private static void drawLimbPart(PoseStack poseStack, VertexConsumer vc, ModelPart modelPart,
+                                     RagdollTransform transform, int light, RagdollPart part,
+                                     HumanoidScale scale) {
+        if (modelPart == null) return;
+        renderHumanoidPartPhysics(poseStack, vc, modelPart, transform, transform, light, part, scale);
+    }
+
+    private static ModelPart limbPart(HumanoidModel<?> model, RagdollPart part) {
+        switch (part) {
+            case HEAD:      return model.head;
+            case LEFT_ARM:  return model.leftArm;
+            case RIGHT_ARM: return model.rightArm;
+            case LEFT_LEG:  return model.leftLeg;
+            case RIGHT_LEG: return model.rightLeg;
+            default:        return model.body;
+        }
+    }
+
+    private static ModelPart playerOverlayPart(PlayerModel<AbstractClientPlayer> model, RagdollPart part) {
+        switch (part) {
+            case HEAD:      return model.hat;
+            case LEFT_ARM:  return model.leftSleeve;
+            case RIGHT_ARM: return model.rightSleeve;
+            case LEFT_LEG:  return model.leftPants;
+            case RIGHT_LEG: return model.rightPants;
+            default:        return model.jacket;
+        }
     }
 
     private static void recordRenderFrame(long nanos, int rendered, int culled) {
@@ -531,18 +713,18 @@ public class ClientRagdollRenderer {
                 CuriosRenderCompat.wornFor(ragdoll.getOriginalEntityId()));
     }
 
-    // Draw a humanoid body and armor at the given part transforms, shared by the ragdoll and corpse
-    // paths. damageKey identifies the body to the damage-visual compats; null draws a clean body.
-    static void renderPlayerBody(PoseStack poseStack, MultiBufferSource buffer, int light, double distSq,
-                                 RagdollTransform torso, RagdollTransform head,
-                                 RagdollTransform larm, RagdollTransform rarm,
-                                 RagdollTransform lleg, RagdollTransform rleg,
-                                 ResourceLocation skin, boolean isSlim,
-                                 ItemStack helmet, ItemStack chestplate, ItemStack leggings, ItemStack boots,
-                                 AbstractClientPlayer playerEntity, float bob, Object damageKey,
-                                 java.util.List<CuriosCompat.WornCurio> curios) {
+    // Draw a humanoid body and armor at the given part transforms (live ragdolls and RagdollRenderApi).
+    // damageKey identifies the body to damage-visual compats; null draws a clean body.
+    public static void renderPlayerBody(PoseStack poseStack, MultiBufferSource buffer, int light, double distSq,
+                                        RagdollTransform torso, RagdollTransform head,
+                                        RagdollTransform larm, RagdollTransform rarm,
+                                        RagdollTransform lleg, RagdollTransform rleg,
+                                        ResourceLocation skin, boolean isSlim,
+                                        ItemStack helmet, ItemStack chestplate, ItemStack leggings, ItemStack boots,
+                                        AbstractClientPlayer playerEntity, float bob, Object damageKey,
+                                        java.util.List<CuriosCompat.WornCurio> curios) {
         if (torso == null) return;
-        // The corpse renderer can call this before any live ragdoll has, so onRenderLevel's lazy init
+        // An addon renderer can call this before any live ragdoll has, so onRenderLevel's lazy init
         // may never have fired. Bake here too and bail if still unready, rather than NPE.
         initModels();
         PlayerModel<AbstractClientPlayer> model = isSlim ? slimModel : normalModel;
@@ -586,13 +768,13 @@ public class ClientRagdollRenderer {
                 renderPlayerVanillaArmor(poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg, isSlim, playerEntity, helmet, chestplate, leggings, boots);
 
                 if (distSq <= geckoDistSq) {
-                    // Pass playerEntity which may be null — GeckoLibArmorHelper uses its
+                    // Pass playerEntity which may be null; GeckoLibArmorHelper uses its
                     // internal proxy ArmorStand as fallback, identical to the mob armor path.
                     renderPlayerGeckoLibArmor(poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg, isSlim, playerEntity, helmet, chestplate, leggings, boots);
                 }
 
                 // Curios last, over the armor, matching the order Curios' own render layer runs
-                // in. Shares the armor render distance — a curio is the same kind of detail.
+                // in. Shares the armor render distance; a curio is the same kind of detail.
                 renderBodyCurios(curios, poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg,
                         playerEntity, skin, model);
             }
@@ -709,7 +891,7 @@ public class ClientRagdollRenderer {
         poseFromPhysics(model.rightLeg, rleg, torso, RagdollPart.RIGHT_LEG);
     }
 
-    // The HumanoidModel that ICurioRenderer's follow* helpers will read for this wearer — the one
+    // The HumanoidModel that ICurioRenderer's follow* helpers will read for this wearer, the one
     // its renderer holds, not one of ours. Null when the entity does not render on a humanoid.
     private static HumanoidModel<?> liveHumanoidModelFor(net.minecraft.world.entity.LivingEntity wearer) {
         try {
@@ -759,7 +941,7 @@ public class ClientRagdollRenderer {
         new org.joml.Quaternionf(rootRot).conjugate().transform(pivot);
         part.setPos(pivot.x * 16f, pivot.y * 16f, pivot.z * 16f);
 
-        // ModelPart.translateAndRotate rotates Z, then Y, then X — the ZYX sequence.
+        // ModelPart.translateAndRotate rotates Z, then Y, then X, the ZYX sequence.
         org.joml.Vector3f euler = new org.joml.Quaternionf(rootRot).conjugate().mul(partRot)
                 .getEulerAnglesZYX(new org.joml.Vector3f());
         part.xRot = euler.x;
@@ -767,8 +949,8 @@ public class ClientRagdollRenderer {
         part.zRot = euler.z;
     }
 
-    // Everything renderBodyCurios writes on the borrowed model — seven parts of pivots and rotations
-    // plus the flags — so one curio pass cannot leak into how that entity draws next frame.
+    // Everything renderBodyCurios writes on the borrowed model (seven parts of pivots and rotations
+    // plus the flags), so one curio pass cannot leak into how that entity draws next frame.
     private record BorrowedPose(float[] parts, boolean young, boolean riding, boolean crouching) {}
 
     private static ModelPart[] borrowedParts(HumanoidModel<?> model) {
@@ -924,7 +1106,7 @@ public class ClientRagdollRenderer {
                                                   RagdollTransform lleg, RagdollTransform rleg, boolean isSlim,
                                                   AbstractClientPlayer playerEntity,
                                                   ItemStack helmet, ItemStack chestplate, ItemStack leggings, ItemStack boots) {
-        // playerEntity may be null if the player has despawned — GeckoLibArmorHelper
+        // playerEntity may be null if the player has despawned; GeckoLibArmorHelper
         // falls back to its internal proxy ArmorStand in that case, same as mobs.
         HumanoidModel<AbstractClientPlayer> baseModel = isSlim ? slimArmorInner : normalArmorInner;
 
@@ -1225,15 +1407,26 @@ public class ClientRagdollRenderer {
                     renderSpider(ragdoll,poseStack,buffer.getBuffer(RenderType.eyes(SPIDER_EYES_TEXTURE)),15728880,torso,head,larm,rarm,lleg,rleg);
                     break;
                 case SHULKER: renderShulker(poseStack,vc,light,torso,head); break;
+                case GENERIC: renderGeneric(ragdoll,poseStack,vc,light,torso); break;
                 case GHAST: renderGhast(ragdoll,poseStack,vc,light,torso); break;
                 case VEX: renderVex(poseStack,buffer.getBuffer(RenderType.entityTranslucent(texture)),light,torso,head,larm,rarm); break;
+                case GUARDIAN:
+                    renderGuardian(poseStack,vc,light,torso,head,lleg,rleg,
+                            isExactMobPath(ragdoll.getMobType(),"elder_guardian")?2.35f:1f);
+                    break;
+                case SQUID: renderSquid(ragdoll,poseStack,vc,light,torso); break;
+                case DOLPHIN: renderDolphin(poseStack,vc,light,torso,head,lleg); break;
+                case AXOLOTL: renderAxolotl(poseStack,vc,light,torso,head,lleg); break;
+                case FISH: renderFish(ragdoll,poseStack,vc,light,torso,head); break;
+                case WITHER: renderWither(poseStack,vc,light,torso,head,lleg,larm,rarm); break;
+                case ENDER_DRAGON: renderEnderDragon(ragdoll,poseStack,vc,light,torso); break;
                 case WARDEN:
                     renderWarden(poseStack,vc,light,torso,head,larm,rarm,lleg,rleg);
                     renderWarden(poseStack,buffer.getBuffer(RenderType.entityTranslucentEmissive(WARDEN_BIOLUMINESCENT_TEXTURE)),15728880,torso,head,larm,rarm,lleg,rleg);
                     break;
                 case ILLAGER: {
-                    // ILLAGER spans three UV families — zombie villagers, villagers and traders, and true
-                    // illagers — routed by path only, so a namespace containing "villager" cannot mis-route.
+                    // ILLAGER spans three UV families (zombie villagers, villagers and traders, and true
+                    // illagers), routed by path only, so a namespace containing "villager" cannot mis-route.
                     String mt = MobModelHelper.mobPath(ragdoll.getMobType());
                     if (mt.contains("zombie_villager")) {
                         renderHumanoidMob(poseStack, vc, light, torso, head, larm, rarm, lleg, rleg, zombieVillagerModel, humanoidScale);
@@ -1311,7 +1504,7 @@ public class ClientRagdollRenderer {
         if (modded != null) return modded;
 
         // A modded mob with no cached model is about to be drawn on vanilla geometry, which is right
-        // only if it uses vanilla UVs, and the difference is invisible from outside — so name it once.
+        // only if it uses vanilla UVs, and the difference is invisible from outside, so name it once.
         if (!ragdoll.getMobType().startsWith("minecraft:")) {
             warnOnce(NO_MODEL_WARNED, ragdoll.getMobType(),
                     "No captured model for {} - drawing its ragdoll on the vanilla humanoid model. "
@@ -1350,7 +1543,7 @@ public class ClientRagdollRenderer {
             Map.entry("rightpants", RagdollPart.RIGHT_LEG),
             Map.entry("rightlegwear", RagdollPart.RIGHT_LEG));
 
-    // Resolved once per model instance — the reflection is not worth repeating every frame, and
+    // Resolved once per model instance; the reflection is not worth repeating every frame, and
     // these are renderer singletons.
     private static final Map<HumanoidModel<?>, List<OverlayPart>> OVERLAY_CACHE = new ConcurrentHashMap<>();
 
@@ -1606,7 +1799,7 @@ public class ClientRagdollRenderer {
             part.yRot = 0;
             part.zRot = 0;
 
-            // Nudge just above the skin so blood never z-fights with the base texture — same
+            // Nudge just above the skin so blood never z-fights with the base texture, same
             // 1.001 scale BBO uses in renderWounds.
             poseStack.pushPose();
             poseStack.scale(1.001f, 1.001f, 1.001f);
@@ -1724,7 +1917,7 @@ public class ClientRagdollRenderer {
         renderAnimalPart(poseStack, vc, leftFront, larm, torso, 0, -3, 0, 0, light);
         renderAnimalPart(poseStack, vc, rightFront, rarm, torso, 0, -3, 0, 0, light);
         // Charged-creeper energy swirl handled by the OverlayRegistry dispatch in
-        // renderMobRagdoll — no inline rendering here.
+        // renderMobRagdoll: no inline rendering here.
     }
 
     private static void renderQuadruped(ClientRagdoll ragdoll, PoseStack poseStack, VertexConsumer vc,
@@ -1749,7 +1942,7 @@ public class ClientRagdollRenderer {
 
         float halfPI = (float) (Math.PI / 2);
         // setPos values come from each ModelPart's cube bbox centre, so the cube centre coincides with
-        // its physics body origin — replacing eyeballed constants that were off for sheep and chickens.
+        // its physics body origin, replacing eyeballed constants that were off for sheep and chickens.
         org.joml.Vector3f bodyOff       = setPosForPart(body, halfPI);
         org.joml.Vector3f headOff       = setPosForPart(headPart, 0);
         org.joml.Vector3f leftHindOff   = setPosForPart(leftHind, 0);
@@ -1765,7 +1958,7 @@ public class ClientRagdollRenderer {
         renderAnimalPart(poseStack, vc, leftFront,  larm,  torso, leftFrontOff.x,  leftFrontOff.y,  leftFrontOff.z,  0,      light, bodyScale);
         renderAnimalPart(poseStack, vc, rightFront, rarm,  torso, rightFrontOff.x, rightFrontOff.y, rightFrontOff.z, 0,      light, bodyScale);
         // Pig saddle + sheep wool overlays are handled by the OverlayRegistry dispatch
-        // in renderMobRagdoll — no inline rendering here.
+        // in renderMobRagdoll: no inline rendering here.
     }
 
     private static void renderEquine(ClientRagdoll ragdoll, PoseStack poseStack, VertexConsumer vc,
@@ -2244,6 +2437,44 @@ public class ClientRagdollRenderer {
         for(int i=0;i<8;i++) renderCenteredScaled(ps,vc,root.getChild(names[i]),r.getSmoothedTransform(i+2),torso,light,s);
     }
 
+    // Draw a measured-rig ragdoll, index-aligned with buildGeneric's bodies.
+    // Each part's direct rig children are hidden while it draws, so subtrees aren't drawn twice.
+    private static void renderGeneric(ClientRagdoll ragdoll, PoseStack ps, VertexConsumer vc,
+                                      int light, RagdollTransform torso) {
+        GenericRigExtractor.Rig rig = GenericRigExtractor.byMobType(ragdoll.getMobType());
+        if (rig == null) return;
+        java.util.List<ModelPart> parts = rig.renderParts();
+        java.util.List<com.raiiiden.ragdollified.GenericRig.Part> spec = rig.rig().parts;
+
+        // These are the live parts of the entity renderer's one shared model, so drawing has to
+        // hand them back where it found them or the mobs still alive are drawn where it left off.
+        try {
+            for (int i = 0; i < parts.size(); i++) {
+                RagdollTransform tr = i == 0 ? torso : ragdoll.getSmoothedTransform(i);
+                if (tr == null) continue;
+                ModelPart part = parts.get(i);
+                // An animation left this part wherever it stopped; the rig was measured from the
+                // authored pose, so the drawn one has to be put back to match it.
+                part.getAllParts().forEach(ModelPart::resetPose);
+
+                for (int c = 0; c < spec.size(); c++) {
+                    if (spec.get(c).parentIndex() == i) parts.get(c).visible = false;
+                }
+                try {
+                    renderCentered(ps, vc, part, tr, torso, light);
+                } finally {
+                    for (int c = 0; c < spec.size(); c++) {
+                        if (spec.get(c).parentIndex() == i) parts.get(c).visible = true;
+                    }
+                }
+            }
+        } finally {
+            for (ModelPart part : parts) {
+                part.getAllParts().forEach(ModelPart::resetPose);
+            }
+        }
+    }
+
     private static void renderShulker(PoseStack ps,VertexConsumer vc,int light,RagdollTransform torso,RagdollTransform lid){
         renderCentered(ps,vc,shulkerRoot.getChild("base"),torso,torso,light);
         renderCentered(ps,vc,shulkerRoot.getChild("lid"),lid,torso,light);
@@ -2271,6 +2502,118 @@ public class ClientRagdollRenderer {
         hp.visible=leftArm.visible=rightArm.visible=false;renderCentered(ps,vc,body,torso,torso,light);hp.visible=leftArm.visible=rightArm.visible=true;
         renderCentered(ps,vc,hp,head,torso,light);renderCentered(ps,vc,leftArm,la,torso,light);renderCentered(ps,vc,rightArm,ra,torso,light);
         renderCentered(ps,vc,bone.getChild("left_leg"),ll,torso,light);renderCentered(ps,vc,bone.getChild("right_leg"),rl,torso,light);
+    }
+
+
+    // Guardian shell plus its three tail segments. Spikes and the eye are children of the shell and the
+    // renderer leaves them at their authored pose, which is the retracted one a dead guardian wants.
+    private static void renderGuardian(PoseStack ps,VertexConsumer vc,int light,RagdollTransform torso,
+            RagdollTransform t0,RagdollTransform t1,RagdollTransform t2,float s){
+        guardianRoot.getAllParts().forEach(ModelPart::resetPose);
+        ModelPart shell=guardianRoot.getChild("head"),tail0=shell.getChild("tail0"),
+                tail1=tail0.getChild("tail1"),tail2=tail1.getChild("tail2");
+        tail0.visible=false; renderCenteredScaled(ps,vc,shell,torso,torso,light,s); tail0.visible=true;
+        tail1.visible=false; renderCenteredScaled(ps,vc,tail0,t0,torso,light,s); tail1.visible=true;
+        tail2.visible=false; renderCenteredScaled(ps,vc,tail1,t1,torso,light,s); tail2.visible=true;
+        renderCenteredScaled(ps,vc,tail2,t2,torso,light,s);
+    }
+
+    private static void renderSquid(ClientRagdoll r,PoseStack ps,VertexConsumer vc,int light,RagdollTransform torso){
+        squidRoot.getAllParts().forEach(ModelPart::resetPose);
+        renderCentered(ps,vc,squidRoot.getChild("body"),torso,torso,light);
+        for(int k=0;k<8;k++) renderCentered(ps,vc,squidRoot.getChild("tentacle"+k),r.getSmoothedTransform(k+1),torso,light);
+    }
+
+    private static void renderDolphin(PoseStack ps,VertexConsumer vc,int light,RagdollTransform torso,RagdollTransform head,RagdollTransform tail){
+        dolphinRoot.getAllParts().forEach(ModelPart::resetPose);
+        ModelPart body=dolphinRoot.getChild("body"),hp=body.getChild("head"),tp=body.getChild("tail");
+        // The three fins stay attached to the trunk; only the head and the tail get their own body.
+        hp.visible=tp.visible=false; renderCentered(ps,vc,body,torso,torso,light); hp.visible=tp.visible=true;
+        renderCentered(ps,vc,hp,head,torso,light);
+        renderCentered(ps,vc,tp,tail,torso,light);
+    }
+
+    private static void renderAxolotl(PoseStack ps,VertexConsumer vc,int light,RagdollTransform torso,RagdollTransform head,RagdollTransform tail){
+        axolotlRoot.getAllParts().forEach(ModelPart::resetPose);
+        ModelPart body=axolotlRoot.getChild("body"),hp=body.getChild("head"),tp=body.getChild("tail");
+        hp.visible=tp.visible=false; renderCentered(ps,vc,body,torso,torso,light); hp.visible=tp.visible=true;
+        renderCentered(ps,vc,hp,head,torso,light);
+        renderCentered(ps,vc,tp,tail,torso,light);
+    }
+
+    // Every small fish is a trunk plus a tail. The trunk's own model parts are siblings rather than a
+    // hierarchy, so each is offset off the trunk transform by its distance from the collider centre.
+    private static void renderFish(ClientRagdoll r,PoseStack ps,VertexConsumer vc,int light,RagdollTransform torso,RagdollTransform tail){
+        String path=MobModelHelper.mobPath(r.getMobType());
+        if(path.equals("salmon")){
+            salmonRoot.getAllParts().forEach(ModelPart::resetPose);
+            renderCentered(ps,vc,salmonRoot.getChild("body_front"),offsetTransform(torso,0,0,.09375f),torso,light);
+            renderCentered(ps,vc,salmonRoot.getChild("head"),offsetTransform(torso,0,0,-.25f),torso,light);
+            renderCentered(ps,vc,salmonRoot.getChild("right_fin"),offsetTransform(torso,.15625f,-.09375f,-.09375f),torso,light);
+            renderCentered(ps,vc,salmonRoot.getChild("left_fin"),offsetTransform(torso,-.15625f,-.09375f,-.09375f),torso,light);
+            renderCentered(ps,vc,salmonRoot.getChild("body_back"),tail,torso,light);
+        } else if(path.equals("tropical_fish")){
+            tropicalFishRoot.getAllParts().forEach(ModelPart::resetPose);
+            renderCentered(ps,vc,tropicalFishRoot.getChild("body"),torso,torso,light);
+            renderCentered(ps,vc,tropicalFishRoot.getChild("right_fin"),offsetTransform(torso,.125f,-.03125f,0),torso,light);
+            renderCentered(ps,vc,tropicalFishRoot.getChild("left_fin"),offsetTransform(torso,-.125f,-.03125f,0),torso,light);
+            renderCentered(ps,vc,tropicalFishRoot.getChild("top_fin"),offsetTransform(torso,0,.1875f,0),torso,light);
+            renderCentered(ps,vc,tropicalFishRoot.getChild("tail"),tail,torso,light);
+        } else if(path.equals("pufferfish")){
+            pufferfishRoot.getAllParts().forEach(ModelPart::resetPose);
+            renderCentered(ps,vc,pufferfishRoot.getChild("body"),torso,torso,light);
+            renderCentered(ps,vc,pufferfishRoot.getChild("right_eye"),offsetTransform(torso,.0625f,.09375f,-.0625f),torso,light);
+            renderCentered(ps,vc,pufferfishRoot.getChild("left_eye"),offsetTransform(torso,-.0625f,.09375f,-.0625f),torso,light);
+            renderCentered(ps,vc,pufferfishRoot.getChild("back_fin"),offsetTransform(torso,0,0,.1875f),torso,light);
+            renderCentered(ps,vc,pufferfishRoot.getChild("right_fin"),offsetTransform(torso,.125f,0,-.03125f),torso,light);
+            renderCentered(ps,vc,pufferfishRoot.getChild("left_fin"),offsetTransform(torso,-.125f,0,-.03125f),torso,light);
+        } else if(path.equals("tadpole")){
+            tadpoleRoot.getAllParts().forEach(ModelPart::resetPose);
+            renderCentered(ps,vc,tadpoleRoot.getChild("body"),torso,torso,light);
+            renderCentered(ps,vc,tadpoleRoot.getChild("tail"),tail,torso,light);
+        } else {
+            codRoot.getAllParts().forEach(ModelPart::resetPose);
+            renderCentered(ps,vc,codRoot.getChild("body"),offsetTransform(torso,0,0,.125f),torso,light);
+            renderCentered(ps,vc,codRoot.getChild("head"),offsetTransform(torso,0,0,-.1875f),torso,light);
+            renderCentered(ps,vc,codRoot.getChild("nose"),offsetTransform(torso,0,.03125f,-.3125f),torso,light);
+            renderCentered(ps,vc,codRoot.getChild("right_fin"),offsetTransform(torso,.125f,-.0625f,-.09375f),torso,light);
+            renderCentered(ps,vc,codRoot.getChild("left_fin"),offsetTransform(torso,-.125f,-.0625f,-.09375f),torso,light);
+            renderCentered(ps,vc,codRoot.getChild("top_fin"),offsetTransform(torso,0,.15625f,.03125f),torso,light);
+            renderCentered(ps,vc,codRoot.getChild("tail_fin"),tail,torso,light);
+        }
+    }
+
+    // Wither, drawn at the renderer's scale 2. The shoulder bar and the ribcage are siblings sharing
+    // one collider, so both ride the torso transform at their own offsets from its centre.
+    private static void renderWither(PoseStack ps,VertexConsumer vc,int light,RagdollTransform torso,
+            RagdollTransform head,RagdollTransform tail,RagdollTransform leftHead,RagdollTransform rightHead){
+        witherRoot.getAllParts().forEach(ModelPart::resetPose);
+        renderCenteredScaled(ps,vc,witherRoot.getChild("shoulders"),offsetTransform(torso,0,.625f,0),torso,light,2f);
+        renderCenteredScaled(ps,vc,witherRoot.getChild("ribcage"),offsetTransform(torso,.0625f,-.1875f,0),torso,light,2f);
+        renderCenteredScaled(ps,vc,witherRoot.getChild("center_head"),head,torso,light,2f);
+        renderCenteredScaled(ps,vc,witherRoot.getChild("left_head"),leftHead,torso,light,2f);
+        renderCenteredScaled(ps,vc,witherRoot.getChild("right_head"),rightHead,torso,light,2f);
+        renderCenteredScaled(ps,vc,witherRoot.getChild("tail"),tail,torso,light,2f);
+    }
+
+    // Ender dragon. The neck and the tail are one physics body each; the five neck boxes and the twelve
+    // tail boxes are strung along that body's own Z so the silhouette matches what vanilla animates.
+    private static void renderEnderDragon(ClientRagdoll r,PoseStack ps,VertexConsumer vc,int light,RagdollTransform torso){
+        dragonRoot.getAllParts().forEach(ModelPart::resetPose);
+        renderCentered(ps,vc,dragonRoot.getChild("body"),torso,torso,light);
+        renderCentered(ps,vc,dragonRoot.getChild("head"),r.getSmoothedTransform(1),torso,light);
+        // Each leg's collider spans hip to foot, so its part is offset back onto the thigh it anchors on.
+        renderCentered(ps,vc,dragonRoot.getChild("left_front_leg"),offsetTransform(r.getSmoothedTransform(2),0,.84375f,.40625f),torso,light);
+        renderCentered(ps,vc,dragonRoot.getChild("right_front_leg"),offsetTransform(r.getSmoothedTransform(3),0,.84375f,.40625f),torso,light);
+        renderCentered(ps,vc,dragonRoot.getChild("left_wing"),r.getSmoothedTransform(4),torso,light);
+        renderCentered(ps,vc,dragonRoot.getChild("right_wing"),r.getSmoothedTransform(5),torso,light);
+        renderCentered(ps,vc,dragonRoot.getChild("left_hind_leg"),offsetTransform(r.getSmoothedTransform(6),0,1.28125f,.375f),torso,light);
+        renderCentered(ps,vc,dragonRoot.getChild("right_hind_leg"),offsetTransform(r.getSmoothedTransform(7),0,1.28125f,.375f),torso,light);
+        ModelPart neck=dragonRoot.getChild("neck");
+        RagdollTransform neckBody=r.getSmoothedTransform(8);
+        if(neckBody!=null) for(int i=0;i<5;i++) renderCentered(ps,vc,neck,offsetTransform(neckBody,0,0,1.25f-i*.625f),torso,light);
+        RagdollTransform tailBody=r.getSmoothedTransform(9);
+        if(tailBody!=null) for(int i=0;i<12;i++) renderCentered(ps,vc,neck,offsetTransform(tailBody,0,0,-3.4375f+i*.625f),torso,light);
     }
 
     private static void renderPropPart(PoseStack ps,VertexConsumer vc,ModelPart part,RagdollTransform parent,RagdollTransform torso,float baseX,float baseY,float baseZ,float scale,float xRot,float yRot,float zRot,int light){
@@ -2501,7 +2844,7 @@ public class ClientRagdollRenderer {
 
         try {
             // Draw body and membrane without the wings, which ride their own bodies, centring the main
-            // 6x12x6 cube so it hangs below like vanilla — setPosForPart would average in the membrane.
+            // 6x12x6 cube so it hangs below like vanilla; setPosForPart would average in the membrane.
             leftWing.visible = false; rightWing.visible = false;
             renderAnimalPart(poseStack, vc, body, torso, torso, 0, -10, 0, 0, light, bs);
             renderAnimalPart(poseStack, vc, headPart, head, torso, headOff.x, headOff.y, headOff.z, 0, light, bs);
@@ -2561,7 +2904,7 @@ public class ClientRagdollRenderer {
                                                 int light, RagdollTransform torso, RagdollTransform head,
                                                 RagdollTransform larm, RagdollTransform rarm,
                                                 RagdollTransform lleg, RagdollTransform rleg, HumanoidScale modelScale) {
-        // GeckoLib uses the proxy ArmorStand inside GeckoLibArmorHelper — no real entity needed
+        // GeckoLib uses the proxy ArmorStand inside GeckoLibArmorHelper, no real entity needed
         renderGeckoLibSlot(ragdoll.getHelmet(), EquipmentSlot.HEAD, poseStack, buffer, light, mobArmorInner, torso, head, larm, rarm, lleg, rleg, null, modelScale);
         renderGeckoLibSlot(ragdoll.getChestplate(), EquipmentSlot.CHEST, poseStack, buffer, light, mobArmorInner, torso, head, larm, rarm, lleg, rleg, null, modelScale);
         renderGeckoLibSlot(ragdoll.getLeggings(), EquipmentSlot.LEGS, poseStack, buffer, light, mobArmorInner, torso, head, larm, rarm, lleg, rleg, null, modelScale);
@@ -2874,6 +3217,21 @@ public class ClientRagdollRenderer {
         if (isExactMobPath(mobType, "ghast")) return new ResourceLocation("minecraft", "textures/entity/ghast/ghast.png");
         if (isExactMobPath(mobType, "vex")) return new ResourceLocation("minecraft", "textures/entity/illager/vex.png");
         if (isExactMobPath(mobType, "warden")) return new ResourceLocation("minecraft", "textures/entity/warden/warden.png");
+        if (isExactMobPath(mobType, "elder_guardian")) return new ResourceLocation("minecraft", "textures/entity/guardian_elder.png");
+        if (isExactMobPath(mobType, "guardian")) return new ResourceLocation("minecraft", "textures/entity/guardian.png");
+        if (isExactMobPath(mobType, "glow_squid")) return new ResourceLocation("minecraft", "textures/entity/squid/glow_squid.png");
+        if (isExactMobPath(mobType, "squid")) return new ResourceLocation("minecraft", "textures/entity/squid/squid.png");
+        if (isExactMobPath(mobType, "dolphin")) return new ResourceLocation("minecraft", "textures/entity/dolphin.png");
+        if (isExactMobPath(mobType, "axolotl")) return new ResourceLocation("minecraft", "textures/entity/axolotl/axolotl_lucy.png");
+        if (isExactMobPath(mobType, "cod")) return new ResourceLocation("minecraft", "textures/entity/fish/cod.png");
+        if (isExactMobPath(mobType, "salmon")) return new ResourceLocation("minecraft", "textures/entity/fish/salmon.png");
+        if (isExactMobPath(mobType, "tropical_fish")) return new ResourceLocation("minecraft", "textures/entity/fish/tropical_a.png");
+        if (isExactMobPath(mobType, "pufferfish")) return new ResourceLocation("minecraft", "textures/entity/fish/pufferfish.png");
+        if (isExactMobPath(mobType, "tadpole")) return new ResourceLocation("minecraft", "textures/entity/tadpole/tadpole.png");
+        if (isExactMobPath(mobType, "wither")) return new ResourceLocation("minecraft", "textures/entity/wither/wither.png");
+        // The dragon renderer is not a LivingEntityRenderer, so its texture is never captured live and
+        // this is always the path taken.
+        if (isExactMobPath(mobType, "ender_dragon")) return new ResourceLocation("minecraft", "textures/entity/enderdragon/dragon.png");
         if (mobType.contains("zombie") && !mobType.contains("piglin")) {
             if (mobType.contains("husk")) return new ResourceLocation("minecraft", "textures/entity/zombie/husk.png");
             if (mobType.contains("drowned")) return new ResourceLocation("minecraft", "textures/entity/zombie/drowned.png");
@@ -2959,7 +3317,7 @@ public class ClientRagdollRenderer {
     // Per-part quadruped overlay (pig saddle, sheep wool); pass tint=1,1,1 for plain.
     public record QuadrupedOverlay(ResourceLocation texture, ModelPart root, float r, float g, float b, float bodyScale) implements MobOverlay {}
 
-    // Charged-creeper energy swirl — special RenderType + half-RGB tint + UV scroll.
+    // Charged-creeper energy swirl: special RenderType + half-RGB tint + UV scroll.
     public record CreeperSwirlOverlay(ResourceLocation texture, CreeperModel<?> model) implements MobOverlay {}
 
     // Resolve every overlay that renders on top of a ragdoll's base model, dispatched on model
@@ -3019,18 +3377,18 @@ public class ClientRagdollRenderer {
             boolean isNitwit = profKey.getNamespace().equals("minecraft")
                     && profKey.getPath().equals("nitwit");
 
-            // 1. Biome-type overlay — always rendered, even for "none" profession.
+            // 1. Biome-type overlay: always rendered, even for "none" profession.
             ResourceLocation typeTex = new ResourceLocation(typeKey.getNamespace(),
                     basePath + "type/" + typeKey.getPath() + ".png");
             result.add(villagerLayer(typeTex, isZombieVillager));
 
-            // 2. Profession overlay — skip for NONE (matches vanilla, avoids missing texture).
+            // 2. Profession overlay: skip for NONE (matches vanilla, avoids missing texture).
             if (!isNoneProfession) {
                 ResourceLocation profTex = new ResourceLocation(profKey.getNamespace(),
                         basePath + "profession/" + profKey.getPath() + ".png");
                 result.add(villagerLayer(profTex, isZombieVillager));
 
-                // 3. Profession-level necklace — skip for NONE and NITWIT.
+                // 3. Profession-level necklace: skip for NONE and NITWIT.
                 int level = ragdoll.getVillagerLevel();
                 if (!isNitwit && level >= 1 && level <= 5) {
                     String levelName = switch (level) {
@@ -3111,7 +3469,7 @@ public class ClientRagdollRenderer {
         }
     }
 
-    // Per-part quadruped overlay rendering — same setPos derivation as the base model.
+    // Per-part quadruped overlay rendering: same setPos derivation as the base model.
     private static void renderQuadrupedOverlayParts(PoseStack poseStack, MultiBufferSource buffer, int light,
                                                     RagdollTransform torso, RagdollTransform head,
                                                     RagdollTransform larm, RagdollTransform rarm,
@@ -3137,7 +3495,7 @@ public class ClientRagdollRenderer {
         org.joml.Vector3f rFrontOff    = setPosForPart(rightFront, 0);
 
         // SheepFurModel does not sit flush on the physics-aligned body: head wool is 1px forward and leg
-        // wool 3px low. Only the wool is corrected — the pig saddle shares this path and must not move.
+        // wool 3px low. Only the wool is corrected; the pig saddle shares this path and must not move.
         boolean isWool = overlay.texture().equals(SHEEP_FUR_TEXTURE);
         float woolHeadZ = isWool ? 1.0f  : 0.0f;
         float woolLegY  = isWool ? -3.0f : 0.0f;
@@ -3182,10 +3540,31 @@ public class ClientRagdollRenderer {
     // their cubes never change after bake; WeakHashMap so a resource reload does not leak.
     private static final java.util.Map<ModelPart, org.joml.Vector3f> CUBE_CENTER_CACHE =
             new java.util.WeakHashMap<>();
+    private static final java.util.Map<ModelPart, org.joml.Vector3f> CUBE_EXTENT_CACHE =
+            new java.util.WeakHashMap<>();
 
-    // Geometric centre of a part's cubes in part-local pixels. Each pivot is overridden via setPos, so
-    // this is what must be inverted to land the cube on its body. ModelPart.cubes is read reflectively.
-    private static org.joml.Vector3f cubeBoxCenter(ModelPart part) {
+    // Half size of a part's cubes in part-local pixels; used with cubeBoxCenter to size physics bodies.
+    public static org.joml.Vector3f cubeBoxHalfExtents(ModelPart part) {
+        org.joml.Vector3f cached = CUBE_EXTENT_CACHE.get(part);
+        if (cached != null) return cached;
+
+        float[] bounds = {Float.POSITIVE_INFINITY, Float.POSITIVE_INFINITY, Float.POSITIVE_INFINITY,
+                Float.NEGATIVE_INFINITY, Float.NEGATIVE_INFINITY, Float.NEGATIVE_INFINITY};
+        accumulateCubeBounds(part, 0f, 0f, 0f, bounds, 0);
+
+        org.joml.Vector3f half = bounds[0] > bounds[3]
+                ? new org.joml.Vector3f()
+                : new org.joml.Vector3f(
+                        (bounds[3] - bounds[0]) * 0.5f,
+                        (bounds[4] - bounds[1]) * 0.5f,
+                        (bounds[5] - bounds[2]) * 0.5f);
+        CUBE_EXTENT_CACHE.put(part, half);
+        return half;
+    }
+
+    // Geometric centre of a part's cubes in part-local pixels (ModelPart.cubes read reflectively).
+    // Public so the pose capture places bodies at the same centres this renderer draws at.
+    public static org.joml.Vector3f cubeBoxCenter(ModelPart part) {
         org.joml.Vector3f cached = CUBE_CENTER_CACHE.get(part);
         if (cached != null) return cached;
 

@@ -36,7 +36,7 @@ public class RagdollDebugRenderer {
 
         for (ClientRagdoll ragdoll : ClientRagdollManager.getAll()) {
             if (ragdoll == null) continue;
-            // Read from the published snapshot — physics runs on a worker thread, so we
+            // Read from the published snapshot: physics runs on a worker thread, so we
             // can't touch cachedTransforms directly.
             ClientRagdoll.TransformSnapshot snap = ragdoll.getSnapshot();
             if (snap == null || snap.destroyed) continue;
@@ -76,12 +76,12 @@ public class RagdollDebugRenderer {
         poseStack.mulPose(rotation);
 
         float[][] colors = {
-                {0f, 0f, 1f},   // TORSO  - Blue
-                {1f, 0f, 0f},   // HEAD   - Red
-                {0f, 1f, 0f},   // L_LEG  - Green
-                {1f, 1f, 0f},   // R_LEG  - Yellow
-                {1f, 0f, 1f},   // L_ARM  - Magenta
-                {0f, 1f, 1f},   // R_ARM  - Cyan
+                {0f, 0f, 1f},   // TORSO: Blue
+                {1f, 0f, 0f},   // HEAD: Red
+                {0f, 1f, 0f},   // L_LEG: Green
+                {1f, 1f, 0f},   // R_LEG: Yellow
+                {1f, 0f, 1f},   // L_ARM: Magenta
+                {0f, 1f, 1f},   // R_ARM: Cyan
         };
         float[] c = colors[colorIndex % colors.length];
 

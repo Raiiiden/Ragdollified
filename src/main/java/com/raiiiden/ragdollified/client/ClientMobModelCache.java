@@ -13,7 +13,7 @@ public final class ClientMobModelCache {
     private ClientMobModelCache() {}
 
     // Vanilla mobs are deliberately excluded by the caller, so entries here are always a mod's own
-    // geometry — see ClientRagdollRenderer#humanoidModelFor for why.
+    // geometry: see ClientRagdollRenderer#humanoidModelFor for why.
     public static void cacheModel(String mobType, HumanoidModel<?> model) {
         // Refresh after resource reloads, which rebuild renderers without necessarily unloading
         // the world. Keeping the first instance would leave ragdolls on a stale model tree.

@@ -1,5 +1,6 @@
 package com.raiiiden.ragdollified;
 
+import com.raiiiden.ragdollified.config.RagdollifiedConfig;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.phys.Vec3;
 
@@ -40,13 +41,19 @@ public final class RagdollHitMapper {
         }
         double vert = com.raiiiden.ragdollified.config.RagdollifiedConfig.get(
                 com.raiiiden.ragdollified.config.RagdollifiedConfig.HIT_IMPULSE_VERTICAL_BIAS);
+        // Extra lift proportional to horizontal impulse, so planted feet don't turn a hit into a mere shove.
+        double lift = com.raiiiden.ragdollified.config.RagdollifiedConfig.get(
+                com.raiiiden.ragdollified.config.RagdollifiedConfig.HIT_IMPULSE_VERTICAL_LIFT);
+        if (lift > 0.0) {
+            vert += lift * base * Math.sqrt(direction.x * direction.x + direction.z * direction.z);
+        }
         return new net.minecraft.world.phys.Vec3(
                 direction.x * base,
                 direction.y * base + vert,
                 direction.z * base);
     }
 
-    // Backwards-compat overload — defaults damage to 0 (no damage scaling applied)
+    // Backwards-compat overload: defaults damage to 0 (no damage scaling applied)
     public static net.minecraft.world.phys.Vec3 computeImpulse(
             net.minecraft.world.phys.Vec3 direction, boolean isHeadShot, boolean isTaczBullet) {
         return computeImpulse(direction, isHeadShot, isTaczBullet, 0f);
@@ -57,14 +64,232 @@ public final class RagdollHitMapper {
     }
 
     public static RagdollPart map(LivingEntity entity, Vec3 hitPos, Vec3 direction, boolean isHeadShot) {
-        if (entity == null) return RagdollPart.TORSO;
-        if (isHeadShot) return RagdollPart.HEAD;
+        return resolve(entity, hitPos, direction, isHeadShot).part;
+    }
+
+    // Which part was struck, and where; the impact point is the lever the body turns about.
+    // rayOrigin is the projectile's start this tick and can never serve as that lever.
+    public static Resolution resolve(LivingEntity entity, Vec3 rayOrigin, Vec3 direction,
+                                     boolean isHeadShot) {
+        if (entity == null) return new Resolution(RagdollPart.TORSO, null, "none");
         MobModelHelper.ModelType modelType = MobModelHelper.getModelTypeFromEntity(entity);
-        if (direction != null && direction.lengthSqr() > 1.0e-6) {
-            RagdollPart hit = mapByRaytrace(modelType, entity, hitPos, direction);
-            if (hit != null) return hit;
+        if (rayOrigin != null && direction != null && direction.lengthSqr() > 1.0e-6) {
+            Vec3 unit = direction.normalize();
+            // AccurateHitboxes knows posed limb positions; name the part from the struck limb's centre.
+            com.raiiiden.ragdollified.compat.AccurateHitboxesCompat.PartHit exact =
+                    accurateHit(entity, rayOrigin, unit);
+            if (exact != null) {
+                RagdollPart hit = isHeadShot ? RagdollPart.HEAD : mapByPoint(modelType, entity, exact.centre);
+                if (hit != null) return new Resolution(hit, exact.entry, "hitboxes");
+            }
+            double t = raytraceDistance(modelType, entity, rayOrigin, unit);
+            Vec3 impact = t >= 0 ? rayOrigin.add(unit.scale(t)) : clipEntity(entity, rayOrigin, unit);
+            if (isHeadShot) return new Resolution(RagdollPart.HEAD, impact, "headshot");
+            RagdollPart hit = mapByRaytrace(modelType, entity, rayOrigin, direction);
+            if (hit != null) return new Resolution(hit, impact, t >= 0 ? "raytrace" : "raytrace/clip");
+            if (impact != null) return new Resolution(map(modelType, entity, impact), impact, "bucket/clip");
         }
-        return map(modelType, entity, hitPos);
+        if (isHeadShot) return new Resolution(RagdollPart.HEAD, rayOrigin, "headshot/noray");
+        return new Resolution(map(modelType, entity, rayOrigin), rayOrigin, "bucket/noray");
+    }
+
+    // A part and the world-space entry point, either of which may be null.
+    public static final class Resolution {
+        public final RagdollPart part;
+        public final Vec3 impact;
+        // Which resolver answered, for the hit log only.
+        public final String source;
+
+        Resolution(RagdollPart part, Vec3 impact, String source) {
+            this.part = part == null ? RagdollPart.TORSO : part;
+            this.impact = impact;
+            this.source = source;
+        }
+
+        // The same hit on the same part, moved to a different point on the body.
+        public Resolution withImpact(Vec3 moved) {
+            return moved == impact ? this : new Resolution(part, moved, source + "+side");
+        }
+    }
+
+    // A world point in the mob's own frame (X right, Y up from feet, Z forward), as the layout tables use.
+    public static Vec3 toBodyLocal(LivingEntity entity, Vec3 point) {
+        if (entity == null || point == null) return null;
+        return rotateIntoBody(entity, point.x - entity.getX(), point.y - entity.getY(),
+                point.z - entity.getZ());
+    }
+
+    // A direction in the mob's own frame: same rotation as toBodyLocal, no translation.
+    public static Vec3 toBodyLocalDirection(LivingEntity entity, Vec3 direction) {
+        if (entity == null || direction == null) return null;
+        return rotateIntoBody(entity, direction.x, direction.y, direction.z);
+    }
+
+    // Back to world from the mob's frame; the transform is its own inverse (a reflection).
+    public static Vec3 fromBodyLocal(LivingEntity entity, double x, double y, double z) {
+        if (entity == null) return null;
+        Vec3 offset = rotateIntoBody(entity, x, y, z);
+        return new Vec3(entity.getX() + offset.x, entity.getY() + offset.y, entity.getZ() + offset.z);
+    }
+
+    private static Vec3 rotateIntoBody(LivingEntity entity, double dx, double dy, double dz) {
+        float yawRad = (float) Math.toRadians(entity.getVisualRotationYInDegrees());
+        double cos = Math.cos(yawRad);
+        double sin = Math.sin(yawRad);
+        return new Vec3(-(dx * cos + dz * sin), dy, -dx * sin + dz * cos);
+    }
+
+    // Push the wound across the shot (axis t), the only lever component that produces torque.
+    // Adds aim offset (aimSpread) plus obliquity (attackerSideBias), capped at the part's silhouette.
+    public static Vec3 biasTowardShooter(LivingEntity entity, RagdollPart part, Vec3 impact,
+                                         Vec3 direction, double bias) {
+        if (entity == null || impact == null || direction == null) return impact;
+        if (direction.lengthSqr() < 1.0e-6) return impact;
+        Vec3 local = toBodyLocal(entity, impact);
+        Vec3 shot = toBodyLocalDirection(entity, direction.normalize());
+        if (local == null || shot == null) return impact;
+
+        // The shot flattened into the ground plane, and the horizontal axis across it. A purely
+        // vertical shot has no across-the-body axis to speak of and is left alone.
+        double horizontal = Math.sqrt(shot.x * shot.x + shot.z * shot.z);
+        if (horizontal < 1.0e-4) return impact;
+        double sx = shot.x / horizontal;
+        double sz = shot.z / horizontal;
+        double tx = -sz;
+        double tz = sx;
+
+        double[] box = partBoxLocal(entity, part);
+        if (box == null) return impact;
+        // How far out along t the part's own silhouette reaches: the box's support in that
+        // direction, so the wound is never pushed off the body it landed on.
+        double reach = Math.abs(tx) * box[3] + Math.abs(tz) * box[5];
+        if (reach <= 0.0) return impact;
+
+        // Where the killer was looking, measured across the shot from the part's centre, and the
+        // gain on it.
+        double along = (local.x - box[0]) * tx + (local.z - box[2]) * tz;
+        double aimed = along * Math.max(0.0,
+                RagdollifiedConfig.get(RagdollifiedConfig.HIT_AIM_SPREAD));
+        // The floor obliquity puts under it. sx is the sine of the bearing off the mob's facing, so
+        // this is zero head-on and the full silhouette square-on, and its sign never turns over.
+        double oblique = sx * reach * Math.min(1.0, Math.max(0.0, bias));
+
+        // Eased onto the silhouette with tanh rather than hard-clipped, so the gradient reaches the edge.
+        double moved = reach * Math.tanh((aimed + oblique) / reach);
+        if (Math.abs(moved) <= Math.abs(along)) return impact;
+
+        double shift = moved - along;
+        return fromBodyLocal(entity, local.x + tx * shift, local.y, local.z + tz * shift);
+    }
+
+    // One part's box in the mob's frame as {cx, cy, cz, hx, hy, hz}, or null.
+    // Mobs without a layout fall back to a quarter of their width.
+    private static double[] partBoxLocal(LivingEntity entity, RagdollPart part) {
+        if (part == null) return null;
+        MobModelHelper.ModelType modelType = MobModelHelper.getModelTypeFromEntity(entity);
+        for (PartAABB p : aabbsFor(modelType, entity)) {
+            if (p.part == part) {
+                return new double[]{
+                        (p.minX + p.maxX) * 0.5, (p.minY + p.maxY) * 0.5, (p.minZ + p.maxZ) * 0.5,
+                        (p.maxX - p.minX) * 0.5, (p.maxY - p.minY) * 0.5, (p.maxZ - p.minZ) * 0.5};
+            }
+        }
+        double half = entity.getBbWidth() * 0.25;
+        return new double[]{0.0, entity.getBbHeight() * 0.5, 0.0, half, half, half};
+    }
+
+    // The shot as a segment long enough to cross the entity; overshooting is harmless.
+    private static com.raiiiden.ragdollified.compat.AccurateHitboxesCompat.PartHit accurateHit(
+            LivingEntity entity, Vec3 origin, Vec3 unit) {
+        if (!com.raiiiden.ragdollified.compat.AccurateHitboxesCompat.isAvailable()) return null;
+        double reach = origin.distanceTo(entity.position())
+                + entity.getBbHeight() + entity.getBbWidth() + 1.0;
+        return com.raiiiden.ragdollified.compat.AccurateHitboxesCompat.hitPart(
+                entity, origin, origin.add(unit.scale(reach)));
+    }
+
+    // Where the ray meets the entity's own bounding box, for the case where it missed every part
+    // box: still far better than the ray's origin, which is wherever the shot started.
+    private static Vec3 clipEntity(LivingEntity entity, Vec3 origin, Vec3 unit) {
+        double reach = origin.distanceTo(entity.position())
+                + entity.getBbHeight() + entity.getBbWidth() + 1.0;
+        return entity.getBoundingBox().inflate(0.05)
+                .clip(origin, origin.add(unit.scale(reach))).orElse(null);
+    }
+
+    // Distance along the ray to the first part box, or -1 when it meets none.
+    private static double raytraceDistance(MobModelHelper.ModelType modelType, LivingEntity entity,
+                                           Vec3 origin, Vec3 unit) {
+        PartAABB[] aabbs = aabbsFor(modelType, entity);
+        if (aabbs.length == 0) return -1;
+        double dx = origin.x - entity.getX();
+        double dy = origin.y - entity.getY();
+        double dz = origin.z - entity.getZ();
+        float yawRad = (float) Math.toRadians(entity.getVisualRotationYInDegrees());
+        double cos = Math.cos(yawRad);
+        double sin = Math.sin(yawRad);
+        double ox = -(dx * cos + dz * sin);
+        double oz = -dx * sin + dz * cos;
+        double rx = -(unit.x * cos + unit.z * sin);
+        double rz = -unit.x * sin + unit.z * cos;
+
+        double best = -1;
+        for (PartAABB p : aabbs) {
+            double t = rayAabb(ox, dy, oz, rx, unit.y, rz,
+                    p.minX, p.minY, p.minZ, p.maxX, p.maxY, p.maxZ);
+            if (t > Double.NEGATIVE_INFINITY && (best < 0 || t < best)) best = t;
+        }
+        return best;
+    }
+
+    // Part whose box holds this world point, or the nearest, for points already known to be on the body.
+    private static RagdollPart mapByPoint(MobModelHelper.ModelType modelType, LivingEntity entity,
+                                          Vec3 point) {
+        PartAABB[] aabbs = aabbsFor(modelType, entity);
+        if (aabbs.length == 0) return null;
+
+        double dx = point.x - entity.getX();
+        double dy = point.y - entity.getY();
+        double dz = point.z - entity.getZ();
+        float yawRad = (float) Math.toRadians(entity.getVisualRotationYInDegrees());
+        double cos = Math.cos(yawRad);
+        double sin = Math.sin(yawRad);
+        double x = -(dx * cos + dz * sin);
+        double y = dy;
+        double z = -dx * sin + dz * cos;
+
+        RagdollPart nearest = null;
+        double nearestDistance = Double.MAX_VALUE;
+        for (PartAABB p : aabbs) {
+            double distance = distanceToBoxSq(x, y, z, p);
+            if (distance <= 0.0) return p.part;
+            if (distance < nearestDistance) {
+                nearestDistance = distance;
+                nearest = p.part;
+            }
+        }
+        return nearest;
+    }
+
+    private static double distanceToBoxSq(double x, double y, double z, PartAABB p) {
+        double ox = Math.max(p.minX - x, Math.max(0.0, x - p.maxX));
+        double oy = Math.max(p.minY - y, Math.max(0.0, y - p.maxY));
+        double oz = Math.max(p.minZ - z, Math.max(0.0, z - p.maxZ));
+        if (ox <= 0.0 && oy <= 0.0 && oz <= 0.0) return 0.0;
+        ox = Math.max(0.0, ox);
+        oy = Math.max(0.0, oy);
+        oz = Math.max(0.0, oz);
+        return ox * ox + oy * oy + oz * oz;
+    }
+
+    // Start of the projectile's travel this tick: position() during the hurt event, for TACZ and vanilla.
+    public static Vec3 projectileSegmentStart(net.minecraft.world.entity.Entity projectile, Vec3 direction) {
+        Vec3 velocity = projectile.getDeltaMovement();
+        if (velocity.lengthSqr() > 1.0e-6) return projectile.position();
+        // A projectile with no velocity left has already stopped; fall back to where it came from.
+        Vec3 previous = new Vec3(projectile.xOld, projectile.yOld, projectile.zOld);
+        if (direction == null || direction.lengthSqr() < 1.0e-6) return previous;
+        return previous.subtract(direction.scale(0.75));
     }
 
     public static boolean isCenteredHit(LivingEntity entity, Vec3 hitPos, boolean isHeadShot) {
@@ -80,11 +305,13 @@ public final class RagdollHitMapper {
         float yawRad = (float) Math.toRadians(entity.getVisualRotationYInDegrees());
         double cos = Math.cos(yawRad);
         double sin = Math.sin(yawRad);
-        double rotX = localX * cos + localZ * sin;
-        double centerBand = Math.max(0.05, entity.getBbWidth()
-                * com.raiiiden.ragdollified.config.RagdollifiedConfig.get(
-                        com.raiiiden.ragdollified.config.RagdollifiedConfig.HIT_CENTER_LEEWAY));
-        return Math.abs(rotX) <= centerBand;
+        // Negated to match the layout tables' frame; only the magnitude is used today.
+        double rotX = -(localX * cos + localZ * sin);
+        double leeway = com.raiiiden.ragdollified.config.RagdollifiedConfig.get(
+                com.raiiiden.ragdollified.config.RagdollifiedConfig.HIT_CENTER_LEEWAY);
+        // Zero means off.
+        if (leeway <= 0.0) return false;
+        return Math.abs(rotX) <= Math.max(0.01, entity.getBbWidth() * leeway);
     }
 
     // Raytrace-based hit-part resolution
@@ -98,8 +325,8 @@ public final class RagdollHitMapper {
         return new PartAABB(part, cx - hx, cy - hy, cz - hz, cx + hx, cy + hy, cz + hz);
     }
 
-    // AABB layout in entity-facing-local coords: origin at the entity, +Z forward, Y from the feet.
-    // Mirrors the RagdollBodyFactory layouts plus spawnYOffset, so the raytrace hits the real parts.
+    // AABB layout in the factory's frame: origin at the entity, Y from feet, +X mob's right, +Z forward.
+    // The frame is negated above to match the factory's X; each LEFT_ slot's sign follows its factory.
     private static PartAABB[] aabbsFor(MobModelHelper.ModelType modelType, LivingEntity entity) {
         float scale = Math.max(0.001f, entity.getBbHeight() / 1.8f);
         switch (modelType) {
@@ -113,10 +340,13 @@ public final class RagdollHitMapper {
                 return new PartAABB[]{
                         box(RagdollPart.TORSO,     0,     cy,         0,    0.25, 0.40, 0.15),
                         box(RagdollPart.HEAD,      0,     cy + 0.55,  0,    0.20, 0.20, 0.20),
-                        box(RagdollPart.LEFT_LEG,  -0.10, cy - 0.75,  0,    0.15, 0.45, 0.15),
-                        box(RagdollPart.RIGHT_LEG,  0.10, cy - 0.75,  0,    0.15, 0.45, 0.15),
-                        box(RagdollPart.LEFT_ARM,  -0.40, cy + 0.05,  0,    0.10, 0.35, 0.10),
-                        box(RagdollPart.RIGHT_ARM,  0.40, cy + 0.05,  0,    0.10, 0.35, 0.10),
+                        // Legs meet at the midline rather than overlap,
+                        // so a shot between them isn't always the left leg.
+                        box(RagdollPart.LEFT_LEG,  -0.125, cy - 0.75, 0,    0.125, 0.45, 0.15),
+                        box(RagdollPart.RIGHT_LEG,  0.125, cy - 0.75, 0,    0.125, 0.45, 0.15),
+                        // Arm centres match buildHumanoid: (+-0.35, cy - 0.13).
+                        box(RagdollPart.LEFT_ARM,  -0.35, cy - 0.13,  0,    0.10, 0.35, 0.10),
+                        box(RagdollPart.RIGHT_ARM,  0.35, cy - 0.13,  0,    0.10, 0.35, 0.10),
                 };
             }
             case CREEPER: {
@@ -125,10 +355,12 @@ public final class RagdollHitMapper {
                 return new PartAABB[]{
                         box(RagdollPart.TORSO,     0,         cy,                0,         0.30 * s, 0.50 * s, 0.30 * s),
                         box(RagdollPart.HEAD,      0,         cy + 0.75 * s,     0,         0.25 * s, 0.25 * s, 0.25 * s),
-                        box(RagdollPart.LEFT_ARM,  -0.20 * s, cy - 0.60 * s,    -0.20 * s,  0.12 * s, 0.30 * s, 0.12 * s),
-                        box(RagdollPart.RIGHT_ARM,  0.20 * s, cy - 0.60 * s,    -0.20 * s,  0.12 * s, 0.30 * s, 0.12 * s),
-                        box(RagdollPart.LEFT_LEG,  -0.20 * s, cy - 0.60 * s,     0.20 * s,  0.12 * s, 0.30 * s, 0.12 * s),
-                        box(RagdollPart.RIGHT_LEG,  0.20 * s, cy - 0.60 * s,     0.20 * s,  0.12 * s, 0.30 * s, 0.12 * s),
+                        // buildCreeper adds the front pair into the LEG slots and the rear pair into
+                        // the ARM slots, both at positive local X, so these follow it.
+                        box(RagdollPart.LEFT_ARM,   0.20 * s, cy - 0.60 * s,    -0.20 * s,  0.12 * s, 0.30 * s, 0.12 * s),
+                        box(RagdollPart.RIGHT_ARM, -0.20 * s, cy - 0.60 * s,    -0.20 * s,  0.12 * s, 0.30 * s, 0.12 * s),
+                        box(RagdollPart.LEFT_LEG,   0.20 * s, cy - 0.60 * s,     0.20 * s,  0.12 * s, 0.30 * s, 0.12 * s),
+                        box(RagdollPart.RIGHT_LEG, -0.20 * s, cy - 0.60 * s,     0.20 * s,  0.12 * s, 0.30 * s, 0.12 * s),
                 };
             }
             case QUADRUPED: {
@@ -139,10 +371,12 @@ public final class RagdollHitMapper {
                 return new PartAABB[]{
                         box(RagdollPart.TORSO,     0,         cy,                  0,          0.28 * s, 0.38 * s, 0.48 * s),
                         box(RagdollPart.HEAD,      0,         cy + 0.10 * s,       0.85 * s,   0.20 * s, 0.20 * s, 0.28 * s),
-                        box(RagdollPart.LEFT_ARM,  -0.20 * s, cy - 0.55 * s,       0.35 * s,   0.10 * s, 0.28 * s, 0.10 * s),
-                        box(RagdollPart.RIGHT_ARM,  0.20 * s, cy - 0.55 * s,       0.35 * s,   0.10 * s, 0.28 * s, 0.10 * s),
-                        box(RagdollPart.LEFT_LEG,  -0.20 * s, cy - 0.55 * s,      -0.35 * s,   0.10 * s, 0.28 * s, 0.10 * s),
-                        box(RagdollPart.RIGHT_LEG,  0.20 * s, cy - 0.55 * s,      -0.35 * s,   0.10 * s, 0.28 * s, 0.10 * s),
+                        // Cow, pig, sheep and cat have positive legX, so LEFT_ sits on the mob's right.
+                        // Panda, goat and polar bear have their own tables.
+                        box(RagdollPart.LEFT_ARM,   0.20 * s, cy - 0.55 * s,       0.35 * s,   0.10 * s, 0.28 * s, 0.10 * s),
+                        box(RagdollPart.RIGHT_ARM, -0.20 * s, cy - 0.55 * s,       0.35 * s,   0.10 * s, 0.28 * s, 0.10 * s),
+                        box(RagdollPart.LEFT_LEG,   0.20 * s, cy - 0.55 * s,      -0.35 * s,   0.10 * s, 0.28 * s, 0.10 * s),
+                        box(RagdollPart.RIGHT_LEG, -0.20 * s, cy - 0.55 * s,      -0.35 * s,   0.10 * s, 0.28 * s, 0.10 * s),
                 };
             }
             case WOLF: {
@@ -150,10 +384,10 @@ public final class RagdollHitMapper {
                 return new PartAABB[]{
                         box(RagdollPart.TORSO,      0,        cy,          0,        .25,   .21875, .47),
                         box(RagdollPart.HEAD,       0,        cy + .09375, .8125,    .1875, .25,    .21875),
-                        box(RagdollPart.LEFT_ARM,  -.09375,  cy - .375,   .53125,   .0625, .25,    .0625),
-                        box(RagdollPart.RIGHT_ARM,  .09375,  cy - .375,   .53125,   .0625, .25,    .0625),
-                        box(RagdollPart.LEFT_LEG,  -.09375,  cy - .375,  -.15625,   .0625, .25,    .0625),
-                        box(RagdollPart.RIGHT_LEG,  .09375,  cy - .375,  -.15625,   .0625, .25,    .0625),
+                        box(RagdollPart.LEFT_ARM,   .09375,  cy - .375,   .53125,   .0625, .25,    .0625),
+                        box(RagdollPart.RIGHT_ARM, -.09375,  cy - .375,   .53125,   .0625, .25,    .0625),
+                        box(RagdollPart.LEFT_LEG,   .09375,  cy - .375,  -.15625,   .0625, .25,    .0625),
+                        box(RagdollPart.RIGHT_LEG, -.09375,  cy - .375,  -.15625,   .0625, .25,    .0625),
                 };
             }
             case FOX: {
@@ -161,10 +395,10 @@ public final class RagdollHitMapper {
                 return new PartAABB[]{
                         box(RagdollPart.TORSO,      0,       cy,          0,        .1875, .1875, .34375),
                         box(RagdollPart.HEAD,       0,       cy,          .625,     .25,   .25,   .28125),
-                        box(RagdollPart.LEFT_ARM,  -.125,   cy - .28125, .21875,   .0625, .1875, .0625),
-                        box(RagdollPart.RIGHT_ARM,  .125,   cy - .28125, .21875,   .0625, .1875, .0625),
-                        box(RagdollPart.LEFT_LEG,  -.125,   cy - .28125,-.21875,   .0625, .1875, .0625),
-                        box(RagdollPart.RIGHT_LEG,  .125,   cy - .28125,-.21875,   .0625, .1875, .0625),
+                        box(RagdollPart.LEFT_ARM,   .125,   cy - .28125, .21875,   .0625, .1875, .0625),
+                        box(RagdollPart.RIGHT_ARM, -.125,   cy - .28125, .21875,   .0625, .1875, .0625),
+                        box(RagdollPart.LEFT_LEG,   .125,   cy - .28125,-.21875,   .0625, .1875, .0625),
+                        box(RagdollPart.RIGHT_LEG, -.125,   cy - .28125,-.21875,   .0625, .1875, .0625),
                 };
             }
             case PANDA: {
@@ -322,19 +556,86 @@ public final class RagdollHitMapper {
                 return new PartAABB[]{
                         box(RagdollPart.TORSO,     0,         cy,                 0,           0.20 * s, 0.22 * s, 0.15 * s),
                         box(RagdollPart.HEAD,      0,         cy + 0.45 * s,      0.20 * s,    0.12 * s, 0.12 * s, 0.12 * s),
-                        box(RagdollPart.LEFT_LEG,  -0.10 * s, cy - 0.35 * s,      0,           0.06 * s, 0.18 * s, 0.06 * s),
-                        box(RagdollPart.RIGHT_LEG,  0.10 * s, cy - 0.35 * s,      0,           0.06 * s, 0.18 * s, 0.06 * s),
-                        box(RagdollPart.LEFT_ARM,  -0.35 * s, cy + 0.05 * s,      0,           0.05 * s, 0.18 * s, 0.12 * s),
-                        box(RagdollPart.RIGHT_ARM,  0.35 * s, cy + 0.05 * s,      0,           0.05 * s, 0.18 * s, 0.12 * s),
+                        box(RagdollPart.LEFT_LEG,   0.10 * s, cy - 0.35 * s,      0,           0.06 * s, 0.18 * s, 0.06 * s),
+                        box(RagdollPart.RIGHT_LEG, -0.10 * s, cy - 0.35 * s,      0,           0.06 * s, 0.18 * s, 0.06 * s),
+                        box(RagdollPart.LEFT_ARM,   0.35 * s, cy + 0.05 * s,      0,           0.05 * s, 0.18 * s, 0.12 * s),
+                        box(RagdollPart.RIGHT_ARM, -0.35 * s, cy + 0.05 * s,      0,           0.05 * s, 0.18 * s, 0.12 * s),
                 };
+            }
+            case GUARDIAN: {
+                double gs=entity instanceof net.minecraft.world.entity.monster.ElderGuardian?2.35:1,cy=.5*gs;
+                return new PartAABB[]{box(RagdollPart.TORSO,0,cy,0,.4375*gs,.4375*gs,.5*gs),
+                        box(RagdollPart.HEAD,0,cy,-.6875*gs,.125*gs,.125*gs,.25*gs),
+                        box(RagdollPart.LEFT_LEG,0,cy,-1.09375*gs,.09375*gs,.09375*gs,.21875*gs),
+                        box(RagdollPart.RIGHT_LEG,0,cy,-1.625*gs,.0625*gs,.140625*gs,.1875*gs)};
+            }
+            case SQUID: {
+                // Only the first five tentacles get a slot; the other three share the mantle, which is
+                // what the ray hits from every angle a tentacle would have covered anyway.
+                double cy=1.6;
+                RagdollPart[] slots={RagdollPart.HEAD,RagdollPart.LEFT_LEG,RagdollPart.RIGHT_LEG,
+                        RagdollPart.LEFT_ARM,RagdollPart.RIGHT_ARM};
+                PartAABB[] out=new PartAABB[6];
+                out[0]=box(RagdollPart.TORSO,0,cy,0,.375,.5,.375);
+                for(int k=0;k<5;k++){
+                    double ang=k*Math.PI*2.0/8.0;
+                    out[k+1]=box(slots[k],-Math.cos(ang)*.3125,cy-1,-Math.sin(ang)*.3125,.0625,.5625,.0625);
+                }
+                return out;
+            }
+            case DOLPHIN: {
+                double cy=.345;return new PartAABB[]{box(RagdollPart.TORSO,0,cy,0,.25,.21875,.40625),
+                        box(RagdollPart.HEAD,0,cy,.59375,.25,.21875,.1875),
+                        box(RagdollPart.LEFT_LEG,0,cy-.0625,-.625,.125,.15625,.34375)};
+            }
+            case AXOLOTL: {
+                double cy=.282;return new PartAABB[]{box(RagdollPart.TORSO,0,cy,0,.25,.15625,.3125),
+                        box(RagdollPart.HEAD,0,cy,.46875,.25,.15625,.15625),
+                        box(RagdollPart.LEFT_LEG,0,cy,-.6875,.03125,.15625,.375)};
+            }
+            case FISH: {
+                double[] d=fishDimensions(entity);
+                PartAABB trunk=box(RagdollPart.TORSO,0,d[7],0,d[0],d[1],d[2]);
+                if(d[6]==0) return new PartAABB[]{trunk};
+                return new PartAABB[]{trunk,box(RagdollPart.HEAD,0,d[7],-d[6],d[3],d[4],d[5])};
+            }
+            case WITHER: {
+                double cy=1.702;return new PartAABB[]{box(RagdollPart.TORSO,0,cy,0,.625,.40625,.09375),
+                        box(RagdollPart.HEAD,0,cy+1.3,.125,.25,.25,.25),
+                        box(RagdollPart.LEFT_ARM,-1.125,cy+.925,.25,.1875,.1875,.1875),
+                        box(RagdollPart.RIGHT_ARM,1.125,cy+.925,.25,.1875,.1875,.1875),
+                        box(RagdollPart.LEFT_LEG,.0625,cy-1.1615,-.2535,.09375,.1875,.09375)};
+            }
+            case ENDER_DRAGON: {
+                double cy=4.5;return new PartAABB[]{box(RagdollPart.TORSO,0,cy,0,.75,.9375,2),
+                        box(RagdollPart.HEAD,0,cy-.3125,5.9375,.5,.625,.9375),
+                        box(RagdollPart.LEFT_LEG,-.75,cy-1.78125,1.78125,.25,1.59375,.65625),
+                        box(RagdollPart.RIGHT_LEG,.75,cy-1.78125,1.78125,.25,1.59375,.65625),
+                        box(RagdollPart.LEFT_ARM,-2.5,cy+.5,-.3125,1.75,.25,1.9375),
+                        box(RagdollPart.RIGHT_ARM,2.5,cy+.5,-.3125,1.75,.25,1.9375)};
             }
             default:
                 return new PartAABB[0];
         }
     }
 
+    // Trunk half extents, tail half extents, the tail's distance behind the trunk and the trunk's height
+    // off the ground: the same table RagdollBodyFactory builds each small fish from.
+    private static double[] fishDimensions(LivingEntity entity) {
+        net.minecraft.world.entity.EntityType<?> type = entity.getType();
+        if (type == net.minecraft.world.entity.EntityType.SALMON)
+            return new double[]{.046875,.078125,.171875,.046875,.078125,.125,.59375,.251};
+        if (type == net.minecraft.world.entity.EntityType.TROPICAL_FISH)
+            return new double[]{.03125,.046875,.09375,.015625,.046875,.09375,.375,.126};
+        if (type == net.minecraft.world.entity.EntityType.PUFFERFISH)
+            return new double[]{.046875,.03125,.046875,0,0,0,0,.126};
+        if (type == net.minecraft.world.entity.EntityType.TADPOLE)
+            return new double[]{.046875,.03125,.046875,.015625,.03125,.109375,.3125,.126};
+        return new double[]{.03125,.078125,.171875,.015625,.0625,.0625,.46875,.126};
+    }
+
     // Ray against every part AABB, returning the one entered first (smallest positive t), or
-    // null if it misses them all — the caller then falls back to bbox bucketing.
+    // null if it misses them all; the caller then falls back to bbox bucketing.
     private static RagdollPart mapByRaytrace(MobModelHelper.ModelType modelType, LivingEntity entity,
                                              Vec3 hitPos, Vec3 direction) {
         PartAABB[] aabbs = aabbsFor(modelType, entity);
@@ -348,11 +649,11 @@ public final class RagdollHitMapper {
         float yawRad = (float) Math.toRadians(entity.getVisualRotationYInDegrees());
         double cos = Math.cos(yawRad);
         double sin = Math.sin(yawRad);
-        double oxLocal = dx * cos + dz * sin;
+        double oxLocal = -(dx * cos + dz * sin);
         double oyLocal = dy;
         double ozLocal = -dx * sin + dz * cos;
 
-        double dxLocal = direction.x * cos + direction.z * sin;
+        double dxLocal = -(direction.x * cos + direction.z * sin);
         double dyLocal = direction.y;
         double dzLocal = -direction.x * sin + direction.z * cos;
 
@@ -408,6 +709,20 @@ public final class RagdollHitMapper {
         return Math.max(tMin, 0.0);
     }
 
+    // Which side RagdollBodyFactory puts the LEFT_ slots on, in its local X (most use negative).
+    // Must agree with the factory, since the index returned is the body the impulse goes to.
+    private static boolean leftSlotIsPositiveX(MobModelHelper.ModelType modelType) {
+        return switch (modelType) {
+            case QUADRUPED, WOLF, FOX, CHICKEN, CREEPER -> true;
+            default -> false;
+        };
+    }
+
+    private static RagdollPart side(MobModelHelper.ModelType modelType, double rotX,
+                                    RagdollPart left, RagdollPart right) {
+        return leftSlotIsPositiveX(modelType) == (rotX > 0) ? left : right;
+    }
+
     public static RagdollPart map(MobModelHelper.ModelType modelType, LivingEntity entity, Vec3 hitPos) {
         if (entity == null || hitPos == null) return RagdollPart.TORSO;
 
@@ -421,7 +736,7 @@ public final class RagdollHitMapper {
         float yawRad = (float) Math.toRadians(entity.getVisualRotationYInDegrees());
         double cos = Math.cos(yawRad);
         double sin = Math.sin(yawRad);
-        double rotX = localX * cos + localZ * sin;
+        double rotX = -(localX * cos + localZ * sin);
         double rotZ = -localX * sin + localZ * cos;
 
         float bbH = entity.getBbHeight();
@@ -434,9 +749,9 @@ public final class RagdollHitMapper {
             case HUMANOID_DROWNED:
             case ILLAGER: {
                 if (relY > 0.85f) return RagdollPart.HEAD;
-                if (relY < 0.55f) return rotX < 0 ? RagdollPart.LEFT_LEG : RagdollPart.RIGHT_LEG;
+                if (relY < 0.55f) return side(modelType, rotX, RagdollPart.LEFT_LEG, RagdollPart.RIGHT_LEG);
                 if (Math.abs(rotX) > bbW * 0.30) {
-                    return rotX < 0 ? RagdollPart.LEFT_ARM : RagdollPart.RIGHT_ARM;
+                    return side(modelType, rotX, RagdollPart.LEFT_ARM, RagdollPart.RIGHT_ARM);
                 }
                 return RagdollPart.TORSO;
             }
@@ -444,9 +759,11 @@ public final class RagdollHitMapper {
                 if (relY > 0.7f) return RagdollPart.HEAD;
                 if (relY < 0.3f) {
                     boolean isFront = rotZ > 0;
-                    boolean isLeft = rotX < 0;
-                    if (isFront) return isLeft ? RagdollPart.LEFT_ARM : RagdollPart.RIGHT_ARM;
-                    return isLeft ? RagdollPart.LEFT_LEG : RagdollPart.RIGHT_LEG;
+                    boolean isLeft = leftSlotIsPositiveX(modelType) == (rotX > 0);
+                    // buildCreeper fills LEG slots from the front pair and ARM slots from the rear,
+                    // the reverse of the quadrupeds.
+                    if (isFront) return isLeft ? RagdollPart.LEFT_LEG : RagdollPart.RIGHT_LEG;
+                    return isLeft ? RagdollPart.LEFT_ARM : RagdollPart.RIGHT_ARM;
                 }
                 return RagdollPart.TORSO;
             }
@@ -473,7 +790,7 @@ public final class RagdollHitMapper {
                 if (rotZ > bbW * 0.4 && relY > 0.55f) return RagdollPart.HEAD;
                 if (relY < 0.5f) {
                     boolean isFront = rotZ > 0;
-                    boolean isLeft = rotX < 0;
+                    boolean isLeft = leftSlotIsPositiveX(modelType) == (rotX > 0);
                     if (isFront) return isLeft ? RagdollPart.LEFT_ARM : RagdollPart.RIGHT_ARM;
                     return isLeft ? RagdollPart.LEFT_LEG : RagdollPart.RIGHT_LEG;
                 }
@@ -482,37 +799,37 @@ public final class RagdollHitMapper {
             case TURTLE: {
                 if (rotZ > bbW*.35f) return RagdollPart.HEAD;
                 if (Math.abs(rotX) > bbW*.42f) {
-                    return rotX < 0 ? RagdollPart.LEFT_ARM : RagdollPart.RIGHT_ARM;
+                    return side(modelType, rotX, RagdollPart.LEFT_ARM, RagdollPart.RIGHT_ARM);
                 }
                 if (rotZ < -bbW*.25f) {
-                    return rotX < 0 ? RagdollPart.LEFT_LEG : RagdollPart.RIGHT_LEG;
+                    return side(modelType, rotX, RagdollPart.LEFT_LEG, RagdollPart.RIGHT_LEG);
                 }
                 return RagdollPart.TORSO;
             }
             case IRON_GOLEM: {
                 if (relY > 0.72f) return RagdollPart.HEAD;
-                if (relY < 0.45f) return rotX < 0 ? RagdollPart.LEFT_LEG : RagdollPart.RIGHT_LEG;
+                if (relY < 0.45f) return side(modelType, rotX, RagdollPart.LEFT_LEG, RagdollPart.RIGHT_LEG);
                 if (Math.abs(rotX) > bbW * 0.24f) {
-                    return rotX < 0 ? RagdollPart.LEFT_ARM : RagdollPart.RIGHT_ARM;
+                    return side(modelType, rotX, RagdollPart.LEFT_ARM, RagdollPart.RIGHT_ARM);
                 }
                 return RagdollPart.TORSO;
             }
             case ENDERMAN: {
                 if (relY > 0.82f) return RagdollPart.HEAD;
-                if (relY < 0.48f) return rotX < 0 ? RagdollPart.LEFT_LEG : RagdollPart.RIGHT_LEG;
-                if (Math.abs(rotX) > bbW*.2f) return rotX < 0 ? RagdollPart.LEFT_ARM : RagdollPart.RIGHT_ARM;
+                if (relY < 0.48f) return side(modelType, rotX, RagdollPart.LEFT_LEG, RagdollPart.RIGHT_LEG);
+                if (Math.abs(rotX) > bbW*.2f) return side(modelType, rotX, RagdollPart.LEFT_ARM, RagdollPart.RIGHT_ARM);
                 return RagdollPart.TORSO;
             }
             case PHANTOM: {
                 if (rotZ > bbW*.2f) return RagdollPart.HEAD;
-                if (Math.abs(rotX) > bbW*.25f) return rotX < 0 ? RagdollPart.LEFT_ARM : RagdollPart.RIGHT_ARM;
+                if (Math.abs(rotX) > bbW*.25f) return side(modelType, rotX, RagdollPart.LEFT_ARM, RagdollPart.RIGHT_ARM);
                 if (rotZ < -bbW*.2f) return rotZ < -bbW*.55f ? RagdollPart.RIGHT_LEG : RagdollPart.LEFT_LEG;
                 return RagdollPart.TORSO;
             }
             case PARROT: {
                 if (relY>.68f) return RagdollPart.HEAD;
-                if (Math.abs(rotX)>bbW*.25f) return rotX<0?RagdollPart.LEFT_ARM:RagdollPart.RIGHT_ARM;
-                if (relY<.35f) return rotX<0?RagdollPart.LEFT_LEG:RagdollPart.RIGHT_LEG;
+                if (Math.abs(rotX)>bbW*.25f) return side(modelType, rotX, RagdollPart.LEFT_ARM, RagdollPart.RIGHT_ARM);
+                if (relY<.35f) return side(modelType, rotX, RagdollPart.LEFT_LEG, RagdollPart.RIGHT_LEG);
                 return RagdollPart.TORSO;
             }
             case SLIME:
@@ -527,16 +844,49 @@ public final class RagdollHitMapper {
             }
             case ALLAY: {
                 if(relY>.7f)return RagdollPart.HEAD;
-                if(Math.abs(rotX)>bbW*.25f)return rotX<0?RagdollPart.LEFT_ARM:RagdollPart.RIGHT_ARM;
+                if(Math.abs(rotX)>bbW*.25f)return side(modelType, rotX, RagdollPart.LEFT_ARM, RagdollPart.RIGHT_ARM);
                 return RagdollPart.TORSO;
             }
             case SNOW_GOLEM: {
                 if(relY>.72f)return RagdollPart.HEAD;if(relY<.35f)return RagdollPart.LEFT_LEG;
-                if(Math.abs(rotX)>bbW*.25f)return rotX<0?RagdollPart.LEFT_ARM:RagdollPart.RIGHT_ARM;
+                if(Math.abs(rotX)>bbW*.25f)return side(modelType, rotX, RagdollPart.LEFT_ARM, RagdollPart.RIGHT_ARM);
                 return RagdollPart.TORSO;
             }
             case BLAZE:
-                return relY>.65f?RagdollPart.TORSO:(rotX<0?RagdollPart.LEFT_ARM:RagdollPart.RIGHT_ARM);
+                return relY>.65f?RagdollPart.TORSO:(side(modelType, rotX, RagdollPart.LEFT_ARM, RagdollPart.RIGHT_ARM));
+            case GUARDIAN: {
+                if(rotZ<-bbW*.9f)return RagdollPart.RIGHT_LEG;
+                if(rotZ<-bbW*.55f)return RagdollPart.LEFT_LEG;
+                if(rotZ<-bbW*.2f)return RagdollPart.HEAD;
+                return RagdollPart.TORSO;
+            }
+            case SQUID:
+                // Everything under the mantle is tentacle; the ring slot barely matters for an impulse
+                // this small, so the nearest of the five that own a slot takes it.
+                return relY<.45f?RagdollPart.HEAD:RagdollPart.TORSO;
+            case DOLPHIN:
+            case AXOLOTL: {
+                if(rotZ>bbW*.3f)return RagdollPart.HEAD;
+                if(rotZ<-bbW*.3f)return RagdollPart.LEFT_LEG;
+                return RagdollPart.TORSO;
+            }
+            case FISH:
+                // The tail owns the HEAD slot on this rig, so a shot from behind drives the tail.
+                return rotZ<-bbW*.25f?RagdollPart.HEAD:RagdollPart.TORSO;
+            case WITHER: {
+                if(relY>.8f){
+                    if(Math.abs(rotX)>bbW*.25f)return side(modelType, rotX, RagdollPart.LEFT_ARM, RagdollPart.RIGHT_ARM);
+                    return RagdollPart.HEAD;
+                }
+                if(relY<.35f)return RagdollPart.LEFT_LEG;
+                return RagdollPart.TORSO;
+            }
+            case ENDER_DRAGON: {
+                if(rotZ>bbW*1.5f)return RagdollPart.HEAD;
+                if(Math.abs(rotX)>bbW*.8f)return side(modelType, rotX, RagdollPart.LEFT_ARM, RagdollPart.RIGHT_ARM);
+                if(relY<.4f)return side(modelType, rotX, RagdollPart.LEFT_LEG, RagdollPart.RIGHT_LEG);
+                return RagdollPart.TORSO;
+            }
             default:
                 return RagdollPart.TORSO;
         }

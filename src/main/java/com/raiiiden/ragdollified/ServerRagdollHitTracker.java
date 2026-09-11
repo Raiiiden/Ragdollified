@@ -81,11 +81,10 @@ public final class ServerRagdollHitTracker {
         if (!(hurt instanceof LivingEntity living)) return;
         if (!MobModelHelper.shouldHaveRagdoll(living)) return;
 
-        // xOld/yOld/zOld is the bullet's position a tick before the hit, usually the closest sample to
-        // the contact point, since the current position has already integrated past the entity.
+        // TACZ fires this before moving the bullet, so position() is the start of the striking segment.
         Vec3 vel = bullet.getDeltaMovement();
         Vec3 dir = vel.lengthSqr() > 1.0e-6 ? vel.normalize() : Vec3.ZERO;
-        Vec3 hitPos = projectileRayStart(bullet, dir);
+        Vec3 hitPos = RagdollHitMapper.projectileSegmentStart(bullet, dir);
 
         HIT_INFO.put(hurt.getId(), new HitInfo(
                 hitPos, dir, getBoolean(event, "isHeadShot"), true, getFloat(event, "getAmount")));
@@ -105,7 +104,7 @@ public final class ServerRagdollHitTracker {
         if (direct instanceof Projectile) {
             Vec3 vel = direct.getDeltaMovement();
             Vec3 dir = vel.lengthSqr() > 1.0e-6 ? vel.normalize() : Vec3.ZERO;
-            Vec3 hitPos = projectileRayStart(direct, dir);
+            Vec3 hitPos = RagdollHitMapper.projectileSegmentStart(direct, dir);
 
             // Don't clobber a TACZ entry that may have arrived first this tick.
             HIT_INFO.putIfAbsent(living.getId(),
@@ -134,12 +133,6 @@ public final class ServerRagdollHitTracker {
         return clipped.orElseGet(() -> closestPointOnSegmentToTarget(eye, end, target));
     }
 
-    private static Vec3 projectileRayStart(Entity projectile, Vec3 dir) {
-        Vec3 previous = new Vec3(projectile.xOld, projectile.yOld, projectile.zOld);
-        if (dir.lengthSqr() < 1.0e-6) return previous;
-        return previous.subtract(dir.scale(0.75));
-    }
-
     private static Vec3 closestPointOnSegmentToTarget(Vec3 start, Vec3 end, LivingEntity target) {
         Vec3 center = target.position().add(0.0, target.getBbHeight() * 0.5, 0.0);
         Vec3 segment = end.subtract(start);
@@ -151,7 +144,7 @@ public final class ServerRagdollHitTracker {
     }
 
     // Read and remove an entity's captured hit info, called from PhysicsHooks.onLivingDeath.
-    // Null when nothing was captured — a melee kill, fire, or fall has no projectile in it.
+    // Null when nothing was captured; a melee kill, fire, or fall has no projectile in it.
     public static HitInfo consume(int entityId) {
         return HIT_INFO.remove(entityId);
     }

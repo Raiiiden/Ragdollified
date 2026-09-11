@@ -71,7 +71,25 @@ public final class ClientMobModelHelper {
             if (model instanceof net.minecraft.client.model.GhastModel) return MobModelHelper.ModelType.GHAST;
             if (model instanceof net.minecraft.client.model.VexModel) return MobModelHelper.ModelType.VEX;
             if (model instanceof net.minecraft.client.model.WardenModel) return MobModelHelper.ModelType.WARDEN;
+            if (model instanceof net.minecraft.client.model.GuardianModel) return MobModelHelper.ModelType.GUARDIAN;
+            if (model instanceof net.minecraft.client.model.SquidModel) return MobModelHelper.ModelType.SQUID;
+            if (model instanceof net.minecraft.client.model.DolphinModel) return MobModelHelper.ModelType.DOLPHIN;
+            if (model instanceof net.minecraft.client.model.AxolotlModel) return MobModelHelper.ModelType.AXOLOTL;
+            // Every small-fish model reduces to the same body+tail rig; the BodyProfile picks the
+            // dimensions and the root to draw.
+            if (model instanceof net.minecraft.client.model.CodModel
+                    || model instanceof net.minecraft.client.model.SalmonModel
+                    || model instanceof net.minecraft.client.model.TropicalFishModelA
+                    || model instanceof net.minecraft.client.model.TropicalFishModelB
+                    || model instanceof net.minecraft.client.model.PufferfishBigModel
+                    || model instanceof net.minecraft.client.model.PufferfishMidModel
+                    || model instanceof net.minecraft.client.model.PufferfishSmallModel
+                    || model instanceof net.minecraft.client.model.TadpoleModel) return MobModelHelper.ModelType.FISH;
+            if (model instanceof net.minecraft.client.model.WitherBossModel) return MobModelHelper.ModelType.WITHER;
             if (model instanceof IllagerModel) return MobModelHelper.ModelType.ILLAGER;
+            // Villagers have one combined 'arms' part, so claim VillagerModel as ILLAGER here;
+            // a GENERIC rig would mispose the shared live model. Witches are claimed earlier.
+            if (model instanceof net.minecraft.client.model.VillagerModel) return MobModelHelper.ModelType.ILLAGER;
             // ZombieVillagerModel is a HumanoidModel, so it has to be claimed before the generic
             // humanoid fallback below or it would lose the zombie-villager UVs its texture needs.
             if (model instanceof net.minecraft.client.model.ZombieVillagerModel) return MobModelHelper.ModelType.ILLAGER;
@@ -89,6 +107,11 @@ public final class ClientMobModelHelper {
 
             if (model instanceof net.minecraft.client.model.HierarchicalModel && hasHumanoidParts(model)) {
                 return MobModelHelper.ModelType.HUMANOID_STANDARD;
+            }
+
+            // Nothing matched: measure a GENERIC rig off the model. Last, so authored rigs keep their detail.
+            if (GenericRigExtractor.canExtract(entity)) {
+                return MobModelHelper.ModelType.GENERIC;
             }
 
             return MobModelHelper.ModelType.UNSUPPORTED;
@@ -111,7 +134,7 @@ public final class ClientMobModelHelper {
         }
 
         // Java field and method names. Correct only for classes that ship unobfuscated, which
-        // in production means third-party models — exactly what still reaches this fallback.
+        // in production means third-party models, exactly what still reaches this fallback.
         Class<?> cls = model.getClass();
         while (cls != null && cls != Object.class) {
             for (Field f : cls.getDeclaredFields()) {

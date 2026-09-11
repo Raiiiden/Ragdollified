@@ -72,7 +72,21 @@ public class MobModelHelper {
         SHULKER,
         GHAST,
         VEX,
-        WARDEN
+        WARDEN,
+        // Appended to preserve all earlier network ordinals. Guardians, the aquatic mobs and the two
+        // bosses were the last vanilla families with no ragdoll at all.
+        GUARDIAN,
+        SQUID,
+        DOLPHIN,
+        AXOLOTL,
+        // One type for every small fish: cod, salmon, tropical fish, pufferfish and tadpole all reduce
+        // to a body plus a tail, and their differing dimensions ride on the BodyProfile.
+        FISH,
+        WITHER,
+        ENDER_DRAGON,
+        // No authored skeleton: the rig is measured at runtime by GenericRigExtractor.
+        // What a modded mob gets instead of UNSUPPORTED (no ragdoll).
+        GENERIC
     }
 
     public static boolean shouldHaveRagdoll(LivingEntity entity) {
@@ -144,6 +158,14 @@ public class MobModelHelper {
         if (mobType.endsWith(":ghast")) return ModelType.GHAST;
         if (mobType.endsWith(":vex")) return ModelType.VEX;
         if (mobType.endsWith(":warden")) return ModelType.WARDEN;
+        if (mobType.endsWith(":guardian") || mobType.endsWith(":elder_guardian")) return ModelType.GUARDIAN;
+        if (mobType.endsWith(":squid") || mobType.endsWith(":glow_squid")) return ModelType.SQUID;
+        if (mobType.endsWith(":dolphin")) return ModelType.DOLPHIN;
+        if (mobType.endsWith(":axolotl")) return ModelType.AXOLOTL;
+        if (mobType.endsWith(":cod") || mobType.endsWith(":salmon") || mobType.endsWith(":tropical_fish")
+                || mobType.endsWith(":pufferfish") || mobType.endsWith(":tadpole")) return ModelType.FISH;
+        if (mobType.endsWith(":wither")) return ModelType.WITHER;
+        if (mobType.endsWith(":ender_dragon")) return ModelType.ENDER_DRAGON;
         if (path.contains("skeleton") || path.contains("stray")) {
             return ModelType.HUMANOID_SKELETON;
         }
@@ -235,6 +257,17 @@ public class MobModelHelper {
         if (entity instanceof net.minecraft.world.entity.monster.Ghast) return ModelType.GHAST;
         if (entity instanceof net.minecraft.world.entity.monster.Vex) return ModelType.VEX;
         if (entity instanceof net.minecraft.world.entity.monster.warden.Warden) return ModelType.WARDEN;
+        // Guardian must be matched here: its class name contains "guard", which the humanoid keyword
+        // heuristic below used to claim, giving guardians a humanoid ragdoll.
+        if (entity instanceof net.minecraft.world.entity.monster.Guardian) return ModelType.GUARDIAN;
+        if (entity instanceof net.minecraft.world.entity.animal.Squid) return ModelType.SQUID;
+        if (entity instanceof net.minecraft.world.entity.animal.Dolphin) return ModelType.DOLPHIN;
+        if (entity instanceof net.minecraft.world.entity.animal.axolotl.Axolotl) return ModelType.AXOLOTL;
+        // Tadpole is not an AbstractFish, so it needs its own test alongside the fish base class.
+        if (entity instanceof net.minecraft.world.entity.animal.AbstractFish
+                || entity instanceof net.minecraft.world.entity.animal.frog.Tadpole) return ModelType.FISH;
+        if (entity instanceof net.minecraft.world.entity.boss.wither.WitherBoss) return ModelType.WITHER;
+        if (entity instanceof net.minecraft.world.entity.boss.enderdragon.EnderDragon) return ModelType.ENDER_DRAGON;
         if (entity instanceof AbstractSkeleton) return ModelType.HUMANOID_SKELETON;
         if (entity instanceof Drowned) return ModelType.HUMANOID_DROWNED;
         if (entity instanceof AbstractIllager) return ModelType.ILLAGER;
@@ -261,6 +294,9 @@ public class MobModelHelper {
         Class<?> cls = entity.getClass();
         while (cls != null && cls != Object.class) {
             String name = cls.getSimpleName().toLowerCase();
+            // "guardian" contains "guard" but is a fish-shaped mob, not a humanoid one. Vanilla
+            // guardians never reach here any more, but modded guardian-alikes still would.
+            if (name.contains("guardian")) return false;
             if (name.contains("unit")
                     || name.contains("soldier")
                     || name.contains("guard")
@@ -306,6 +342,14 @@ public class MobModelHelper {
             case PARROT -> "Parrot";
             case SLIME -> "Small Slime";
             case MAGMA_CUBE -> "Small Magma Cube";
+            case GUARDIAN -> "Guardian / Elder Guardian";
+            case SQUID -> "Squid / Glow Squid";
+            case DOLPHIN -> "Dolphin";
+            case AXOLOTL -> "Axolotl";
+            case FISH -> "Small Fish (cod / salmon / tropical / puffer / tadpole)";
+            case WITHER -> "Wither";
+            case ENDER_DRAGON -> "Ender Dragon";
+            case GENERIC -> "Generic (measured from model)";
             case SILVERFISH -> "Silverfish";
             case ENDERMITE -> "Endermite";
             case ALLAY -> "Allay";

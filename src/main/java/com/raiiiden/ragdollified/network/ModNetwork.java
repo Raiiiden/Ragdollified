@@ -7,7 +7,7 @@ import net.minecraftforge.network.NetworkDirection;
 import net.minecraftforge.network.simple.SimpleChannel;
 
 public class ModNetwork {
-    private static final String PROTOCOL_VERSION = "9";
+    private static final String PROTOCOL_VERSION = "11";
     public static final SimpleChannel CHANNEL = NetworkRegistry.newSimpleChannel(
             new ResourceLocation(Ragdollified.MODID, "main"),
             () -> PROTOCOL_VERSION,
@@ -38,11 +38,6 @@ public class ModNetwork {
                 RagdollImpulsePacket::decode,
                 RagdollImpulsePacket::handle);
 
-        CHANNEL.registerMessage(nextId(), CorpseSettlePacket.class,
-                CorpseSettlePacket::encode,
-                CorpseSettlePacket::decode,
-                CorpseSettlePacket::handle);
-
         CHANNEL.registerMessage(nextId(), RagdollStatePacket.class,
                 RagdollStatePacket::encode,
                 RagdollStatePacket::decode,
@@ -57,6 +52,18 @@ public class ModNetwork {
                 .encoder(RagdollStreamOwnerPacket::encode)
                 .decoder(RagdollStreamOwnerPacket::decode)
                 .consumerMainThread(RagdollStreamOwnerPacket::handle)
+                .add();
+
+        CHANNEL.messageBuilder(RagdollSeverPacket.class, nextId(), NetworkDirection.PLAY_TO_CLIENT)
+                .encoder(RagdollSeverPacket::encode)
+                .decoder(RagdollSeverPacket::decode)
+                .consumerMainThread(RagdollSeverPacket::handle)
+                .add();
+
+        CHANNEL.messageBuilder(LimbSpawnPacket.class, nextId(), NetworkDirection.PLAY_TO_CLIENT)
+                .encoder(LimbSpawnPacket::encode)
+                .decoder(LimbSpawnPacket::decode)
+                .consumerMainThread(LimbSpawnPacket::handle)
                 .add();
 
         CHANNEL.messageBuilder(GameplayConfigSyncPacket.class, nextId(), NetworkDirection.PLAY_TO_CLIENT)

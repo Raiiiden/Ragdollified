@@ -33,7 +33,7 @@ public class EntityRenderCaptureHandler {
             captureRenderState(entity, event.getRenderer(), modelType);
 
             // Snapshot the mob's procedural blood while it is alive, since BBO frees the wound textures
-            // when it leaves the level — the same reason its texture is cached here.
+            // when it leaves the level, for the same reason its texture is cached here.
             BetterBloodOverlayCompat.capture(entity.getId(), entity);
 
         } catch (Exception e) {

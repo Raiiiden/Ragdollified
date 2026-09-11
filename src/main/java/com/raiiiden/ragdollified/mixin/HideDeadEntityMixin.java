@@ -23,7 +23,7 @@ public class HideDeadEntityMixin {
                                         float entityYaw, float partialTicks,
                                         PoseStack poseStack, MultiBufferSource buffer,
                                         int packedLight, CallbackInfo ci) {
-        // Hide only once a physics ragdoll exists. A queue entry is not enough — it can be dropped or
+        // Hide only once a physics ragdoll exists. A queue entry is not enough; it can be dropped or
         // fail to construct, and vanilla's death render is the safer fallback than an invisible body.
         if (ClientRagdollManager.isEntityExplicitlyHidden(entity.getId())
                 || (entity instanceof LivingEntity living
