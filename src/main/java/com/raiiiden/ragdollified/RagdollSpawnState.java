@@ -98,6 +98,16 @@ public final class RagdollSpawnState {
         return ((entity.getId() & 0xffffffffL) << 1) | (entity.level().isClientSide ? 1L : 0L);
     }
 
+    // Throw distance goes with the square of launch speed, so the old steep falloff (times a max-health
+    // multiplier that doubled it for players) sent point-blank kills off at 80 b/s while bodies a few
+    // blocks out barely moved. Speed now eases to EXPLOSION_MIN_FALLOFF over vanilla TNT's damage reach
+    // and ignores health.
+    private static final double EXPLOSION_FALLOFF_DISTANCE = 8.0;
+    private static final double EXPLOSION_MIN_FALLOFF = 0.6;
+    // A foot-level blast aims nearly flat, which scraped bodies along the floor instead of lifting them.
+    private static final double EXPLOSION_MIN_ELEVATION = Math.toRadians(30.0);
+    private static final double EXPLOSION_MAX_ELEVATION = Math.toRadians(70.0);
+
     // Vanilla adds explosion knockback after hurt() returns while the death event fires inside it, so
     // it is carried separately and added to the captured locomotion rather than replacing it.
     @Nullable
@@ -108,16 +118,31 @@ public final class RagdollSpawnState {
         Vec3 explosionCenter = damageSource.getSourcePosition();
         if (explosionCenter == null) return null;
 
-        Vec3 direction = entity.position().subtract(explosionCenter).normalize();
-        float distance = (float) entity.position().distanceTo(explosionCenter);
-        float bodyScale = Math.min(entity.getMaxHealth() / 10f, 5f);
-        float distanceFalloff = Math.max(0.5f, 1.0f - (distance / 10f));
-        float strength = bodyScale * distanceFalloff;
-        double impulse = RagdollifiedConfig.get(RagdollifiedConfig.HIT_IMPULSE_EXPLOSION);
-        return new Vec3(
-                direction.x * impulse * strength,
-                direction.y * impulse * 0.8 * strength + 3.0,
-                direction.z * impulse * strength
-        );
+        // Aimed at mid-body rather than the feet, as vanilla aims its push at the eyes.
+        double dx = entity.getX() - explosionCenter.x;
+        double dy = entity.getY() + entity.getBbHeight() * 0.5 - explosionCenter.y;
+        double dz = entity.getZ() - explosionCenter.z;
+        double horizontal = Math.sqrt(dx * dx + dz * dz);
+        double distance = Math.sqrt(horizontal * horizontal + dy * dy);
+
+        double headingX;
+        double headingZ;
+        if (horizontal > 1.0e-3) {
+            headingX = dx / horizontal;
+            headingZ = dz / horizontal;
+        } else {
+            // A blast straight under or inside the body has no outward heading: throw it backwards.
+            double yaw = Math.toRadians(entity.getYRot());
+            headingX = Math.sin(yaw);
+            headingZ = -Math.cos(yaw);
+        }
+        double elevation = Math.max(EXPLOSION_MIN_ELEVATION,
+                Math.min(EXPLOSION_MAX_ELEVATION, Math.atan2(dy, horizontal)));
+
+        double reach = Math.min(distance / EXPLOSION_FALLOFF_DISTANCE, 1.0);
+        double speed = RagdollifiedConfig.get(RagdollifiedConfig.HIT_IMPULSE_EXPLOSION)
+                * (1.0 - (1.0 - EXPLOSION_MIN_FALLOFF) * reach);
+        double horizontalSpeed = Math.cos(elevation) * speed;
+        return new Vec3(headingX * horizontalSpeed, Math.sin(elevation) * speed, headingZ * horizontalSpeed);
     }
 }

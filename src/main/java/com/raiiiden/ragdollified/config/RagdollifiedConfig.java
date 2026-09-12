@@ -181,9 +181,10 @@ public class RagdollifiedConfig {
                 .defineInRange("vanillaProjectile", 8.0, 0.0, 200.0);
 
         HIT_IMPULSE_EXPLOSION = SERVER_BUILDER
-                .comment("Base impulse magnitude for explosion kills (TNT, creepers, TACZ explosives, etc.).",
-                        "Still scaled by the victim's max health and blast distance. Higher = bodies thrown further.")
-                .defineInRange("explosion", 40.0, 0.0, 200.0);
+                .comment("Launch speed in blocks/second for a body killed point-blank by an explosion (TNT, creepers, TACZ explosives, etc.).",
+                        "Eases down to 60% at 8+ blocks from the blast, independent of the victim's health.",
+                        "Higher = bodies thrown further.")
+                .defineInRange("explosionLaunchSpeed", 35.0, 0.0, 90.0);
 
         HIT_IMPULSE_VERTICAL_BIAS = SERVER_BUILDER
                 .comment("Flat upward kick added to every hit, in the same units as the impulses above.",
