@@ -79,8 +79,7 @@ public final class ClientMobPoseCapture {
         }
     }
 
-    // Whether a drawn part may place a body too: only on square rigs with vanilla geometry.
-    // See PosePartMapper.hasVanillaGeometry.
+    // Whether a drawn frame may root and size the body as well as turn it: only square rigs with vanilla geometry, see PosePartMapper.hasVanillaGeometry.
     private static boolean usePlacement(EntityModel<?> model, Map<ModelPart, RagdollPart> mapping,
                                         MobModelHelper.ModelType modelType) {
         return PosePartMapper.supportsTransforms(modelType)

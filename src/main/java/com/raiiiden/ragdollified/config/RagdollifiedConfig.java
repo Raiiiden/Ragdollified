@@ -37,6 +37,9 @@ public class RagdollifiedConfig {
     public static final ForgeConfigSpec.DoubleValue HIT_IMPULSE_VERTICAL_LIFT;
     public static final ForgeConfigSpec.BooleanValue HIT_IMPULSE_DAMAGE_SCALING;
     public static final ForgeConfigSpec.DoubleValue HIT_IMPULSE_DAMAGE_REFERENCE;
+    public static final ForgeConfigSpec.BooleanValue EXPLOSIONS_PUSH_RAGDOLLS;
+    public static final ForgeConfigSpec.BooleanValue KNOCKBACK_PUSHES_LIVE_RAGDOLLS;
+    public static final ForgeConfigSpec.BooleanValue PISTONS_PUSH_RAGDOLLS;
     public static final ForgeConfigSpec.DoubleValue HIT_CENTER_LEEWAY;
     public static final ForgeConfigSpec.DoubleValue HIT_CENTER_DISTRIBUTION_SCALE;
     public static final ForgeConfigSpec.DoubleValue HIT_LIMB_WHIP;
@@ -185,6 +188,18 @@ public class RagdollifiedConfig {
                         "Eases down to 60% at 8+ blocks from the blast, independent of the victim's health.",
                         "Higher = bodies thrown further.")
                 .defineInRange("explosionLaunchSpeed", 35.0, 0.0, 90.0);
+
+        EXPLOSIONS_PUSH_RAGDOLLS = SERVER_BUILDER
+                .comment("Blasts also throw ragdolls already lying within reach, not only the bodies they kill.")
+                .define("explosionsPushRagdolls", true);
+
+        KNOCKBACK_PUSHES_LIVE_RAGDOLLS = SERVER_BUILDER
+                .comment("Knockback on a living player whom an addon has ragdolled pushes their body.")
+                .define("knockbackPushesLiveRagdolls", true);
+
+        PISTONS_PUSH_RAGDOLLS = SERVER_BUILDER
+                .comment("Moving pistons and the blocks they push shove ragdolls out of the way instead of closing over them.")
+                .define("pistonsPushRagdolls", true);
 
         HIT_IMPULSE_VERTICAL_BIAS = SERVER_BUILDER
                 .comment("Flat upward kick added to every hit, in the same units as the impulses above.",
@@ -475,6 +490,9 @@ public class RagdollifiedConfig {
         register("hitImpulseMelee", HIT_IMPULSE_MELEE);
         register("hitImpulseVanillaProjectile", HIT_IMPULSE_VANILLA_PROJECTILE);
         register("hitImpulseExplosion", HIT_IMPULSE_EXPLOSION);
+        register("explosionsPushRagdolls", EXPLOSIONS_PUSH_RAGDOLLS);
+        register("knockbackPushesLiveRagdolls", KNOCKBACK_PUSHES_LIVE_RAGDOLLS);
+        register("pistonsPushRagdolls", PISTONS_PUSH_RAGDOLLS);
         register("hitImpulseVerticalBias", HIT_IMPULSE_VERTICAL_BIAS);
         register("hitImpulseVerticalLift", HIT_IMPULSE_VERTICAL_LIFT);
         register("hitImpulseDamageScaling", HIT_IMPULSE_DAMAGE_SCALING);

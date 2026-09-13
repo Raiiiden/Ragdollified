@@ -15,8 +15,10 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.tags.FluidTags;
+import net.minecraft.util.Mth;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.material.FluidState;
 import net.minecraft.world.phys.AABB;
@@ -1749,6 +1751,8 @@ public class ClientRagdoll {
         // Bat/bee are small winged mobs on their own layouts (not quadruped/chicken), so the
         // 1.2 default above is far too high; drop them close to the ground.
         if (modelType == MobModelHelper.ModelType.BAT) spawnYOffset = 0.3f;
+        // The creeper's body cube centre, 12 pixels up; the humanoid chest height it used to fall back to dropped it half a block.
+        if (modelType == MobModelHelper.ModelType.CREEPER) spawnYOffset = 0.75f;
         if (modelType == MobModelHelper.ModelType.BEE) spawnYOffset = isBabyBee() ? 0.18f : 0.35f;
         RagdollBodyFactory.BodyProfile bodyProfile = getBodyProfile();
         if (bodyProfile == RagdollBodyFactory.BodyProfile.COW) {
@@ -2074,14 +2078,7 @@ public class ClientRagdoll {
         // The server broadcasts impulses to every client for ordering, but only the elected
         // owner is allowed to feed one into the solver. Observers move when its streamed pose lands.
         if (replicated) return;
-        if (settled || bodiesFrozen) {
-            settled = false;
-            pendingTerrainValidation = false;
-            settledOnLiquid = false;
-            settledTicks = 0;
-            markSettledPoseDirty();
-            unfreezeBodies();
-        }
+        wakeForPush();
         Vector3f scaled = new Vector3f(impulse);
         scaled.scale(RagdollifiedConfig.getPartKnockbackMultiplier(part) * modelSizeVelocityScale());
         // Impact point, or the part's centre if none; never the stale death-time point.
@@ -2089,6 +2086,164 @@ public class ClientRagdoll {
         // Any previously sent settle pose predates this push and must be reported again after
         // the body comes to rest. The server also rejects reports with an older revision.
         markSettledPoseDirty();
+    }
+
+    // A whole-body velocity change in blocks per second, the live counterpart of the death-time blast kick.
+    public void applyVelocityKick(Vec3 velocity) {
+        if (velocity == null || replicated || ragdollParts.isEmpty()) return;
+        wakeForPush();
+        applyGlobalVelocityKick(velocity.scale(modelSizeVelocityScale()));
+        markSettledPoseDirty();
+    }
+
+    // A settled or distance-frozen body rejoins the simulation before anything pushes it, since a parked body ignores velocity writes.
+    private void wakeForPush() {
+        if (!settled && !bodiesFrozen) return;
+        settled = false;
+        pendingTerrainValidation = false;
+        settledOnLiquid = false;
+        settledTicks = 0;
+        markSettledPoseDirty();
+        unfreezeBodies();
+    }
+
+    // Speed along the stroke, in blocks per second, a shoved body keeps once the head stops, so it tumbles on a little instead of stopping dead.
+    private static final float PISTON_CARRY_SPEED = 4.0f;
+    // Gap left between a shoved part and the face that shoved it.
+    private static final double PISTON_PUSH_MARGIN = 0.02;
+    // Overlap a resting contact can have with a moving block without counting as caught by it.
+    private static final double PISTON_CONTACT_SLOP = 0.06;
+    // Parts are shrunk by this on the axes a push is not along, so the floor a body lies on never blocks a push across it.
+    private static final double PISTON_FREE_SLOP = 0.1;
+    // Parts this small on every axis are renderer-only proxies with no collision.
+    private static final double PISTON_MIN_PART_SIZE = 0.05;
+    private final Vector3f pushMin = new Vector3f();
+    private final Vector3f pushMax = new Vector3f();
+
+    // Shove the body clear of a moving piston block's leading face as vanilla shoves entities, or out to the side when terrain pins it there. Physics worker only.
+    public void pushOutOfMovingBlock(RagdollPistonPusher.MovingBlock block) {
+        // A body frozen for distance has left the physics world, and nobody near enough to see it is watching.
+        if (destroyed || replicated || ragdollParts.isEmpty() || (bodiesFrozen && !parkedAsObstacle)) return;
+        if (!block.bounds().inflate(3.0).contains(cachedTorsoPos.x, cachedTorsoPos.y, cachedTorsoPos.z)) return;
+        double[] need = new double[Direction.values().length];
+        boolean caught = false;
+        for (int i = 0; i < ragdollParts.size(); i++) {
+            AABB part = partBounds(i);
+            if (part == null) continue;
+            AABB core = part.deflate(PISTON_CONTACT_SLOP);
+            for (AABB box : block.boxes()) {
+                if (!box.intersects(core)) continue;
+                caught = true;
+                for (Direction side : Direction.values()) {
+                    need[side.ordinal()] = Math.max(need[side.ordinal()], clearance(box, side, part));
+                }
+            }
+        }
+        if (!caught) return;
+
+        Direction stroke = block.direction();
+        Direction way = stroke;
+        double distance = need[stroke.ordinal()] + PISTON_PUSH_MARGIN;
+        double free = freeDistance(stroke, distance);
+        if (free < distance) {
+            way = null;
+            double best = Double.MAX_VALUE;
+            for (Direction side : Direction.values()) {
+                if (side.getAxis() == stroke.getAxis()) continue;
+                double wanted = need[side.ordinal()] + PISTON_PUSH_MARGIN;
+                // Up wins a tie: a body pinned against a wall is best lifted out over the block.
+                double cost = side == Direction.UP ? wanted - 1.0e-3 : wanted;
+                if (cost >= best || freeDistance(side, wanted) < wanted) continue;
+                best = cost;
+                way = side;
+            }
+            if (way == null) {
+                way = stroke;
+                distance = free;
+            } else {
+                distance = need[way.ordinal()] + PISTON_PUSH_MARGIN;
+            }
+        }
+        if (distance <= 1.0e-4) return;
+
+        wakeForPush();
+        Vector3f delta = new Vector3f(way.getStepX() * (float) distance,
+                way.getStepY() * (float) distance, way.getStepZ() * (float) distance);
+        Vector3f velocity = new Vector3f();
+        for (PhysicsBody body : ragdollParts) {
+            body.translate(delta);
+            if (way == stroke) {
+                body.getLinearVelocity(velocity);
+                float along = velocity.x * stroke.getStepX() + velocity.y * stroke.getStepY()
+                        + velocity.z * stroke.getStepZ();
+                if (along < PISTON_CARRY_SPEED) {
+                    float add = PISTON_CARRY_SPEED - along;
+                    velocity.x += stroke.getStepX() * add;
+                    velocity.y += stroke.getStepY() * add;
+                    velocity.z += stroke.getStepZ() * add;
+                    body.setLinearVelocity(velocity);
+                }
+            }
+            body.activate();
+        }
+        markSettledPoseDirty();
+    }
+
+    // A part's world box, or null for a severed part or a collision-less proxy.
+    private AABB partBounds(int index) {
+        RagdollPart part = RagdollPart.byIndex(index);
+        if (part != null && (hiddenPartMask & part.bit()) != 0) return null;
+        ragdollParts.get(index).getWorldAabb(pushMin, pushMax);
+        if (pushMax.x - pushMin.x < PISTON_MIN_PART_SIZE && pushMax.y - pushMin.y < PISTON_MIN_PART_SIZE
+                && pushMax.z - pushMin.z < PISTON_MIN_PART_SIZE) return null;
+        return new AABB(pushMin.x, pushMin.y, pushMin.z, pushMax.x, pushMax.y, pushMax.z);
+    }
+
+    // How far part must travel toward side to clear box: vanilla's piston push distance, for every side.
+    private static double clearance(AABB box, Direction side, AABB part) {
+        return switch (side) {
+            case EAST -> box.maxX - part.minX;
+            case WEST -> part.maxX - box.minX;
+            case UP -> box.maxY - part.minY;
+            case DOWN -> part.maxY - box.minY;
+            case SOUTH -> box.maxZ - part.minZ;
+            case NORTH -> part.maxZ - box.minZ;
+        };
+    }
+
+    // How far the whole body can move toward side, up to distance, before a part meets terrain; moving piston blocks are the pusher's, not terrain.
+    private double freeDistance(Direction side, double distance) {
+        Direction.Axis axis = side.getAxis();
+        double shrinkX = axis == Direction.Axis.X ? 0.0 : -PISTON_FREE_SLOP;
+        double shrinkY = axis == Direction.Axis.Y ? 0.0 : -PISTON_FREE_SLOP;
+        double shrinkZ = axis == Direction.Axis.Z ? 0.0 : -PISTON_FREE_SLOP;
+        double signed = distance * side.getAxisDirection().getStep();
+        double free = distance;
+        for (int i = 0; i < ragdollParts.size() && free > 0.0; i++) {
+            AABB part = partBounds(i);
+            if (part == null) continue;
+            part = part.inflate(shrinkX, shrinkY, shrinkZ);
+            List<VoxelShape> terrain = terrainAround(part.expandTowards(
+                    side.getStepX() * distance, side.getStepY() * distance, side.getStepZ() * distance));
+            if (!terrain.isEmpty()) free = Math.min(free, Math.abs(Shapes.collide(axis, part, terrain, signed)));
+        }
+        return free;
+    }
+
+    private List<VoxelShape> terrainAround(AABB area) {
+        List<VoxelShape> shapes = new ArrayList<>();
+        BlockPos.MutableBlockPos cursor = new BlockPos.MutableBlockPos();
+        for (int x = Mth.floor(area.minX); x <= Mth.floor(area.maxX); x++) {
+            for (int y = Mth.floor(area.minY); y <= Mth.floor(area.maxY); y++) {
+                for (int z = Mth.floor(area.minZ); z <= Mth.floor(area.maxZ); z++) {
+                    BlockState state = level.getBlockState(cursor.set(x, y, z));
+                    if (state.isAir() || state.is(Blocks.MOVING_PISTON)) continue;
+                    VoxelShape shape = state.getCollisionShape(level, cursor);
+                    if (!shape.isEmpty()) shapes.add(shape.move(x, y, z));
+                }
+            }
+        }
+        return shapes;
     }
 
     // Drive a whole limb group on the physics worker, every target landing before the next step so

@@ -3,6 +3,7 @@ package com.raiiiden.ragdollified.client;
 import com.raiiiden.ragdollified.Ragdollified;
 import com.raiiiden.ragdollified.client.compat.GeckoLibArmorHelper;
 import com.raiiiden.ragdollified.config.RagdollifiedConfig;
+import net.minecraft.client.Minecraft;
 import net.minecraftforge.client.event.ClientPlayerNetworkEvent;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.event.TickEvent;
@@ -19,6 +20,9 @@ public class ClientTickHandler {
     public static void onClientTick(TickEvent.ClientTickEvent event) {
         if (event.phase == TickEvent.Phase.END) {
             tickCounter++;
+
+            // Moving pistons are read here, after the level has ticked them, for the physics tick submitted next.
+            RagdollPistonPusher.capture(Minecraft.getInstance().level);
 
             // Submit a physics tick to the worker, non-blocking. A submission made while the previous
             // tick still runs is dropped: skipping a tick beats doubling up later.
@@ -47,6 +51,7 @@ public class ClientTickHandler {
         if (event.getLevel().isClientSide()) {
             ClientRagdollManager.onWorldUnload();
             RagdollCollisionTracker.clear();
+            RagdollPistonPusher.clear();
             GeckoLibArmorHelper.onWorldUnload();
         }
     }
