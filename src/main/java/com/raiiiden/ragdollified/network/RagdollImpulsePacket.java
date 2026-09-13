@@ -6,6 +6,7 @@ import com.raiiiden.ragdollified.api.RagdollImpulse;
 import com.raiiiden.ragdollified.api.RagdollifiedServerApi;
 import com.raiiiden.ragdollified.server.ServerRagdollSyncManager;
 import net.minecraft.network.FriendlyByteBuf;
+import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.phys.Vec3;
 import net.minecraftforge.api.distmarker.Dist;
@@ -13,6 +14,7 @@ import net.minecraftforge.fml.DistExecutor;
 import net.minecraftforge.network.NetworkEvent;
 import net.minecraftforge.network.PacketDistributor;
 
+import javax.annotation.Nullable;
 import java.util.function.Supplier;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -130,19 +132,31 @@ public class RagdollImpulsePacket {
             if (sender.position().distanceToSqr(impactPoint) > reach * reach) return;
         }
         if (!allow(sender)) return;
+        broadcastOrdered(sender.serverLevel(), sender, msg.ragdollId, msg.partIndex,
+                new Vec3(msg.impulseX, msg.impulseY, msg.impulseZ), impactPoint, msg.sourceDamage);
+    }
 
+    // Give a push the next revision and send it on; clicks and the pushes the server starts itself all come through here.
+    public static void broadcastOrdered(ServerLevel level, @Nullable ServerPlayer sender, int ragdollId,
+                                        int partIndex, Vec3 impulse, @Nullable Vec3 impactPoint,
+                                        float sourceDamage) {
         int revision = SERVER_SEQUENCE.updateAndGet(v -> v == Integer.MAX_VALUE ? 1 : v + 1);
-        ServerRagdollSyncManager.invalidateSettledPose(sender, msg.ragdollId, revision);
-        // Addons holding a settled pose for this body need the new ordering so they can discard
-        // a candidate this push invalidates. See RagdollifiedServerApi#addImpulseListener.
-        RagdollifiedServerApi.dispatchImpulse(sender, new RagdollImpulse(
-                msg.ragdollId, part,
-                new Vec3(msg.impulseX, msg.impulseY, msg.impulseZ),
-                impactPoint, msg.sourceDamage, revision));
+        ServerRagdollSyncManager.invalidateSettledPose(level.dimension(), ragdollId, revision);
+        // A living player's stand-in is not a corpse, so listeners never hear of it; a whole-body kick is reported against the torso.
+        if (sender != null && !ServerRagdollSyncManager.isLive(ragdollId)) {
+            RagdollPart part = RagdollPart.byIndex(partIndex);
+            // Addons holding a settled pose for this body need the new ordering so they can discard
+            // a candidate this push invalidates. See RagdollifiedServerApi#addImpulseListener.
+            RagdollifiedServerApi.dispatchImpulse(sender, new RagdollImpulse(
+                    ragdollId, part != null ? part : RagdollPart.TORSO, impulse,
+                    impactPoint, sourceDamage, revision));
+        }
 
-        RagdollImpulsePacket ordered = new RagdollImpulsePacket(msg.ragdollId, msg.partIndex,
-                msg.impulseX, msg.impulseY, msg.impulseZ, revision, true,
-                msg.impactX, msg.impactY, msg.impactZ, msg.sourceDamage);
+        RagdollImpulsePacket ordered = new RagdollImpulsePacket(ragdollId, partIndex,
+                (float) impulse.x, (float) impulse.y, (float) impulse.z, revision, true,
+                impactPoint != null ? impactPoint.x : Double.NaN,
+                impactPoint != null ? impactPoint.y : Double.NaN,
+                impactPoint != null ? impactPoint.z : Double.NaN, sourceDamage);
 
         // Every modded client, sender included, applies the server-ordered packet once, giving one order.
         // Sent only to players within physics distance of the body.
@@ -151,11 +165,11 @@ public class RagdollImpulsePacket {
             ModNetwork.CHANNEL.send(PacketDistributor.NEAR.with(
                     () -> new PacketDistributor.TargetPoint(
                             impactPoint.x, impactPoint.y, impactPoint.z, radius,
-                            sender.level().dimension())), ordered);
+                            level.dimension())), ordered);
             return;
         }
         // No impact point means no radius to send inside, so the old behaviour stands.
-        for (ServerPlayer player : sender.server.getPlayerList().getPlayers()) {
+        for (ServerPlayer player : level.getServer().getPlayerList().getPlayers()) {
             ModNetwork.CHANNEL.send(PacketDistributor.PLAYER.with(() -> player), ordered);
         }
     }

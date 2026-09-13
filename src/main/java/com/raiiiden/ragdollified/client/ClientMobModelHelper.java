@@ -1,6 +1,7 @@
 package com.raiiiden.ragdollified.client;
 
 import com.raiiiden.ragdollified.MobModelHelper;
+import com.raiiiden.ragdollified.config.RagdollifiedConfig;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.model.ChickenModel;
 import net.minecraft.client.model.EntityModel;
@@ -110,7 +111,9 @@ public final class ClientMobModelHelper {
             }
 
             // Nothing matched: measure a GENERIC rig off the model. Last, so authored rigs keep their detail.
-            if (GenericRigExtractor.canExtract(entity)) {
+            // Opt-in, checked first so a disabled rig is never measured at all.
+            if (RagdollifiedConfig.get(RagdollifiedConfig.ENABLE_GENERIC_MOB_RAGDOLLS)
+                    && GenericRigExtractor.canExtract(entity)) {
                 return MobModelHelper.ModelType.GENERIC;
             }
 

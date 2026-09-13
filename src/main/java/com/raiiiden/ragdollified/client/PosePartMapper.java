@@ -128,8 +128,7 @@ public final class PosePartMapper {
         return mapping.isEmpty() ? null : mapping;
     }
 
-    // Whether captured matrices can place bodies directly: only square-baked rigs (humanoid, creeper).
-    // Other rigs keep their authored anatomy and take only the animated angles.
+    // Whether captured matrices are trusted past their angles, for the torso's position and the part sizes: only square-baked rigs, humanoid and creeper; the rest keep their authored anatomy.
     public static boolean supportsTransforms(MobModelHelper.ModelType modelType) {
         return modelType == MobModelHelper.ModelType.CREEPER
                 || MobModelHelper.isHumanoidModelType(modelType);

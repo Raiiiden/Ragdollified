@@ -349,7 +349,7 @@ public class RagdollSpawnPacket {
         }
 
         if (!msg.isPlayer && !MobModelHelper.isSupportedModelType(modelType)) {
-            Ragdollified.LOGGER.info(
+            Ragdollified.LOGGER.debug(
                     "Skipping ragdoll for unsupported mob {} - no matching ragdoll body/render",
                     msg.mobType);
             return;

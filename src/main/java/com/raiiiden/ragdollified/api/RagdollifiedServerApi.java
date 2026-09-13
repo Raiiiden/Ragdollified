@@ -31,7 +31,14 @@ public final class RagdollifiedServerApi {
 
     public static void startPlayerRagdoll(ServerPlayer player, Vec3 position,
                                           float bodyYaw, float pitch, int lifetimeTicks) {
+        startPlayerRagdoll(player, position, bodyYaw, pitch, Vec3.ZERO, lifetimeTicks);
+    }
+
+    // As above, launching the body at velocity in blocks per second (null for none).
+    public static void startPlayerRagdoll(ServerPlayer player, Vec3 position, float bodyYaw,
+                                          float pitch, @Nullable Vec3 velocity, int lifetimeTicks) {
         if (player == null || position == null) return;
+        Vec3 launch = velocity == null ? Vec3.ZERO : velocity;
         RagdollSpawnPacket packet = new RagdollSpawnPacket(
                 player.getId(),
                 true,
@@ -41,13 +48,13 @@ public final class RagdollifiedServerApi {
                 player.getName().getString(),
                 position.x, position.y, position.z,
                 bodyYaw, pitch,
-                0.0, 0.0, 0.0,
+                launch.x, launch.y, launch.z,
                 player.getPose() == Pose.SWIMMING,
                 player.getItemBySlot(EquipmentSlot.HEAD).copy(),
                 player.getItemBySlot(EquipmentSlot.CHEST).copy(),
                 player.getItemBySlot(EquipmentSlot.LEGS).copy(),
                 player.getItemBySlot(EquipmentSlot.FEET).copy());
-        ServerRagdollSyncManager.register(player, packet, lifetimeTicks);
+        ServerRagdollSyncManager.registerLive(player, packet, lifetimeTicks);
     }
 
     public static void stopRagdoll(int entityId) {

@@ -350,17 +350,15 @@ public final class RagdollHitMapper {
                 };
             }
             case CREEPER: {
-                double cy = 1.3;
-                float s = scale;
+                // buildCreeper at the unscaled model: torso centre 0.75 up, the front pair in the ARM slots and left on -X like every other rig, with Z flipped for this frame.
+                double cy = 0.75;
                 return new PartAABB[]{
-                        box(RagdollPart.TORSO,     0,         cy,                0,         0.30 * s, 0.50 * s, 0.30 * s),
-                        box(RagdollPart.HEAD,      0,         cy + 0.75 * s,     0,         0.25 * s, 0.25 * s, 0.25 * s),
-                        // buildCreeper adds the front pair into the LEG slots and the rear pair into
-                        // the ARM slots, both at positive local X, so these follow it.
-                        box(RagdollPart.LEFT_ARM,   0.20 * s, cy - 0.60 * s,    -0.20 * s,  0.12 * s, 0.30 * s, 0.12 * s),
-                        box(RagdollPart.RIGHT_ARM, -0.20 * s, cy - 0.60 * s,    -0.20 * s,  0.12 * s, 0.30 * s, 0.12 * s),
-                        box(RagdollPart.LEFT_LEG,   0.20 * s, cy - 0.60 * s,     0.20 * s,  0.12 * s, 0.30 * s, 0.12 * s),
-                        box(RagdollPart.RIGHT_LEG, -0.20 * s, cy - 0.60 * s,     0.20 * s,  0.12 * s, 0.30 * s, 0.12 * s),
+                        box(RagdollPart.TORSO,      0,     cy,          0,     0.25, 0.375,  0.15),
+                        box(RagdollPart.HEAD,       0,     cy + 0.625,  0,     0.25, 0.25,   0.25),
+                        box(RagdollPart.LEFT_ARM,  -0.125, cy - 0.5625,  0.25, 0.12, 0.1875, 0.12),
+                        box(RagdollPart.RIGHT_ARM,  0.125, cy - 0.5625,  0.25, 0.12, 0.1875, 0.12),
+                        box(RagdollPart.LEFT_LEG,  -0.125, cy - 0.5625, -0.25, 0.12, 0.1875, 0.12),
+                        box(RagdollPart.RIGHT_LEG,  0.125, cy - 0.5625, -0.25, 0.12, 0.1875, 0.12),
                 };
             }
             case QUADRUPED: {
@@ -713,7 +711,7 @@ public final class RagdollHitMapper {
     // Must agree with the factory, since the index returned is the body the impulse goes to.
     private static boolean leftSlotIsPositiveX(MobModelHelper.ModelType modelType) {
         return switch (modelType) {
-            case QUADRUPED, WOLF, FOX, CHICKEN, CREEPER -> true;
+            case QUADRUPED, WOLF, FOX, CHICKEN -> true;
             default -> false;
         };
     }
@@ -757,13 +755,13 @@ public final class RagdollHitMapper {
             }
             case CREEPER: {
                 if (relY > 0.7f) return RagdollPart.HEAD;
-                if (relY < 0.3f) {
+                // The legs are the model's bottom 6 pixels, 0.375 of the 1.7-block box.
+                if (relY < 0.22f) {
                     boolean isFront = rotZ > 0;
                     boolean isLeft = leftSlotIsPositiveX(modelType) == (rotX > 0);
-                    // buildCreeper fills LEG slots from the front pair and ARM slots from the rear,
-                    // the reverse of the quadrupeds.
-                    if (isFront) return isLeft ? RagdollPart.LEFT_LEG : RagdollPart.RIGHT_LEG;
-                    return isLeft ? RagdollPart.LEFT_ARM : RagdollPart.RIGHT_ARM;
+                    // The pose capture and buildCreeper put the front pair in the ARM slots and the hind pair in the LEG slots.
+                    if (isFront) return isLeft ? RagdollPart.LEFT_ARM : RagdollPart.RIGHT_ARM;
+                    return isLeft ? RagdollPart.LEFT_LEG : RagdollPart.RIGHT_LEG;
                 }
                 return RagdollPart.TORSO;
             }

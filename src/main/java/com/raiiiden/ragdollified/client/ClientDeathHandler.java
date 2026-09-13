@@ -44,7 +44,7 @@ public class ClientDeathHandler {
                 ? MobModelHelper.ModelType.HUMANOID_STANDARD
                 : ClientMobModelHelper.getActualModelType(entity);
         if (!isPlayer && !MobModelHelper.isSupportedModelType(modelType)) {
-            Ragdollified.LOGGER.info("Skipping ragdoll for unsupported mob {} - no matching ragdoll body/render", mobType);
+            Ragdollified.LOGGER.debug("Skipping ragdoll for unsupported mob {} - no matching ragdoll body/render", mobType);
             return;
         }
 

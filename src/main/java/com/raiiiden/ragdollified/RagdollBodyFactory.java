@@ -121,26 +121,18 @@ public final class RagdollBodyFactory {
             buildGeneric(world, parts, joints, genericRig, pos, baseQuat, scale, initialVel);
             return;
         }
-        // Bat and bee physics is authored at the vanilla model's natural pixel size, matching the
+        // Bat, bee and creeper physics is authored at the vanilla model's natural pixel size, matching the
         // unscaled models the renderer draws, so their body scale stays 1.0.
         float bodyScale = (bodyProfile == BodyProfile.DEFAULT
                 && modelType != MobModelHelper.ModelType.BAT
-                && modelType != MobModelHelper.ModelType.BEE) ? scale : 1.0f;
+                && modelType != MobModelHelper.ModelType.BEE
+                && modelType != MobModelHelper.ModelType.CREEPER) ? scale : 1.0f;
         if (modelType == MobModelHelper.ModelType.PHANTOM) {
             // Packet scale is bbHeight/1.8. Phantom dimensions grow by 2/9 per size while
             // the renderer grows by .15; recover the integer size and its render scale.
             int phantomSize = Math.max(0, Math.round((scale * 3.6f - 1f) * 4.5f));
             bodyScale = 1f + .15f * phantomSize;
         }
-
-        Quaternionf q = new Quaternionf(baseQuat.x, baseQuat.y, baseQuat.z, baseQuat.w);
-        Function<Vector3f, Vector3f> worldOffset = local -> {
-            org.joml.Vector3f tmp = new org.joml.Vector3f(local.x, local.y, local.z);
-            q.transform(tmp);
-            Vector3f r = new Vector3f(tmp.x, tmp.y, tmp.z);
-            r.add(pos);
-            return r;
-        };
 
         switch (modelType) {
             case CREEPER:
@@ -224,7 +216,7 @@ public final class RagdollBodyFactory {
                 buildBee(world, parts, pos, baseQuat, bodyScale, initialVel, capturedPose, isBaby);
                 break;
             default:
-                buildHumanoid(world, parts, pos, baseQuat, bodyScale, initialVel, capturedPose, worldOffset, isBaby, babyBigHead);
+                buildHumanoid(world, parts, pos, baseQuat, bodyScale, initialVel, capturedPose, isBaby, babyBigHead);
                 break;
         }
 
@@ -316,13 +308,11 @@ public final class RagdollBodyFactory {
     private static void buildHumanoid(PhysicsWorld world, List<PhysicsBody> parts,
                                       Vector3f pos, Quat4f baseQuat, float scale,
                                       Vector3f vel, MobPoseCapture.MobPose pose,
-                                      Function<Vector3f, Vector3f> worldOffset, boolean isBaby, boolean babyBigHead) {
+                                      boolean isBaby, boolean babyBigHead) {
         // Humanoid bodies use a fixed reference size. Baby scaling mirrors vanilla per-mob: models that
         // enlarge the baby head pass babyBigHead=true, uniformly scaled ones pass false.
         float bs = isBaby ? 0.5f : 1.0f;                       // torso, arms, legs
         float hd = isBaby ? (babyBigHead ? 0.75f : 0.5f) : 1.0f; // head
-        // Head on top of the torso at the model's own separation (0.375 + 0.25).
-        float headOffY = 0.375f*bs + 0.25f*hd;
         // Pose all six parts, not just the arms, so the ragdoll keeps its death pose instead of snapping upright.
         Quat4f torsoRot = poseRot(pose, RagdollPart.TORSO, baseQuat);
         Quat4f headRot  = poseRot(pose, RagdollPart.HEAD, baseQuat);
@@ -330,29 +320,72 @@ public final class RagdollBodyFactory {
         Quat4f rLegRot  = poseRot(pose, RagdollPart.RIGHT_LEG, baseQuat);
         Quat4f lArmRot  = poseRot(pose, RagdollPart.LEFT_ARM, baseQuat);
         Quat4f rArmRot  = poseRot(pose, RagdollPart.RIGHT_ARM, baseQuat);
-        // Placement comes from the drawn frame when captured, otherwise from the authored anatomy below.
-        Vector3f torsoPos = posePos(pose, RagdollPart.TORSO, pos);
-        Vector3f headPos = posePos(pose, RagdollPart.HEAD, worldOffset.apply(new Vector3f(0f, headOffY, 0f)));
-        // Hips sit 1.9 pixels off the midline, not 1.6: the same place the model puts them.
-        Vector3f lLegPos = posePos(pose, RagdollPart.LEFT_LEG, worldOffset.apply(new Vector3f(-0.11875f*bs, -0.75f*bs, 0f)));
-        Vector3f rLegPos = posePos(pose, RagdollPart.RIGHT_LEG, worldOffset.apply(new Vector3f( 0.11875f*bs, -0.75f*bs, 0f)));
-        // Arm fallback: shoulder-anchored swing using the model's own pivot (5px out, 2px up) and cube.
-        Vector3f lArmPos = posePos(pose, RagdollPart.LEFT_ARM, pose != null
-                        ? calcPos(pos, baseQuat, new Vector3f(-0.3125f*bs, 0.25f*bs, 0f), lArmRot, new Vector3f(-0.0625f*bs, -0.25f*bs, 0f))
-                        : worldOffset.apply(new Vector3f(-0.375f*bs, 0f, 0f)));
-        Vector3f rArmPos = posePos(pose, RagdollPart.RIGHT_ARM, pose != null
-                        ? calcPos(pos, baseQuat, new Vector3f( 0.3125f*bs, 0.25f*bs, 0f), rArmRot, new Vector3f( 0.0625f*bs, -0.25f*bs, 0f))
-                        : worldOffset.apply(new Vector3f( 0.375f*bs, 0f, 0f)));
-        // Masses follow real body fractions (torso 55%, head 7%, arm 4%, leg 14%, ~32 total) so the torso
-        // reaches the floor. Boxes are the drawn cubes, with the vanilla player's as fallback.
-        parts.add(makePart(world, box(world, poseBox(pose, RagdollPart.TORSO, new Vector3f(0.25f*bs, 0.375f*bs, 0.15f*bs))), torsoPos, torsoRot, 18*bs, vel));
-        parts.add(makePart(world, box(world, poseBox(pose, RagdollPart.HEAD, new Vector3f(0.25f*hd, 0.25f*hd, 0.25f*hd))), headPos, headRot, 2.4f*hd, vel));
-        // Limbs use the vanilla 4x12x4 cubes so feet don't spawn in the floor and sleeves don't sink.
+        // Boxes are the drawn cubes, with the vanilla player's 4x12x4 limbs as the fallback so feet don't spawn in the floor.
         Vector3f authoredLimb = new Vector3f(0.125f*bs, 0.375f*bs, 0.125f*bs);
-        parts.add(makePart(world, box(world, poseBox(pose, RagdollPart.LEFT_LEG, authoredLimb)), lLegPos, lLegRot, 4.6f*bs, vel));
-        parts.add(makePart(world, box(world, poseBox(pose, RagdollPart.RIGHT_LEG, authoredLimb)), rLegPos, rLegRot, 4.6f*bs, vel));
-        parts.add(makePart(world, box(world, poseBox(pose, RagdollPart.LEFT_ARM, authoredLimb)), lArmPos, lArmRot, 1.4f*bs, vel));
-        parts.add(makePart(world, box(world, poseBox(pose, RagdollPart.RIGHT_ARM, authoredLimb)), rArmPos, rArmRot, 1.4f*bs, vel));
+        Vector3f torsoHalf = poseBox(pose, RagdollPart.TORSO, new Vector3f(0.25f*bs, 0.375f*bs, 0.15f*bs));
+        Vector3f headHalf = poseBox(pose, RagdollPart.HEAD, new Vector3f(0.25f*hd, 0.25f*hd, 0.25f*hd));
+        Vector3f lLegHalf = poseBox(pose, RagdollPart.LEFT_LEG, authoredLimb);
+        Vector3f rLegHalf = poseBox(pose, RagdollPart.RIGHT_LEG, authoredLimb);
+        Vector3f lArmHalf = poseBox(pose, RagdollPart.LEFT_ARM, authoredLimb);
+        Vector3f rArmHalf = poseBox(pose, RagdollPart.RIGHT_ARM, authoredLimb);
+        // The capture gives rotations, not places: only the torso keeps its drawn position, as the root, and every other part hangs from its joint anchor at its drawn angle.
+        Vector3f torsoPos = new Vector3f(posePos(pose, RagdollPart.TORSO, pos));
+        Vector3f headPos = calcPos(torsoPos, torsoRot, humanoidNeck(torsoHalf), headRot, new Vector3f(0f, headHalf.y, 0f));
+        Vector3f lLegPos = calcPos(torsoPos, torsoRot, humanoidHip(torsoHalf, bs, -1f), lLegRot, new Vector3f(0f, -lLegHalf.y, 0f));
+        Vector3f rLegPos = calcPos(torsoPos, torsoRot, humanoidHip(torsoHalf, bs, 1f), rLegRot, new Vector3f(0f, -rLegHalf.y, 0f));
+        Vector3f lArmPos = calcPos(torsoPos, torsoRot, humanoidShoulder(torsoHalf, lArmHalf, bs, -1f), lArmRot, humanoidArmHang(lArmHalf, bs, -1f));
+        Vector3f rArmPos = calcPos(torsoPos, torsoRot, humanoidShoulder(torsoHalf, rArmHalf, bs, 1f), rArmRot, humanoidArmHang(rArmHalf, bs, 1f));
+        float lift = liftToFeet(pose, new Vector3f[]{lLegPos, rLegPos}, new Quat4f[]{lLegRot, rLegRot}, new Vector3f[]{lLegHalf, rLegHalf});
+        for (Vector3f placed : new Vector3f[]{torsoPos, headPos, lLegPos, rLegPos, lArmPos, rArmPos}) placed.y += lift;
+        // Masses follow real body fractions (torso 55%, head 7%, arm 4%, leg 14%, ~32 total) so the torso
+        // reaches the floor.
+        parts.add(makePart(world, box(world, torsoHalf), torsoPos, torsoRot, 18*bs, vel));
+        parts.add(makePart(world, box(world, headHalf), headPos, headRot, 2.4f*hd, vel));
+        parts.add(makePart(world, box(world, lLegHalf), lLegPos, lLegRot, 4.6f*bs, vel));
+        parts.add(makePart(world, box(world, rLegHalf), rLegPos, rLegRot, 4.6f*bs, vel));
+        parts.add(makePart(world, box(world, lArmHalf), lArmPos, lArmRot, 1.4f*bs, vel));
+        parts.add(makePart(world, box(world, rArmHalf), rArmPos, rArmRot, 1.4f*bs, vel));
+    }
+
+    // Humanoid joint anchors in the torso's frame, shared by buildHumanoid and buildHumanoidJoints so a part and its joint can never disagree; side is -1 left, +1 right.
+    private static Vector3f humanoidNeck(Vector3f torsoHalf) {
+        return new Vector3f(0f, torsoHalf.y, 0f);
+    }
+
+    // Hips sit 1.9 pixels off the midline, the same place the model puts them.
+    private static Vector3f humanoidHip(Vector3f torsoHalf, float bs, float side) {
+        return new Vector3f(side * 0.11875f * bs, -torsoHalf.y, 0f);
+    }
+
+    // The model's shoulder pivot: 5 pixels out and 2 up from the torso centre on a player.
+    private static Vector3f humanoidShoulder(Vector3f torsoHalf, Vector3f armHalf, float bs, float side) {
+        return new Vector3f(side * (torsoHalf.x + armHalf.x * 0.5f), armHalf.y - 0.125f * bs, 0f);
+    }
+
+    // The same shoulder in the arm's own frame: a quarter of the arm's width toward the torso and just under its top.
+    private static Vector3f humanoidShoulderOnArm(Vector3f armHalf, float bs, float side) {
+        return new Vector3f(-side * armHalf.x * 0.5f, armHalf.y - 0.125f * bs, 0f);
+    }
+
+    private static Vector3f humanoidArmHang(Vector3f armHalf, float bs, float side) {
+        Vector3f hang = humanoidShoulderOnArm(armHalf, bs, side);
+        hang.negate();
+        return hang;
+    }
+
+    // How far to raise a posed body so no leg starts below the feet it was drawn on: hanging limbs off a pitched torso, as in a crouch, can put a hip lower than the model drew it.
+    private static float liftToFeet(MobPoseCapture.MobPose pose, Vector3f[] centres, Quat4f[] rotations, Vector3f[] halves) {
+        if (pose == null || pose.getOrigin() == null || centres.length == 0) return 0f;
+        float lowest = Float.MAX_VALUE;
+        for (int i = 0; i < centres.length; i++) lowest = Math.min(lowest, lowestY(centres[i], rotations[i], halves[i]));
+        return Math.max(0f, pose.getOrigin().y - lowest);
+    }
+
+    // The lowest point of a turned box: its centre less the vertical reach of each of its half axes.
+    private static float lowestY(Vector3f centre, Quat4f rotation, Vector3f half) {
+        return centre.y - Math.abs(rotQ(rotation, new Vector3f(half.x, 0f, 0f)).y)
+                - Math.abs(rotQ(rotation, new Vector3f(0f, half.y, 0f)).y)
+                - Math.abs(rotQ(rotation, new Vector3f(0f, 0f, half.z)).y);
     }
 
     private static void buildCreeper(PhysicsWorld world, List<PhysicsBody> parts,
@@ -364,20 +397,45 @@ public final class RagdollBodyFactory {
         Quat4f frRot    = poseRot(pose, RagdollPart.RIGHT_ARM, baseQuat);
         Quat4f blRot    = poseRot(pose, RagdollPart.LEFT_LEG, baseQuat);
         Quat4f brRot    = poseRot(pose, RagdollPart.RIGHT_LEG, baseQuat);
-        // Same pivot rule as the humanoid: the creeper's parts are baked with no rotation of their
-        // own, so a captured transform can place them directly.
-        Vector3f torsoPos = posePos(pose, RagdollPart.TORSO, pos);
-        Vector3f headPos = posePos(pose, RagdollPart.HEAD, calcPos(pos, torsoRot, new Vector3f(0f, 0.5f*s, 0f), headRot, new Vector3f(0f, 0.125f*s, 0f)));
-        Vector3f flPos  = posePos(pose, RagdollPart.LEFT_ARM, calcPos(pos, torsoRot, new Vector3f( 0.11f*s,-0.3f*s,-0.22f*s), flRot, new Vector3f(0f,-0.255f*s,0f)));
-        Vector3f frPos  = posePos(pose, RagdollPart.RIGHT_ARM, calcPos(pos, torsoRot, new Vector3f(-0.11f*s,-0.3f*s,-0.22f*s), frRot, new Vector3f(0f,-0.255f*s,0f)));
-        Vector3f blPos  = posePos(pose, RagdollPart.LEFT_LEG, calcPos(pos, torsoRot, new Vector3f( 0.11f*s,-0.3f*s, 0.22f*s), blRot, new Vector3f(0f,-0.255f*s,0f)));
-        Vector3f brPos  = posePos(pose, RagdollPart.RIGHT_LEG, calcPos(pos, torsoRot, new Vector3f(-0.11f*s,-0.3f*s, 0.22f*s), brRot, new Vector3f(0f,-0.255f*s,0f)));
-        parts.add(makePart(world, box(world, new Vector3f(0.3f*s, 0.5f*s,  0.3f*s)),   torsoPos, torsoRot, 10*s, vel));
-        parts.add(makePart(world, box(world, new Vector3f(0.25f*s,0.25f*s, 0.25f*s)),  headPos, headRot,   4*s, vel));
-        parts.add(makePart(world, box(world, new Vector3f(0.12f*s,0.3f*s,  0.12f*s)),  flPos,   flRot,     3*s, vel));
-        parts.add(makePart(world, box(world, new Vector3f(0.12f*s,0.3f*s,  0.12f*s)),  frPos,   frRot,     3*s, vel));
-        parts.add(makePart(world, box(world, new Vector3f(0.12f*s,0.3f*s,  0.12f*s)),  blPos,   blRot,     3*s, vel));
-        parts.add(makePart(world, box(world, new Vector3f(0.12f*s,0.3f*s,  0.12f*s)),  brPos,   brRot,     3*s, vel));
+        // As on the humanoid, the capture gives rotations, not places: the torso is the drawn root and every other part hangs from its joint anchor.
+        Vector3f torsoPos = new Vector3f(posePos(pose, RagdollPart.TORSO, pos));
+        Vector3f legHalf = new Vector3f(CREEPER_LEG_HALF_XZ*s, CREEPER_LEG_HALF_Y*s, CREEPER_LEG_HALF_XZ*s);
+        Vector3f legHang = new Vector3f(0f, -legHalf.y, 0f);
+        Vector3f headPos = calcPos(torsoPos, torsoRot, creeperNeck(s), headRot, new Vector3f(0f, CREEPER_HEAD_HALF*s, 0f));
+        Vector3f flPos = calcPos(torsoPos, torsoRot, creeperHip(s, -1f, -1f), flRot, legHang);
+        Vector3f frPos = calcPos(torsoPos, torsoRot, creeperHip(s,  1f, -1f), frRot, legHang);
+        Vector3f blPos = calcPos(torsoPos, torsoRot, creeperHip(s, -1f,  1f), blRot, legHang);
+        Vector3f brPos = calcPos(torsoPos, torsoRot, creeperHip(s,  1f,  1f), brRot, legHang);
+        float lift = liftToFeet(pose, new Vector3f[]{flPos, frPos, blPos, brPos},
+                new Quat4f[]{flRot, frRot, blRot, brRot}, new Vector3f[]{legHalf, legHalf, legHalf, legHalf});
+        for (Vector3f placed : new Vector3f[]{torsoPos, headPos, flPos, frPos, blPos, brPos}) placed.y += lift;
+        // The body cube is the humanoid torso's 8x12x4, so it takes that box; the 0.6-deep one before held a creeper lying down well off the floor.
+        parts.add(makePart(world, box(world, new Vector3f(0.25f*s, 0.375f*s, 0.15f*s)), torsoPos, torsoRot, 10*s, vel));
+        parts.add(makePart(world, box(world, new Vector3f(CREEPER_HEAD_HALF*s, CREEPER_HEAD_HALF*s, CREEPER_HEAD_HALF*s)), headPos, headRot, 4*s, vel));
+        // Body slots follow the capture's: hind pair in the LEG slots, front pair in the ARM slots, which is how the joints, hit mapper and renderer read them; the front pair used to go first.
+        parts.add(makePart(world, box(world, new Vector3f(legHalf)), blPos, blRot, 3*s, vel));
+        parts.add(makePart(world, box(world, new Vector3f(legHalf)), brPos, brRot, 3*s, vel));
+        parts.add(makePart(world, box(world, new Vector3f(legHalf)), flPos, flRot, 3*s, vel));
+        parts.add(makePart(world, box(world, new Vector3f(legHalf)), frPos, frRot, 3*s, vel));
+    }
+
+    // CreeperModel measured from the body cube's centre: each leg hangs from 2 px out, 6 px down and 4 px fore or aft, the head from the top of the body.
+    private static final float CREEPER_HIP_X = 0.125f;
+    private static final float CREEPER_HIP_Y = -0.375f;
+    private static final float CREEPER_HIP_Z = 0.25f;
+    private static final float CREEPER_NECK_Y = 0.375f;
+    private static final float CREEPER_HEAD_HALF = 0.25f;
+    // A 4x6x4 leg, a hair narrower than drawn so the left and right legs, which the model sets side by side, do not start pressed together.
+    private static final float CREEPER_LEG_HALF_XZ = 0.12f;
+    private static final float CREEPER_LEG_HALF_Y = 0.1875f;
+
+    // Creeper leg anchors in the torso's frame, shared with buildCreeperJoints: side -1 is left and +1 right, end -1 front and +1 back, matching the slots the pose capture fills (left_front_leg is LEFT_ARM).
+    private static Vector3f creeperHip(float s, float side, float end) {
+        return new Vector3f(side * CREEPER_HIP_X * s, CREEPER_HIP_Y * s, end * CREEPER_HIP_Z * s);
+    }
+
+    private static Vector3f creeperNeck(float s) {
+        return new Vector3f(0f, CREEPER_NECK_Y * s, 0f);
     }
 
     // Bat: one body per wing plus torso and head. The model has no legs, so those slots hold hidden
@@ -1201,29 +1259,27 @@ public final class RagdollBodyFactory {
         float[] hip = RagdollifiedConfig.getJointLimits(RagdollifiedConfig.HIP_LIMITS);
         float[] shoulder = RagdollifiedConfig.getJointLimits(RagdollifiedConfig.SHOULDER_LIMITS);
         // Anchors are measured off the built bodies, so captured proportions (like illager heads) line up.
+        Vector3f authoredLimb = new Vector3f(0.125f*bs, 0.375f*bs, 0.125f*bs);
         Vector3f torsoHalf = halfExtentsOf(torso, new Vector3f(0.25f*bs, 0.375f*bs, 0.15f*bs));
         Vector3f headHalf = halfExtentsOf(head, new Vector3f(0.25f*hd, 0.25f*hd, 0.25f*hd));
-        Vector3f legHalf = halfExtentsOf(lLeg, new Vector3f(0.125f*bs, 0.375f*bs, 0.125f*bs));
-        Vector3f armHalf = halfExtentsOf(lArm, new Vector3f(0.125f*bs, 0.375f*bs, 0.125f*bs));
-        Vector3f torsoTop = tw.apply(new Vector3f(0f, torsoHalf.y, 0f));
-        Vector3f headBot  = rotQ(tHead.getRotation(new Quat4f()), new Vector3f(0f,-headHalf.y,0f)); headBot.add(tHead.origin);
-        joints.add(joint(world, torso, head, mid(torsoTop,headBot), v(0,0,0), v(0,0,0), lo(neck), hi(neck)));
-        Vector3f lHip = tw.apply(new Vector3f(-0.11875f*bs,-torsoHalf.y,0f));
-        Vector3f lLegTop = rotQ(tLLeg.getRotation(new Quat4f()), new Vector3f(0f,legHalf.y,0f)); lLegTop.add(tLLeg.origin);
-        joints.add(joint(world, torso, lLeg, mid(lHip,lLegTop), v(-0.05f*bs,0f,-0.05f*bs), v(0.05f*bs,0f,0.05f*bs), lo(hip), hi(hip)));
-        Vector3f rHip = tw.apply(new Vector3f(0.11875f*bs,-torsoHalf.y,0f));
-        Vector3f rLegTop = rotQ(tRLeg.getRotation(new Quat4f()), new Vector3f(0f,legHalf.y,0f)); rLegTop.add(tRLeg.origin);
-        joints.add(joint(world, torso, rLeg, mid(rHip,rLegTop), v(-0.05f*bs,0f,-0.05f*bs), v(0.05f*bs,0f,0.05f*bs), lo(hip), hi(hip)));
-        // Both ends name the same physical point (the shoulder pivot, measured once off the torso
-        // and once off the arm), so their midpoint is that pivot however the arm was posed.
-        Vector3f lSh = tw.apply(new Vector3f(-(torsoHalf.x + armHalf.x*0.5f),armHalf.y - 0.125f*bs,0f));
-        Vector3f lAT = rotQ(tLArm.getRotation(new Quat4f()), new Vector3f(armHalf.x*0.5f,armHalf.y - 0.125f*bs,0f)); lAT.add(tLArm.origin);
+        Vector3f lLegHalf = halfExtentsOf(lLeg, authoredLimb);
+        Vector3f rLegHalf = halfExtentsOf(rLeg, authoredLimb);
+        Vector3f lArmHalf = halfExtentsOf(lArm, authoredLimb);
+        Vector3f rArmHalf = halfExtentsOf(rArm, authoredLimb);
+        // Each joint is the anchor buildHumanoid hung its part from, measured once off the torso and once off the part; they agree, and the midpoint only guards a body placed some other way.
+        joints.add(joint(world, torso, head, mid(tw.apply(humanoidNeck(torsoHalf)), onBody(tHead, new Vector3f(0f, -headHalf.y, 0f))), v(0,0,0), v(0,0,0), lo(neck), hi(neck)));
+        joints.add(joint(world, torso, lLeg, mid(tw.apply(humanoidHip(torsoHalf, bs, -1f)), onBody(tLLeg, new Vector3f(0f, lLegHalf.y, 0f))), v(-0.05f*bs,0f,-0.05f*bs), v(0.05f*bs,0f,0.05f*bs), lo(hip), hi(hip)));
+        joints.add(joint(world, torso, rLeg, mid(tw.apply(humanoidHip(torsoHalf, bs, 1f)), onBody(tRLeg, new Vector3f(0f, rLegHalf.y, 0f))), v(-0.05f*bs,0f,-0.05f*bs), v(0.05f*bs,0f,0.05f*bs), lo(hip), hi(hip)));
         // keepCollision: arms sit flush against the torso, so their contact is free and stops them clipping the chest.
-        joints.add(joint(world, torso, lArm, mid(lSh,lAT), v(-0.02f*bs,-0.02f*bs,-0.02f*bs), v(0.02f*bs,0.02f*bs,0.02f*bs), lo(shoulder), hi(shoulder), true));
-        Vector3f rSh = tw.apply(new Vector3f(torsoHalf.x + armHalf.x*0.5f,armHalf.y - 0.125f*bs,0f));
-        Vector3f rAT = rotQ(tRArm.getRotation(new Quat4f()), new Vector3f(-armHalf.x*0.5f,armHalf.y - 0.125f*bs,0f)); rAT.add(tRArm.origin);
-        joints.add(joint(world, torso, rArm, mid(rSh,rAT), v(-0.02f*bs,-0.02f*bs,-0.02f*bs), v(0.02f*bs,0.02f*bs,0.02f*bs), lo(shoulder), hi(shoulder), true));
+        joints.add(joint(world, torso, lArm, mid(tw.apply(humanoidShoulder(torsoHalf, lArmHalf, bs, -1f)), onBody(tLArm, humanoidShoulderOnArm(lArmHalf, bs, -1f))), v(-0.02f*bs,-0.02f*bs,-0.02f*bs), v(0.02f*bs,0.02f*bs,0.02f*bs), lo(shoulder), hi(shoulder), true));
+        joints.add(joint(world, torso, rArm, mid(tw.apply(humanoidShoulder(torsoHalf, rArmHalf, bs, 1f)), onBody(tRArm, humanoidShoulderOnArm(rArmHalf, bs, 1f))), v(-0.02f*bs,-0.02f*bs,-0.02f*bs), v(0.02f*bs,0.02f*bs,0.02f*bs), lo(shoulder), hi(shoulder), true));
+    }
 
+    // A point given in a body's own frame, in world space.
+    private static Vector3f onBody(PhysTransform body, Vector3f local) {
+        Vector3f point = rotQ(body.getRotation(new Quat4f()), local);
+        point.add(body.origin);
+        return point;
     }
 
     // The size a body was actually built with. Falls back to the authored figure for a backend that
@@ -1556,14 +1612,14 @@ public final class RagdollBodyFactory {
     private static void buildCreeperJoints(PhysicsWorld world, List<PhysicsConstraint> joints,
             PhysicsBody torso, PhysicsBody head, PhysicsBody fl, PhysicsBody fr, PhysicsBody bl, PhysicsBody br,
             PhysTransform tHead, Function<Vector3f, Vector3f> tw, float s) {
-        Vector3f headBot = rotQ(tHead.getRotation(new Quat4f()), new Vector3f(0f,-0.25f*s,0f)); headBot.add(tHead.origin);
-        joints.add(joint(world, torso, head, mid(tw.apply(new Vector3f(0f,0.5f*s,0f)), headBot), v(0,0,0), v(0,0,0), v(-20,-20,-20), v(20,20,20)));
+        // The anchors buildCreeper hung the parts from; the legs used to be jointed on the mirrored side, which pinned every captured leg to a point across the body.
+        joints.add(joint(world, torso, head, mid(tw.apply(creeperNeck(s)), onBody(tHead, new Vector3f(0f, -CREEPER_HEAD_HALF*s, 0f))), v(0,0,0), v(0,0,0), v(-20,-20,-20), v(20,20,20)));
         float ll = 14;
         Vector3f lin = v(0f,0f,0f), liu = v(0f,0f,0f), al = v(-ll,-5,-ll), au = v(ll,5,ll);
-        joints.add(joint(world, torso, fl, tw.apply(new Vector3f( 0.11f*s,-0.375f*s,-0.22f*s)), lin, liu, al, au));
-        joints.add(joint(world, torso, fr, tw.apply(new Vector3f(-0.11f*s,-0.375f*s,-0.22f*s)), lin, liu, al, au));
-        joints.add(joint(world, torso, bl, tw.apply(new Vector3f( 0.11f*s,-0.375f*s, 0.22f*s)), lin, liu, al, au));
-        joints.add(joint(world, torso, br, tw.apply(new Vector3f(-0.11f*s,-0.375f*s, 0.22f*s)), lin, liu, al, au));
+        joints.add(joint(world, torso, fl, tw.apply(creeperHip(s, -1f, -1f)), lin, liu, al, au));
+        joints.add(joint(world, torso, fr, tw.apply(creeperHip(s,  1f, -1f)), lin, liu, al, au));
+        joints.add(joint(world, torso, bl, tw.apply(creeperHip(s, -1f,  1f)), lin, liu, al, au));
+        joints.add(joint(world, torso, br, tw.apply(creeperHip(s,  1f,  1f)), lin, liu, al, au));
     }
 
     private static void buildQuadJoints(PhysicsWorld world, List<PhysicsConstraint> joints,

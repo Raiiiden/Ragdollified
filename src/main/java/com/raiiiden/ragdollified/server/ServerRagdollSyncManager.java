@@ -23,11 +23,14 @@ import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
 import net.minecraftforge.network.PacketDistributor;
 
+import javax.annotation.Nullable;
 import javax.vecmath.Quat4f;
 import javax.vecmath.Vector3f;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -54,6 +57,8 @@ public final class ServerRagdollSyncManager {
         final int expiresTick;
         final RagdollSpawnPacket spawnPacket;
         final UUID victim;
+        // Standing in for a player who is still alive, rather than left behind by a death.
+        final boolean live;
         volatile RagdollTransform[] settledTransforms;
         volatile int impulseRevision;
         volatile UUID streamOwner;
@@ -65,8 +70,9 @@ public final class ServerRagdollSyncManager {
         volatile int streamSampleTick = Integer.MIN_VALUE;
 
         RetainedRagdoll(LivingEntity entity, RagdollSpawnPacket spawnPacket, int createdTick,
-                        int lifetimeTicks) {
+                        int lifetimeTicks, boolean live) {
             this.entityId = entity.getId();
+            this.live = live;
             this.dimension = entity.level().dimension();
             this.deathPosition = entity.position();
             this.createdTick = createdTick;
@@ -93,10 +99,19 @@ public final class ServerRagdollSyncManager {
     }
 
     public static void register(LivingEntity entity, RagdollSpawnPacket packet, int lifetimeTicks) {
+        register(entity, packet, lifetimeTicks, false);
+    }
+
+    // A body standing in for a player who is still alive, as startPlayerRagdoll makes; their death re-registers the id as an ordinary one.
+    public static void registerLive(LivingEntity entity, RagdollSpawnPacket packet, int lifetimeTicks) {
+        register(entity, packet, lifetimeTicks, true);
+    }
+
+    private static void register(LivingEntity entity, RagdollSpawnPacket packet, int lifetimeTicks, boolean live) {
         if (!(entity.level() instanceof ServerLevel level)) return;
         MinecraftServer server = level.getServer();
         int now = server.getTickCount();
-        RetainedRagdoll retained = new RetainedRagdoll(entity, packet, now, lifetimeTicks);
+        RetainedRagdoll retained = new RetainedRagdoll(entity, packet, now, lifetimeTicks, live);
         RETAINED.put(entity.getId(), retained);
 
         electStreamOwner(server, retained);
@@ -162,6 +177,39 @@ public final class ServerRagdollSyncManager {
         return retained != null
                 && player.level().dimension().equals(retained.dimension)
                 && player.getUUID().equals(retained.streamOwner);
+    }
+
+    // True for a body registered by startPlayerRagdoll whose player has not died since.
+    public static boolean isLive(int entityId) {
+        RetainedRagdoll retained = RETAINED.get(entityId);
+        return retained != null && retained.live;
+    }
+
+    // What the server knows of one retained body, for the pushes it starts itself; pose is the settled or latest streamed one, if any.
+    public record RetainedBody(int entityId, boolean live, @Nullable UUID victim, @Nullable UUID streamOwner,
+                               Vec3 anchor, @Nullable RagdollTransform[] pose) {}
+
+    @Nullable
+    public static RetainedBody retainedBody(int entityId, ResourceKey<Level> dimension) {
+        RetainedRagdoll retained = RETAINED.get(entityId);
+        return retained == null || !retained.dimension.equals(dimension) ? null : view(retained);
+    }
+
+    // Every retained body in this dimension whose torso lies within radius of centre.
+    public static List<RetainedBody> retainedBodiesNear(ResourceKey<Level> dimension, Vec3 centre, double radius) {
+        List<RetainedBody> found = new ArrayList<>();
+        for (RetainedRagdoll retained : RETAINED.values()) {
+            if (retained.dimension.equals(dimension) && retained.anchor().distanceToSqr(centre) <= radius * radius) {
+                found.add(view(retained));
+            }
+        }
+        return found;
+    }
+
+    private static RetainedBody view(RetainedRagdoll retained) {
+        RagdollTransform[] settled = retained.settledTransforms;
+        return new RetainedBody(retained.entityId, retained.live, retained.victim, retained.streamOwner,
+                retained.anchor(), copyPose(settled != null ? settled : retained.latestStreamTransforms));
     }
 
     // Relay one in-flight pose frame to every other nearby client. The server never simulates or
@@ -296,8 +344,12 @@ public final class ServerRagdollSyncManager {
     }
 
     public static void invalidateSettledPose(ServerPlayer source, int entityId, int revision) {
+        invalidateSettledPose(source.level().dimension(), entityId, revision);
+    }
+
+    public static void invalidateSettledPose(ResourceKey<Level> dimension, int entityId, int revision) {
         RetainedRagdoll retained = RETAINED.get(entityId);
-        if (retained == null || !retained.dimension.equals(source.level().dimension())) return;
+        if (retained == null || !retained.dimension.equals(dimension)) return;
         synchronized (retained) {
             retained.settledTransforms = null;
             retained.latestStreamTransforms = null;

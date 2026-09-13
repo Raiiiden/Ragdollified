@@ -149,6 +149,11 @@ public final class ServerRagdollHitTracker {
         return HIT_INFO.remove(entityId);
     }
 
+    // Read an entity's captured hit info and leave it for its death, for a push on a body that is not dying.
+    public static HitInfo peek(int entityId) {
+        return HIT_INFO.get(entityId);
+    }
+
     // Clear all entries (server stop).
     public static void clear() {
         HIT_INFO.clear();

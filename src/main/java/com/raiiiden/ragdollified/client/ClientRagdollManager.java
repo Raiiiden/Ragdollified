@@ -867,9 +867,14 @@ public class ClientRagdollManager {
             ClientRagdoll r = ragdolls.get(req.ragdollId);
             if (r == null) continue;
             if (req.revision > 0 && req.revision <= r.getLastImpulseRevision()) continue;
-            RagdollPart part = RagdollPart.byIndex(req.partIndex);
-            if (part == null) continue;
-            if (req.apply) r.applyImpulse(part, new Vector3f(req.x, req.y, req.z), req.impactPoint());
+            if (req.partIndex == RagdollHitMapper.GLOBAL_VELOCITY_KICK_INDEX) {
+                // A whole-body kick, from a blast going off beside a body that already exists.
+                if (req.apply) r.applyVelocityKick(new Vec3(req.x, req.y, req.z));
+            } else {
+                RagdollPart part = RagdollPart.byIndex(req.partIndex);
+                if (part == null) continue;
+                if (req.apply) r.applyImpulse(part, new Vector3f(req.x, req.y, req.z), req.impactPoint());
+            }
             if (req.revision > 0) r.acknowledgeImpulseRevision(req.revision);
         }
         // Handoff removals: destroy the specific physics ragdoll (by id) on the
@@ -1003,6 +1008,8 @@ public class ClientRagdollManager {
         }
         drainSeverQueue();
         ClientDetachedLimbManager.prepare(physicsWorld);
+        // Before the state pass, so a body a piston wakes is counted and stepped this tick.
+        RagdollPistonPusher.apply(ragdolls.values());
         lastSpawnQueueDepth = pendingSpawns.size();
         lastSpawnQueueNanos = System.nanoTime() - t0;
 
@@ -1420,7 +1427,7 @@ public class ClientRagdollManager {
                 ? MobModelHelper.ModelType.HUMANOID_STANDARD
                 : ClientMobModelHelper.getActualModelType(entity);
         if (!isPlayer && !MobModelHelper.isSupportedModelType(modelType)) {
-            Ragdollified.LOGGER.info(
+            Ragdollified.LOGGER.debug(
                     "Skipping ragdoll for unsupported mob {} - no matching ragdoll body/render",
                     mobType);
             return null;
@@ -1629,7 +1636,7 @@ public class ClientRagdollManager {
         if (!force && !RagdollifiedConfig.isRagdollEnabledFor(data.mobType, data.isPlayer)) return false;
         if (data.isPlayer) return true;
         if (MobModelHelper.isSupportedModelType(data.modelType)) return true;
-        Ragdollified.LOGGER.info(
+        Ragdollified.LOGGER.debug(
                 "Skipping ragdoll for unsupported mob {} - no matching ragdoll body/render",
                 data.mobType);
         return false;
