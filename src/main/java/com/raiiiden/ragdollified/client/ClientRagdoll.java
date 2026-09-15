@@ -764,7 +764,8 @@ public class ClientRagdoll {
                     (float) (data.position.z + data.hitOffset.z));
             float sizeScale = modelSizeVelocityScale();
             if (data.hitPartIndex == RagdollHitMapper.GLOBAL_VELOCITY_KICK_INDEX) {
-                applyGlobalVelocityKick(data.hitImpulse.scale(sizeScale));
+                // For a blast the offset is its centre, not an impact point.
+                applyGlobalVelocityKick(data.hitImpulse.scale(sizeScale), deathHitPoint);
             } else if (data.hitPartIndex == CENTER_HIT_PART_INDEX) {
                 applyCenteredDeathImpulse(data.hitImpulse);
             } else if (data.hitPartIndex >= 0 && data.hitPartIndex < ragdollParts.size()) {
@@ -2089,10 +2090,11 @@ public class ClientRagdoll {
     }
 
     // A whole-body velocity change in blocks per second, the live counterpart of the death-time blast kick.
-    public void applyVelocityKick(Vec3 velocity) {
+    // blastCentre spreads the kick by each part's distance from it; null pushes every part alike.
+    public void applyVelocityKick(Vec3 velocity, Vector3f blastCentre) {
         if (velocity == null || replicated || ragdollParts.isEmpty()) return;
         wakeForPush();
-        applyGlobalVelocityKick(velocity.scale(modelSizeVelocityScale()));
+        applyGlobalVelocityKick(velocity.scale(modelSizeVelocityScale()), blastCentre);
         markSettledPoseDirty();
     }
 
@@ -3152,18 +3154,87 @@ public class ClientRagdoll {
         return 0.25f;
     }
 
-    private void applyGlobalVelocityKick(Vec3 velocityKick) {
-        Vector3f currentVelocity = new Vector3f();
+    // A part's share of a blast is the body's mean distance from it over the part's own, so the foot
+    // beside a charge takes more than the head above it, and a distant blast, where the ratio nears one,
+    // pushes evenly. Clamped so neighbours never pull hard enough against a joint to tear it.
+    private static final float BLAST_MIN_SHARE = 0.5f;
+    private static final float BLAST_MAX_SHARE = 1.6f;
+    // Closer than this a part counts as sitting on the charge, so its share cannot run away.
+    private static final float BLAST_MIN_DISTANCE = 0.25f;
+    // How far each part's push turns from the body's heading toward its own line out of the blast.
+    private static final float BLAST_SPREAD = 0.35f;
+
+    // The body's momentum is what the kick was sized for, so the shares are rescaled to keep it; only how
+    // it is split changes, and the uneven split is what tips the body over instead of lifting it level.
+    private void applyGlobalVelocityKick(Vec3 velocityKick, Vector3f blastCentre) {
+        int count = ragdollParts.size();
         Vector3f kick = new Vector3f(
                 (float) velocityKick.x,
                 (float) velocityKick.y,
                 (float) velocityKick.z);
-        for (PhysicsBody body : ragdollParts) {
-            body.getLinearVelocity(currentVelocity);
-            currentVelocity.add(kick);
-            body.setLinearVelocity(currentVelocity);
-            body.activate();
+        float speed = kick.length();
+        if (blastCentre == null || speed < 1.0e-4f) {
+            for (PhysicsBody body : ragdollParts) addLinearVelocity(body, kick);
+            return;
         }
+
+        Vector3f heading = new Vector3f(kick);
+        heading.scale(1f / speed);
+        float[] distance = new float[count];
+        float[] mass = new float[count];
+        Vector3f[] outward = new Vector3f[count];
+        float totalMass = 0f;
+        float massDistance = 0f;
+        for (int i = 0; i < count; i++) {
+            PhysicsBody body = ragdollParts.get(i);
+            Vector3f away = new Vector3f();
+            body.getCenterOfMassPosition(away);
+            away.sub(blastCentre);
+            float length = away.length();
+            if (length > 1.0e-4f) {
+                away.scale(1f / length);
+            } else {
+                away.set(heading);
+            }
+            outward[i] = away;
+            distance[i] = Math.max(BLAST_MIN_DISTANCE, length);
+            float invMass = body.getInvMass();
+            mass[i] = invMass > 0f ? 1f / invMass : 0f;
+            totalMass += mass[i];
+            massDistance += mass[i] * distance[i];
+        }
+        if (totalMass <= 0f) {
+            for (PhysicsBody body : ragdollParts) addLinearVelocity(body, kick);
+            return;
+        }
+
+        float meanDistance = massDistance / totalMass;
+        float[] share = new float[count];
+        float sharedMass = 0f;
+        for (int i = 0; i < count; i++) {
+            share[i] = Mth.clamp(meanDistance / distance[i], BLAST_MIN_SHARE, BLAST_MAX_SHARE);
+            sharedMass += mass[i] * share[i];
+        }
+        float keepMomentum = sharedMass > 0f ? totalMass / sharedMass : 1f;
+
+        Vector3f partKick = new Vector3f();
+        for (int i = 0; i < count; i++) {
+            partKick.scale(1f - BLAST_SPREAD, heading);
+            partKick.scaleAdd(BLAST_SPREAD, outward[i], partKick);
+            float length = partKick.length();
+            if (length < 1.0e-4f) partKick.set(heading);
+            else partKick.scale(1f / length);
+            partKick.scale(speed * share[i] * keepMomentum);
+            addLinearVelocity(ragdollParts.get(i), partKick);
+        }
+    }
+
+    private static void addLinearVelocity(PhysicsBody body, Vector3f delta) {
+        Vector3f velocity = new Vector3f();
+        body.getLinearVelocity(velocity);
+        velocity.add(delta);
+        body.setLinearVelocity(velocity);
+        body.activate();
     }
 
     private static Vector3f scaledImpulse(Vec3 impulse, float scale) {
@@ -3440,6 +3511,7 @@ public class ClientRagdoll {
         Vector3f halfExtents = new Vector3f(0.1f, 0.3f, 0.1f);
         PhysicsShape shape = body.getShape();
         if (shape != null && shape.isBox()) shape.getHalfExtents(halfExtents);
+        boundSeveredMotion(rotation, linear, angular);
 
         // Every joint the part is an end of, which for the humanoid rig is the single one tying it
         // to the torso, but the loop does not have to know that.
@@ -3460,6 +3532,46 @@ public class ClientRagdoll {
         if (bodiesFrozen) unfreezeBodies();
 
         return new SeveredPart(part, position, rotation, linear, angular, halfExtents);
+    }
+
+    // Faster than this relative to the torso, a severed part is carrying a blow its joint would
+    // have shared with the whole body, not motion of its own.
+    private static final float MAX_SEVER_RELATIVE_SPEED = 4f;
+    private static final float MAX_SEVER_SPIN = 14f;
+    // Below this a limb falls in the pose it hung in and lands standing on its end.
+    private static final float MIN_SEVER_SPIN = 2.5f;
+
+    // Measure a severed part's motion against the torso's and bound it, in place. The part is
+    // usually the one that was just hit, and a limb is a fraction of the body's mass: cut loose
+    // the same tick, it keeps the whole impulse and is thrown across the room while the body it
+    // came off barely moves. A limb that hung still gets a little tumble instead, so it turns
+    // over as it falls rather than landing upright.
+    private void boundSeveredMotion(Quat4f rotation, Vector3f linear, Vector3f angular) {
+        int torsoIndex = RagdollPart.TORSO.index;
+        if (torsoIndex < ragdollParts.size()) {
+            Vector3f torso = new Vector3f();
+            ragdollParts.get(torsoIndex).getLinearVelocity(torso);
+            Vector3f relative = new Vector3f(linear);
+            relative.sub(torso);
+            float speed = relative.length();
+            if (speed > MAX_SEVER_RELATIVE_SPEED) {
+                relative.scale(MAX_SEVER_RELATIVE_SPEED / speed);
+                linear.add(torso, relative);
+            }
+        }
+
+        float spin = angular.length();
+        if (spin > MAX_SEVER_SPIN) {
+            angular.scale(MAX_SEVER_SPIN / spin);
+        } else if (spin < MIN_SEVER_SPIN) {
+            // About the part's own X, square to its long axis, so it turns end over end.
+            float x = rotation.x, y = rotation.y, z = rotation.z, w = rotation.w;
+            float extra = (MIN_SEVER_SPIN - spin)
+                    * (java.util.concurrent.ThreadLocalRandom.current().nextBoolean() ? 1f : -1f);
+            angular.x += (1f - 2f * (y * y + z * z)) * extra;
+            angular.y += 2f * (x * y + w * z) * extra;
+            angular.z += 2f * (x * z - w * y) * extra;
+        }
     }
 
     public boolean isPartSevered(RagdollPart part) {

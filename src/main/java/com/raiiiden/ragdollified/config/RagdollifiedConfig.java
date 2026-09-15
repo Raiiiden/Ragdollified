@@ -111,6 +111,7 @@ public class RagdollifiedConfig {
     public static final ForgeConfigSpec.BooleanValue ENABLE_DEATH_CAMERA;
     public static final ForgeConfigSpec.DoubleValue GECKOLIB_ARMOR_RENDER_DISTANCE;
     public static final ForgeConfigSpec.DoubleValue ARMOR_RENDER_DISTANCE;
+    public static final ForgeConfigSpec.ConfigValue<String> MISSING_ARMOR_FALLBACK;
     private static ForgeConfigSpec.BooleanValue debugRenderPhysics;
     private static ForgeConfigSpec.BooleanValue logPhysicsPerf;
     public static final ForgeConfigSpec.ConfigValue<String> PHYSICS_ENGINE;
@@ -449,6 +450,11 @@ public class RagdollifiedConfig {
         ARMOR_RENDER_DISTANCE = CLIENT_BUILDER
                 .comment("Distance in blocks within which vanilla armor renders on ragdolls.")
                 .defineInRange("armorRenderDistance", 100.0, 4.0, 512.0);
+        MISSING_ARMOR_FALLBACK = CLIENT_BUILDER
+                .comment("Armor drawn on a ragdoll in place of modded armor whose texture can't be found.",
+                        "Leave empty to draw no armor there. Otherwise an armor material name: leather, chainmail,",
+                        "iron, gold, diamond, netherite, or modid:material for a modded one.")
+                .define("missingArmorFallback", "");
 
         CLIENT_BUILDER.pop();
         CLIENT_BUILDER.comment("Physics Engine").push("physics");

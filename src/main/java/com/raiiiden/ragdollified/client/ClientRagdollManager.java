@@ -868,8 +868,9 @@ public class ClientRagdollManager {
             if (r == null) continue;
             if (req.revision > 0 && req.revision <= r.getLastImpulseRevision()) continue;
             if (req.partIndex == RagdollHitMapper.GLOBAL_VELOCITY_KICK_INDEX) {
-                // A whole-body kick, from a blast going off beside a body that already exists.
-                if (req.apply) r.applyVelocityKick(new Vec3(req.x, req.y, req.z));
+                // A whole-body kick, from a blast going off beside a body that already exists; the
+                // impact point is the blast's centre.
+                if (req.apply) r.applyVelocityKick(new Vec3(req.x, req.y, req.z), req.impactPoint());
             } else {
                 RagdollPart part = RagdollPart.byIndex(req.partIndex);
                 if (part == null) continue;
@@ -1461,6 +1462,10 @@ public class ClientRagdollManager {
                         ? (hit.centered ? RagdollHitMapper.CENTER_HIT_PART_INDEX : hit.part.index)
                         : -1;
         Vec3 hitImpulse = explosionKick != null ? explosionKick : hit != null ? hit.impulse : null;
+        // The blast's centre, as the server packs it, so both spawns spread the kick the same way.
+        Vec3 hitOffset = explosionKick != null
+                ? RagdollSpawnState.explosionSourceOffset(entity, damageSource)
+                : null;
 
         // Sheep wool state: only meaningful for sheep, ignored otherwise.
         boolean wasSheared = false;
@@ -1512,9 +1517,10 @@ public class ClientRagdollManager {
                 entity.getPose() == Pose.SWIMMING,
                 isBaby,
                 texture,
-                hitPartIndex, hitImpulse,
+                hitPartIndex, hitImpulse, hitOffset,
                 wasSheared, dyeColorId,
-                chargedCreeper, saddledPig
+                chargedCreeper, saddledPig,
+                "", "", 0
         );
 
         offerSpawn(data);

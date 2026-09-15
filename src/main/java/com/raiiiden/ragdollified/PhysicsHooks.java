@@ -129,6 +129,13 @@ public class PhysicsHooks {
             hitImpulseX = (float) explosionKick.x;
             hitImpulseY = (float) explosionKick.y;
             hitImpulseZ = (float) explosionKick.z;
+            // A blast has no lever arm; the offset carries its centre, so parts nearer it are thrown harder.
+            Vec3 blastOffset = RagdollSpawnState.explosionSourceOffset(entity, event.getSource());
+            if (blastOffset != null) {
+                hitOffsetX = (float) blastOffset.x;
+                hitOffsetY = (float) blastOffset.y;
+                hitOffsetZ = (float) blastOffset.z;
+            }
         } else if (hitInfo != null) {
             Vec3 impulse = RagdollHitMapper.computeImpulse(
                     hitInfo.direction, hitInfo.isHeadShot, hitInfo.isTaczBullet, hitInfo.isMelee, hitInfo.damage);

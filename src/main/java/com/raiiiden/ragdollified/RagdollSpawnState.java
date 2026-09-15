@@ -145,4 +145,13 @@ public final class RagdollSpawnState {
         double horizontalSpeed = Math.cos(elevation) * speed;
         return new Vec3(headingX * horizontalSpeed, Math.sin(elevation) * speed, headingZ * horizontalSpeed);
     }
+
+    // The blast's centre relative to the entity origin, the point the client spreads the kick out from
+    // part by part. Null when the source carries no position, as captureExplosionVelocityKick.
+    @Nullable
+    public static Vec3 explosionSourceOffset(LivingEntity entity, @Nullable DamageSource damageSource) {
+        if (damageSource == null || !damageSource.is(DamageTypeTags.IS_EXPLOSION)) return null;
+        Vec3 explosionCenter = damageSource.getSourcePosition();
+        return explosionCenter == null ? null : explosionCenter.subtract(entity.position());
+    }
 }

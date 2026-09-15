@@ -1039,12 +1039,42 @@ public class ClientRagdollRenderer {
             b = (color & 255) / 255f;
         }
 
-        ResourceLocation baseTex = getArmorTexture(armorItem, slot, stack, entity, null);
+        // Mods pick their textures off the wearer, and a despawned player or a mob corpse has none.
+        net.minecraft.world.entity.LivingEntity wearer = entity != null ? entity : GeckoLibArmorHelper.getProxyEntity();
+        ResourceLocation baseTex = ArmorTextureResolver.resolve(armorItem, slot, stack, wearer, null);
+        boolean baseFound = baseTex != null && ArmorTextureResolver.exists(baseTex);
+
+        // A model that overrides renderToBuffer draws its own geometry (Brimm's OBJ meshes), so it is posed
+        // and handed the draw, as vanilla's armor layer does. Our per-part pass would draw only the empty
+        // vanilla boxes underneath it.
+        if (model != base && drawsItself(model)) {
+            renderSelfDrawingArmor(model, slot, baseFound ? baseTex : null, poseStack, buffer, light,
+                    torso, head, larm, rarm, lleg, rleg, r, g, b);
+            if (dyeable) {
+                ResourceLocation overlayTex = ArmorTextureResolver.resolve(armorItem, slot, stack, wearer, "overlay");
+                renderSelfDrawingArmor(model, slot,
+                        overlayTex != null && ArmorTextureResolver.exists(overlayTex) ? overlayTex : null,
+                        poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg, 1f, 1f, 1f);
+            }
+            return;
+        }
+
+        // A texture no resource pack has draws purple and black. The configured fallback goes on the vanilla
+        // model its UVs were made for, untinted; with no fallback set the slot draws nothing.
+        if (!baseFound) {
+            baseTex = ArmorTextureResolver.fallback(slot);
+            if (baseTex == null) return;
+            model = base;
+            dyeable = false;
+            r = g = b = 1f;
+        }
         renderArmorSlotParts(model, baseTex, slot, poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg, r, g, b, modelScale);
 
         if (dyeable) {
-            ResourceLocation overlayTex = getArmorTexture(armorItem, slot, stack, entity, "overlay");
-            renderArmorSlotParts(model, overlayTex, slot, poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg, 1f, 1f, 1f, modelScale);
+            ResourceLocation overlayTex = ArmorTextureResolver.resolve(armorItem, slot, stack, wearer, "overlay");
+            if (overlayTex != null && ArmorTextureResolver.exists(overlayTex)) {
+                renderArmorSlotParts(model, overlayTex, slot, poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg, 1f, 1f, 1f, modelScale);
+            }
         }
     }
 
@@ -1099,6 +1129,81 @@ public class ClientRagdollRenderer {
         }
         return base;
     }
+
+    private static final Map<Class<?>, Boolean> DRAWS_ITSELF = new ConcurrentHashMap<>();
+
+    private static boolean drawsItself(HumanoidModel<?> model) {
+        return DRAWS_ITSELF.computeIfAbsent(model.getClass(), ClientRagdollRenderer::overridesRenderToBuffer);
+    }
+
+    // Matched by signature rather than by name, so it holds under both dev and SRG names: Model declares
+    // exactly one void (PoseStack, VertexConsumer, int, int, float x4) method.
+    private static boolean overridesRenderToBuffer(Class<?> cls) {
+        for (Class<?> c = cls; c != null && c != HumanoidModel.class && c != AgeableListModel.class; c = c.getSuperclass()) {
+            for (java.lang.reflect.Method m : c.getDeclaredMethods()) {
+                Class<?>[] p = m.getParameterTypes();
+                if (m.getReturnType() == void.class && p.length == 8
+                        && p[0] == PoseStack.class && p[1] == VertexConsumer.class
+                        && p[2] == int.class && p[3] == int.class
+                        && p[4] == float.class && p[5] == float.class && p[6] == float.class && p[7] == float.class) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    // Pose a self-drawing armor model to the physics pose and let it render, from the same model root the
+    // curio pass uses. texture null means it is missing: whatever the model sends through our buffer is
+    // dropped rather than drawn purple, and anything it draws on its own still shows. Baby scale is not
+    // applied here, since the model positions itself.
+    private static void renderSelfDrawingArmor(HumanoidModel<?> model, EquipmentSlot slot, ResourceLocation texture,
+                                               PoseStack poseStack, MultiBufferSource buffer, int light,
+                                               RagdollTransform torso, RagdollTransform head,
+                                               RagdollTransform larm, RagdollTransform rarm,
+                                               RagdollTransform lleg, RagdollTransform rleg,
+                                               float r, float g, float b) {
+        VertexConsumer vc = texture != null ? buffer.getBuffer(RenderType.armorCutoutNoCull(texture)) : DISCARD;
+        poseStack.pushPose();
+        try {
+            tempQuat.set(torso.rotation.x, torso.rotation.y, torso.rotation.z, torso.rotation.w);
+            tempQuat.rotateZ((float) Math.PI);
+            poseStack.mulPose(tempQuat);
+            poseStack.translate(0f, PART_PIVOTS[RagdollPart.TORSO.index].y / 16f, 0f);
+
+            poseHumanoidFromPhysics(model, torso, head, larm, rarm, lleg, rleg);
+            // Mirrors HumanoidArmorLayer#setPartVisibility, for models that draw their visible parts.
+            model.setAllVisible(false);
+            switch (slot) {
+                case HEAD -> { model.head.visible = true; model.hat.visible = true; }
+                case CHEST -> { model.body.visible = true; model.leftArm.visible = true; model.rightArm.visible = true; }
+                case LEGS -> { model.body.visible = true; model.leftLeg.visible = true; model.rightLeg.visible = true; }
+                case FEET -> { model.leftLeg.visible = true; model.rightLeg.visible = true; }
+                default -> {}
+            }
+            model.renderToBuffer(poseStack, vc, light, OverlayTexture.NO_OVERLAY, r, g, b, 1f);
+        } catch (Exception e) {
+            Ragdollified.LOGGER.debug("Self-drawing armor model failed: {}", e.getMessage());
+        } finally {
+            // Such a model may be built on our own armor model's parts, as Brimm's is, and the per-part
+            // pass needs them visible again.
+            model.setAllVisible(true);
+            poseStack.popPose();
+        }
+    }
+
+    // Accepts vertices and keeps none.
+    private static final VertexConsumer DISCARD = new VertexConsumer() {
+        @Override public VertexConsumer vertex(double x, double y, double z) { return this; }
+        @Override public VertexConsumer color(int r, int g, int b, int a) { return this; }
+        @Override public VertexConsumer uv(float u, float v) { return this; }
+        @Override public VertexConsumer overlayCoords(int u, int v) { return this; }
+        @Override public VertexConsumer uv2(int u, int v) { return this; }
+        @Override public VertexConsumer normal(float x, float y, float z) { return this; }
+        @Override public void endVertex() {}
+        @Override public void defaultColor(int r, int g, int b, int a) {}
+        @Override public void unsetDefaultColor() {}
+    };
 
     private static void renderPlayerGeckoLibArmor(PoseStack poseStack, MultiBufferSource buffer,
                                                   int light, RagdollTransform torso, RagdollTransform head,
@@ -3266,36 +3371,6 @@ public class ClientRagdollRenderer {
         if (mobType.contains("bat")) return new ResourceLocation("minecraft", "textures/entity/bat.png");
         if (mobType.contains("bee")) return new ResourceLocation("minecraft", "textures/entity/bee/bee.png");
         return new ResourceLocation("minecraft", "textures/entity/zombie/zombie.png");
-    }
-
-    // Resolve a slot's armor texture, type naming the layer ("overlay" for the dyeable pass, null for
-    // base). Honours the Forge per-item override, then falls back to the vanilla armor path.
-    private static ResourceLocation getArmorTexture(ArmorItem item, EquipmentSlot slot, ItemStack stack,
-                                                    net.minecraft.world.entity.Entity entity, String type) {
-        try {
-            String texturePath = item.getArmorTexture(stack, entity, slot, type);
-            if (texturePath != null && !texturePath.isEmpty()) {
-                try { return new ResourceLocation(texturePath); } catch (Exception ignored) {}
-            }
-            String materialName = item.getMaterial().getName();
-            if (materialName.contains(":")) {
-                materialName = materialName.substring(materialName.lastIndexOf(":") + 1);
-            }
-            materialName = switch (materialName.toLowerCase()) {
-                case "leather" -> "leather";
-                case "chainmail", "chain" -> "chainmail";
-                case "iron" -> "iron";
-                case "gold", "golden" -> "gold";
-                case "diamond" -> "diamond";
-                case "netherite" -> "netherite";
-                default -> materialName;
-            };
-            String layer = (slot == EquipmentSlot.LEGS) ? "layer_2" : "layer_1";
-            String suffix = (type == null || type.isEmpty()) ? "" : "_" + type;
-            return new ResourceLocation("minecraft", "textures/models/armor/" + materialName + "_" + layer + suffix + ".png");
-        } catch (Exception e) {
-            return new ResourceLocation("minecraft", "textures/models/armor/leather_layer_1.png");
-        }
     }
 
     // Overlay descriptors for extra layers drawn over the base model. Each subtype targets one body

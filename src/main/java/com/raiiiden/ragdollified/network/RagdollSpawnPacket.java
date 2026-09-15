@@ -179,7 +179,8 @@ public class RagdollSpawnPacket {
     }
 
     // Canonical form. hitOffset is the impact point relative to the entity origin, the lever arm that
-    // turns a hit into rotation; without it every impulse is torque-free and bodies never tip.
+    // turns a hit into rotation; without it every impulse is torque-free and bodies never tip. For a
+    // blast kick it is instead the blast's centre, which the client spreads the kick out from.
     public RagdollSpawnPacket(int originalEntityId, boolean isPlayer, String mobType,
                               MobModelHelper.ModelType modelType, float scale,
                               String playerUUID, String playerName,
@@ -241,7 +242,7 @@ public class RagdollSpawnPacket {
     public static boolean unpackChargedCreeper(byte s) { return (s & 0x1) != 0; }
     public static boolean unpackSaddledPig(byte s) { return (s & 0x2) != 0; }
 
-    private static MobModelHelper.ModelType resolveModelType(boolean isPlayer, String mobType) {
+    public static MobModelHelper.ModelType resolveModelType(boolean isPlayer, String mobType) {
         return isPlayer ? MobModelHelper.ModelType.HUMANOID_STANDARD : MobModelHelper.getModelTypeFromMobType(mobType);
     }
 
@@ -376,8 +377,8 @@ public class RagdollSpawnPacket {
         // client tracker only when the server had no capture.
         int hitPartIndex;
         Vec3 hitImpulse;
-        // Lever arm for the impulse. Zero means the server had no impact point (older server,
-        // explosion kick, …) and the client falls back to a centre-of-mass impulse.
+        // Lever arm for the impulse, or the blast's centre for an explosion kick. Zero means the server
+        // had neither and the client falls back to a centre-of-mass impulse or an even kick.
         Vec3 hitOffset = null;
         if (msg.hitPartIndex >= 0
                 || msg.hitPartIndex == RagdollHitMapper.CENTER_HIT_PART_INDEX

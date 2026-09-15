@@ -53,7 +53,8 @@ public final class RagdollWorldPushes {
 
     private record Strike(RagdollPart part, Vec3 impact) {}
 
-    private record PendingKick(ServerLevel level, UUID owner, Vec3 anchor, Vec3 velocity) {}
+    // source is the blast's centre, which the client spreads the kick from; weight is the speed it was averaged by.
+    private record PendingKick(ServerLevel level, UUID owner, Vec3 anchor, Vec3 velocity, Vec3 source, double weight) {}
 
     // A chain of blasts in one tick sums into one kick per body, sent once the tick is over.
     private static final Map<Integer, PendingKick> PENDING_KICKS = new LinkedHashMap<>();
@@ -110,9 +111,16 @@ public final class RagdollWorldPushes {
                     || owner.position().distanceToSqr(body.anchor()) > simulated * simulated) continue;
             double speed = launch * (1.0 - body.anchor().distanceTo(centre) / reach) * exposure(level, centre, body);
             if (speed < MIN_BLAST_SPEED) continue;
-            PendingKick kick = new PendingKick(level, owner.getUUID(), body.anchor(), kick(centre, body.anchor(), speed));
-            PENDING_KICKS.merge(body.entityId(), kick, (earlier, later) -> new PendingKick(
-                    later.level(), later.owner(), later.anchor(), earlier.velocity().add(later.velocity())));
+            PendingKick kick = new PendingKick(level, owner.getUUID(), body.anchor(),
+                    kick(centre, body.anchor(), speed), centre, speed);
+            // Chained blasts spread from their centres averaged by how hard each hit.
+            PENDING_KICKS.merge(body.entityId(), kick, (earlier, later) -> {
+                double weight = earlier.weight() + later.weight();
+                Vec3 source = earlier.source().scale(earlier.weight() / weight)
+                        .add(later.source().scale(later.weight() / weight));
+                return new PendingKick(later.level(), later.owner(), later.anchor(),
+                        earlier.velocity().add(later.velocity()), source, weight);
+            });
         }
     }
 
@@ -129,7 +137,7 @@ public final class RagdollWorldPushes {
             double speed = velocity.length();
             if (speed > launch && speed > 0.0) velocity = velocity.scale(launch / speed);
             RagdollImpulsePacket.broadcastOrdered(kick.level(), owner, entry.getKey(),
-                    RagdollHitMapper.GLOBAL_VELOCITY_KICK_INDEX, velocity, kick.anchor(), 0f);
+                    RagdollHitMapper.GLOBAL_VELOCITY_KICK_INDEX, velocity, kick.anchor(), kick.source(), 0f);
         }
         PENDING_KICKS.clear();
     }

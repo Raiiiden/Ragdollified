@@ -41,8 +41,11 @@ public final class ClientDetachedLimb {
     // A box is only tall enough to stand on its end if its long axis is meaningfully longer than its
     // base. Arms and legs are; a head is very nearly a cube and is left alone.
     private static final float TOPPLE_MIN_ASPECT = 1.4f;
-    // How near vertical the long axis has to be to count as standing. cos(35 degrees).
-    private static final float TOPPLE_UPRIGHT_DOT = 0.82f;
+    // How near vertical the long axis has to be to count as standing: cos(60 degrees), so anything
+    // resting more than 30 degrees off flat. A limb can only rest that steep propped on something -
+    // its own end, the body it came off, a block edge - and parked there it stays propped in mid-air
+    // once that body is moved.
+    private static final float TOPPLE_UPRIGHT_DOT = 0.5f;
     private static final float TOPPLE_SPIN = 3.5f;
     private static final float TOPPLE_LIFT = 0.1f;
     // A limb wedged upright in a one-block hole has nowhere to fall. Past this it is left standing
@@ -154,6 +157,7 @@ public final class ClientDetachedLimb {
     private final PhysicsBody body;
     private final PhysicsShape shape;
     private final Vector3f halfExtents;
+    private final float mass;
 
     private final int lifetime;
     private int ticksExisted;
@@ -205,6 +209,7 @@ public final class ClientDetachedLimb {
         Vector3f position = new Vector3f(
                 (float) data.position.x, (float) data.position.y, (float) data.position.z);
         BodyProperties properties = limbProperties(part, half);
+        this.mass = properties.mass;
         PhysicsBody created = world.createDynamicBody(shape, position, data.rotation, properties);
         this.body = created;
         if (created == null) {
@@ -319,15 +324,29 @@ public final class ClientDetachedLimb {
         float upY = 1f - 2f * (x * x + z * z);
         if (Math.abs(upY) < TOPPLE_UPRIGHT_DOT) return false;
 
-        // Spin about the box's own local X, flattened to horizontal: that axis is perpendicular to
-        // the long one, so the rotation lays the limb down rather than spinning it where it stands.
-        float ax = 1f - 2f * (y * y + z * z);
-        float az = 2f * (x * z - w * y);
-        float length = (float) Math.sqrt(ax * ax + az * az);
-        if (length < 1.0e-4f) {
-            ax = 1f;
-            az = 0f;
-            length = 1f;
+        // Tip it the way it already leans, so a limb propped against a body slides off it rather
+        // than being levered into it. The spin axis is up x lean, which carries the top toward the
+        // lean; the top is whichever end points up, which depends on which way up it landed.
+        float sign = upY < 0f ? -1f : 1f;
+        float leanX = 2f * (x * y - w * z) * sign;
+        float leanZ = 2f * (y * z + w * x) * sign;
+        float leanLength = (float) Math.sqrt(leanX * leanX + leanZ * leanZ);
+        float ax, az, length;
+        if (leanLength > 0.05f) {
+            ax = leanZ;
+            az = -leanX;
+            length = leanLength;
+        } else {
+            // Stood dead upright, so no lean to follow: spin about the box's own local X, flattened
+            // to horizontal, which is perpendicular to the long axis and lays the limb down.
+            ax = 1f - 2f * (y * y + z * z);
+            az = 2f * (x * z - w * y);
+            length = (float) Math.sqrt(ax * ax + az * az);
+            if (length < 1.0e-4f) {
+                ax = 1f;
+                az = 0f;
+                length = 1f;
+            }
         }
         ax /= length;
         az /= length;
@@ -419,6 +438,18 @@ public final class ClientDetachedLimb {
         lastCollisionCenter = null;
     }
 
+    // Speed change, in blocks per second, a single push passes through untouched. Covers a fist, a
+    // player walking into the limb and most light blows.
+    private static final float PUSH_KNEE_SPEED = 3.5f;
+    // Past the knee only this fraction of the extra speed is kept. Ragdoll impulses are sized for a
+    // part jointed to a whole body; a loose arm is a fraction of that mass, so a rifle round that
+    // nudges a corpse would otherwise throw the arm twelve blocks a second.
+    private static final float PUSH_SOFTNESS = 0.25f;
+    // What is taken off the push goes into tumble instead, so a shot limb flips over where it lies
+    // rather than just sliding less far. Radians per second per block per second removed.
+    private static final float PUSH_EXCESS_TO_SPIN = 1.2f;
+    private static final float PUSH_MAX_SPIN = 9f;
+
     // Push a loose limb, in ragdoll impulse units. Physics thread.
     public void applyImpulse(Vector3f impulse) {
         if (destroyed || body == null) return;
@@ -427,7 +458,33 @@ public final class ClientDetachedLimb {
         // again, and it should be tipped over again when it does.
         toppleNudges = 0;
         body.activate();
-        body.applyCentralImpulse(impulse);
+
+        float deltaV = impulse.length() / Math.max(0.1f, mass);
+        if (deltaV <= PUSH_KNEE_SPEED) {
+            body.applyCentralImpulse(impulse);
+            return;
+        }
+        float kept = PUSH_KNEE_SPEED + (deltaV - PUSH_KNEE_SPEED) * PUSH_SOFTNESS;
+        Vector3f softened = new Vector3f(impulse);
+        softened.scale(kept / deltaV);
+        body.applyCentralImpulse(softened);
+
+        // Spin square to both the push and the limb's long axis: end over end, the way a limb struck
+        // off its centre turns. The side it was struck on is not known here, so the way round is not.
+        Vector3f direction = new Vector3f(impulse);
+        direction.normalize();
+        float x = currentRot.x, y = currentRot.y, z = currentRot.z, w = currentRot.w;
+        Vector3f longAxis = new Vector3f(2f * (x * y - w * z), 1f - 2f * (x * x + z * z), 2f * (y * z + w * x));
+        Vector3f axis = new Vector3f();
+        axis.cross(direction, longAxis);
+        if (axis.lengthSquared() < 1.0e-4f) axis.cross(direction, new Vector3f(0f, 1f, 0f));
+        if (axis.lengthSquared() < 1.0e-4f) axis.set(1f, 0f, 0f);
+        axis.normalize();
+        float spin = Math.min(PUSH_MAX_SPIN, (deltaV - kept) * PUSH_EXCESS_TO_SPIN);
+        if (java.util.concurrent.ThreadLocalRandom.current().nextBoolean()) spin = -spin;
+        body.getAngularVelocity(scratchVec);
+        scratchVec.scaleAdd(spin, axis, scratchVec);
+        body.setAngularVelocity(scratchVec);
     }
 
     // The world under this limb changed: drop a parked limb's stale terrain and let it fall.

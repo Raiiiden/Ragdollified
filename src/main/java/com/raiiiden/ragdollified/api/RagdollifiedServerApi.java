@@ -2,6 +2,7 @@ package com.raiiiden.ragdollified.api;
 
 import com.raiiiden.ragdollified.LimbAnchors;
 import com.raiiiden.ragdollified.MobModelHelper;
+import com.raiiiden.ragdollified.RagdollHitMapper;
 import com.raiiiden.ragdollified.RagdollPart;
 import com.raiiiden.ragdollified.Ragdollified;
 import com.raiiiden.ragdollified.config.RagdollifiedConfig;
@@ -54,6 +55,45 @@ public final class RagdollifiedServerApi {
                 player.getItemBySlot(EquipmentSlot.CHEST).copy(),
                 player.getItemBySlot(EquipmentSlot.LEGS).copy(),
                 player.getItemBySlot(EquipmentSlot.FEET).copy());
+        ServerRagdollSyncManager.registerLive(player, packet, lifetimeTicks);
+    }
+
+    // As above, the launch coming from a blast at blastCentre (null for none): each part is thrown by its
+    // own distance from it, as a body a blast kills is, so the side nearest the blast goes hardest and the
+    // body turns over instead of lifting level. The body's momentum is the same as the plain launch.
+    public static void startPlayerRagdoll(ServerPlayer player, Vec3 position, float bodyYaw, float pitch,
+                                          @Nullable Vec3 velocity, @Nullable Vec3 blastCentre,
+                                          int lifetimeTicks) {
+        if (blastCentre == null || velocity == null) {
+            startPlayerRagdoll(player, position, bodyYaw, pitch, velocity, lifetimeTicks);
+            return;
+        }
+        if (player == null || position == null) return;
+        String mobType = net.minecraft.world.entity.EntityType.getKey(player.getType()).toString();
+        // Relative to the spawn position, which is where the client reads the blast's centre from.
+        Vec3 offset = blastCentre.subtract(position);
+        RagdollSpawnPacket packet = new RagdollSpawnPacket(
+                player.getId(),
+                true,
+                mobType,
+                RagdollSpawnPacket.resolveModelType(true, mobType),
+                1.0f,
+                player.getUUID().toString(),
+                player.getName().getString(),
+                position.x, position.y, position.z,
+                bodyYaw, pitch,
+                // The launch rides as the blast kick instead, or the body would be thrown twice.
+                0.0, 0.0, 0.0,
+                player.getPose() == Pose.SWIMMING, false,
+                player.getItemBySlot(EquipmentSlot.HEAD).copy(),
+                player.getItemBySlot(EquipmentSlot.CHEST).copy(),
+                player.getItemBySlot(EquipmentSlot.LEGS).copy(),
+                player.getItemBySlot(EquipmentSlot.FEET).copy(),
+                (byte) 0,
+                (byte) RagdollHitMapper.GLOBAL_VELOCITY_KICK_INDEX,
+                (float) velocity.x, (float) velocity.y, (float) velocity.z,
+                (float) offset.x, (float) offset.y, (float) offset.z,
+                (byte) 0, "", "", (byte) 0);
         ServerRagdollSyncManager.registerLive(player, packet, lifetimeTicks);
     }
 

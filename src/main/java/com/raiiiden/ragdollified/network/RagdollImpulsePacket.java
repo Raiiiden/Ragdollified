@@ -140,6 +140,14 @@ public class RagdollImpulsePacket {
     public static void broadcastOrdered(ServerLevel level, @Nullable ServerPlayer sender, int ragdollId,
                                         int partIndex, Vec3 impulse, @Nullable Vec3 impactPoint,
                                         float sourceDamage) {
+        broadcastOrdered(level, sender, ragdollId, partIndex, impulse, impactPoint, impactPoint, sourceDamage);
+    }
+
+    // sentPoint is the point clients receive, for a push that pivots somewhere other than the body: a
+    // blast kick sends the blast's centre, while listeners and the send radius still go by impactPoint.
+    public static void broadcastOrdered(ServerLevel level, @Nullable ServerPlayer sender, int ragdollId,
+                                        int partIndex, Vec3 impulse, @Nullable Vec3 impactPoint,
+                                        @Nullable Vec3 sentPoint, float sourceDamage) {
         int revision = SERVER_SEQUENCE.updateAndGet(v -> v == Integer.MAX_VALUE ? 1 : v + 1);
         ServerRagdollSyncManager.invalidateSettledPose(level.dimension(), ragdollId, revision);
         // A living player's stand-in is not a corpse, so listeners never hear of it; a whole-body kick is reported against the torso.
@@ -154,9 +162,9 @@ public class RagdollImpulsePacket {
 
         RagdollImpulsePacket ordered = new RagdollImpulsePacket(ragdollId, partIndex,
                 (float) impulse.x, (float) impulse.y, (float) impulse.z, revision, true,
-                impactPoint != null ? impactPoint.x : Double.NaN,
-                impactPoint != null ? impactPoint.y : Double.NaN,
-                impactPoint != null ? impactPoint.z : Double.NaN, sourceDamage);
+                sentPoint != null ? sentPoint.x : Double.NaN,
+                sentPoint != null ? sentPoint.y : Double.NaN,
+                sentPoint != null ? sentPoint.z : Double.NaN, sourceDamage);
 
         // Every modded client, sender included, applies the server-ordered packet once, giving one order.
         // Sent only to players within physics distance of the body.
