@@ -292,6 +292,19 @@ tasks.named('jar', Jar).configure {
         rename { "${mod_id}.refmap.json" }
     }
 
+    // A refmap missing a mixin still loads: the config is not required, so Mixin adds the mixin's
+    // interface but none of its accessors, and the first call dies with AbstractMethodError in
+    // production only (1.1.1 shipped without ExplosionAccessor this way). Refuse to build that jar.
+    doFirst {
+        def refmapFile = project.file('build/tmp/compileJava/compileJava-refmap.json')
+        if (!refmapFile.exists()) throw new GradleException("Mixin refmap was not generated: ${refmapFile}")
+        def mapped = new groovy.json.JsonSlurper().parse(refmapFile).mappings.keySet()
+        def config = new groovy.json.JsonSlurper().parse(project.file("src/main/resources/${mod_id}.mixins.json"))
+        def missing = (config.mixins ?: []) + (config.client ?: []) + (config.server ?: [])
+        missing = missing.collect { "${config.package}.${it}".replace('.', '/') }.findAll { !mapped.contains(it) }
+        if (!missing.isEmpty()) throw new GradleException("Mixin refmap has no entries for ${missing}; run a clean build")
+    }
+
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE
 
     finalizedBy 'reobfJar'
@@ -299,6 +312,12 @@ tasks.named('jar', Jar).configure {
 
 tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8'
+}
+
+// The Mixin annotation processor only writes refmap entries for the mixins it compiled this run, so an
+// incremental compile ships a refmap that is missing whichever mixins did not change.
+tasks.named('compileJava', JavaCompile).configure {
+    options.incremental = false
 }
 
 publishing {
