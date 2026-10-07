@@ -87,6 +87,8 @@ public class ClientPhysicsWorld {
 
     private final ClientLevel level;
     private final PhysicsWorld physics;
+    private final String dimensionId;
+    private float gravity = Float.NaN;
 
     // Time-based expiry, refcounted. A 1s TTL absorbs oscillation
     // between adjacent block centres without letting mass spawns pile up stale static geometry.
@@ -149,16 +151,31 @@ public class ClientPhysicsWorld {
 
     public ClientPhysicsWorld(ClientLevel level) {
         this.level = level;
+        this.dimensionId = level.dimension().location().toString();
         this.physics = PhysicsBackends.create();
-        physics.setGravity(0f, -(float) RagdollifiedConfig.get(RagdollifiedConfig.GRAVITY), 0f);
+        refreshGravity();
         // The same figure the ragdoll bodies get, so a contact between a body and the ground and a
         // contact between two bodies resolve to the same friction. See PhysicsWorld#setStaticFriction.
         physics.setStaticFriction((float) RagdollifiedConfig.get(RagdollifiedConfig.FRICTION));
     }
 
+    // Re-read every tick so a server snapshot arriving after the world was made, or a config edit, still lands.
+    private void refreshGravity() {
+        float resolved = RagdollifiedConfig.getGravity(dimensionId);
+        if (resolved == gravity) return;
+        gravity = resolved;
+        physics.setGravity(0f, -resolved, 0f);
+    }
+
+    // This dimension's ragdoll gravity, the figure the fluid forces lift against.
+    public float gravity() {
+        return gravity;
+    }
+
     // activeRagdollCount is last tick's total, sizing this tick's region budget. Close enough: the
     // active set moves by a few per tick, and a mass spawn just ramps the budget a tick later.
     public void beginTick(int activeRagdollCount) {
+        refreshGravity();
         newCacheEntriesThisTick = 0;
         // One region per active ragdoll is the ideal, since each can cross a block boundary per tick;
         // half that in practice, as only ragdolls that moved to a new block ask.

@@ -26,6 +26,11 @@ final class JBulletBody implements PhysicsBody {
     // the physics worker, so this costs six objects per ragdoll instead of two per call.
     private final Transform scratch = new Transform();
     private final Vector3f scratchInertia = new Vector3f();
+    // The gravity this body was given, so a multiplier always scales the same number.
+    private final Vector3f baseGravity = new Vector3f();
+    private final Vector3f scratchGravity = new Vector3f();
+    private boolean baseGravityKnown;
+    private float gravityFactor = 1f;
 
     JBulletBody(RigidBody body, JBulletShape shape, boolean isStatic) {
         this.body = body;
@@ -146,6 +151,24 @@ final class JBulletBody implements PhysicsBody {
         // setMassProps only updates the inverse-mass and inverse-inertia scalars; the cached world
         // inertia tensor the solver actually reads is rebuilt here.
         body.updateInertiaTensor();
+    }
+
+    @Override
+    public void setGravityFactor(float factor) {
+        if (isStatic) return;
+        // Bullet stores gravity per body rather than a multiplier, so keep the first one to scale.
+        if (!baseGravityKnown) {
+            body.getGravity(baseGravity);
+            baseGravityKnown = true;
+        }
+        scratchGravity.scale(factor, baseGravity);
+        body.setGravity(scratchGravity);
+        gravityFactor = factor;
+    }
+
+    @Override
+    public float getGravityFactor() {
+        return gravityFactor;
     }
 
     @Override

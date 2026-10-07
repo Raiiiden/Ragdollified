@@ -370,6 +370,11 @@ public final class ServerRagdollSyncManager {
         }
     }
 
+    // Whether a body is already kept for this entity, so a second spawn path does not replace it.
+    public static boolean isRetained(int entityId) {
+        return RETAINED.containsKey(entityId);
+    }
+
     public static void remove(int entityId) {
         RETAINED.remove(entityId);
         for (Set<Integer> sent : NEARBY_SENT.values()) sent.remove(entityId);

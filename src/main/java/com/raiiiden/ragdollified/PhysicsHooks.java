@@ -4,11 +4,13 @@ import com.raiiiden.ragdollified.network.RagdollSpawnPacket;
 import com.raiiiden.ragdollified.config.RagdollifiedConfig;
 import com.raiiiden.ragdollified.server.ServerRagdollSyncManager;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.damagesource.DamageSource;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.Pose;
 import net.minecraft.world.phys.Vec3;
 import net.minecraftforge.event.entity.living.LivingDeathEvent;
+import net.minecraftforge.event.level.ExplosionEvent;
 import net.minecraftforge.eventbus.api.EventPriority;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
@@ -19,7 +21,24 @@ public class PhysicsHooks {
     // HIGHEST so worn armor is read before a looting addon clears the inventory at LOWEST.
     @SubscribeEvent(priority = EventPriority.HIGHEST)
     public static void onLivingDeath(LivingDeathEvent event) {
-        LivingEntity entity = event.getEntity();
+        spawnRagdoll(event.getEntity(), event.getSource());
+    }
+
+    // A creeper destroys itself instead of dying, so no death event fires and it leaves no body.
+    // LOWEST so the blast has already thrown the bodies lying in it before this one is added.
+    @SubscribeEvent(priority = EventPriority.LOWEST)
+    public static void onExplosionDetonate(ExplosionEvent.Detonate event) {
+        if (event.getLevel().isClientSide) return;
+        if (!RagdollifiedConfig.get(RagdollifiedConfig.CREEPER_EXPLOSION_RAGDOLLS)) return;
+        if (!(event.getExplosion().getDirectSourceEntity() instanceof LivingEntity exploder)) return;
+        // Only the mob the blast takes with it, not every mob that happens to set one off.
+        if (!exploder.isDeadOrDying() && !exploder.isRemoved()) return;
+        if (ServerRagdollSyncManager.isRetained(exploder.getId())) return;
+        // The blast sits inside the mob, so its body is thrown up and back like any point-blank kill.
+        spawnRagdoll(exploder, exploder.level().damageSources().explosion(event.getExplosion()));
+    }
+
+    private static void spawnRagdoll(LivingEntity entity, DamageSource source) {
         if (entity.level().isClientSide) return;
 
         // Large and medium slimes are replacement/split deaths, not the end of the mob family.
@@ -28,7 +47,8 @@ public class PhysicsHooks {
 
         boolean isPlayer = entity instanceof ServerPlayer;
         String mobType = net.minecraft.world.entity.EntityType.getKey(entity.getType()).toString();
-        if (!RagdollifiedConfig.isRagdollEnabledFor(mobType, isPlayer)) return;
+        if (!RagdollifiedConfig.isRagdollEnabledFor(mobType, isPlayer,
+                entity.level().dimension().location().toString())) return;
 
         MobModelHelper.ModelType modelType = isPlayer
                 ? MobModelHelper.ModelType.HUMANOID_STANDARD
@@ -39,7 +59,7 @@ public class PhysicsHooks {
         }
 
         Vec3 vel = RagdollSpawnState.applyAttackerDirectionFallback(
-                entity, event.getSource(), RagdollSpawnState.captureLinearVelocity(entity));
+                entity, source, RagdollSpawnState.captureLinearVelocity(entity));
 
         float scale = isPlayer ? 1.0f : entity.getBbHeight() / 1.8f;
         // LivingEntity.isBaby() rather than an AgeableMob check: zombies, husks and piglins are
@@ -123,14 +143,14 @@ public class PhysicsHooks {
         // Lever arm for the death impulse, relative to the entity origin: a blow through the centre of
         // mass makes no torque, so without it a struck body only slides and never tips.
         float hitOffsetX = 0f, hitOffsetY = 0f, hitOffsetZ = 0f;
-        Vec3 explosionKick = RagdollSpawnState.captureExplosionVelocityKick(entity, event.getSource());
+        Vec3 explosionKick = RagdollSpawnState.captureExplosionVelocityKick(entity, source);
         if (explosionKick != null) {
             hitPartIndex = (byte) RagdollHitMapper.GLOBAL_VELOCITY_KICK_INDEX;
             hitImpulseX = (float) explosionKick.x;
             hitImpulseY = (float) explosionKick.y;
             hitImpulseZ = (float) explosionKick.z;
             // A blast has no lever arm; the offset carries its centre, so parts nearer it are thrown harder.
-            Vec3 blastOffset = RagdollSpawnState.explosionSourceOffset(entity, event.getSource());
+            Vec3 blastOffset = RagdollSpawnState.explosionSourceOffset(entity, source);
             if (blastOffset != null) {
                 hitOffsetX = (float) blastOffset.x;
                 hitOffsetY = (float) blastOffset.y;

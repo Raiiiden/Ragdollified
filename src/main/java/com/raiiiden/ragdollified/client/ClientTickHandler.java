@@ -41,6 +41,8 @@ public class ClientTickHandler {
             // Cleanup every 5 seconds (still on render thread, cheap)
             if (tickCounter >= 100) {
                 ClientMobTextureCache.cleanup();
+                // Remember nearby players' skins while they are alive.
+                ClientPlayerSkinCache.cacheNearbyPlayers();
                 tickCounter = 0;
             }
         }

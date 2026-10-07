@@ -55,7 +55,7 @@ public final class RagdollifiedServerApi {
                 player.getItemBySlot(EquipmentSlot.CHEST).copy(),
                 player.getItemBySlot(EquipmentSlot.LEGS).copy(),
                 player.getItemBySlot(EquipmentSlot.FEET).copy());
-        ServerRagdollSyncManager.registerLive(player, packet, lifetimeTicks);
+        registerLive(player, packet, lifetimeTicks);
     }
 
     // As above, the launch coming from a blast at blastCentre (null for none): each part is thrown by its
@@ -94,11 +94,26 @@ public final class RagdollifiedServerApi {
                 (float) velocity.x, (float) velocity.y, (float) velocity.z,
                 (float) offset.x, (float) offset.y, (float) offset.z,
                 (byte) 0, "", "", (byte) 0);
+        registerLive(player, packet, lifetimeTicks);
+    }
+
+    // Parts an amputation addon already took off the living player stay off the body standing in for
+    // them; otherwise going limp would grow them back, and a death in that body would keep them.
+    private static void registerLive(ServerPlayer player, RagdollSpawnPacket packet, int lifetimeTicks) {
+        int severedMask = resolveSeveredPartMask(player);
+        if (severedMask != 0) packet.severedMask(severedMask);
         ServerRagdollSyncManager.registerLive(player, packet, lifetimeTicks);
     }
 
     public static void stopRagdoll(int entityId) {
         ServerRagdollSyncManager.remove(entityId);
+    }
+
+    // True while entityId names a body startPlayerRagdoll made for a player who is still alive. Such a
+    // body shares its player's entity id with their earlier death ragdolls, so anything keyed on a
+    // death's ragdoll id should ignore it.
+    public static boolean isLiveRagdoll(int entityId) {
+        return ServerRagdollSyncManager.isLive(entityId);
     }
 
     // True when this player is the client chosen to simulate and stream this body;

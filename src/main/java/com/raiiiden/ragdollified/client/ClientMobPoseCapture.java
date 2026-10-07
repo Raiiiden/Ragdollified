@@ -7,6 +7,7 @@ import com.raiiiden.ragdollified.MobPoseCapture;
 import com.raiiiden.ragdollified.RagdollPart;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.model.EntityModel;
+import net.minecraft.client.model.HumanoidModel;
 import net.minecraft.client.model.geom.ModelPart;
 import net.minecraft.client.renderer.LightTexture;
 import net.minecraft.client.renderer.entity.EntityRenderer;
@@ -92,6 +93,12 @@ public final class ClientMobPoseCapture {
         // runs on a death tick, where the tick values are the ones that matter.
         float bodyYaw = entity.getVisualRotationYInDegrees();
         float headYaw = Mth.wrapDegrees(entity.getYHeadRot() - bodyYaw);
+        // Flags the renderer owns rather than the model. A model never drawn through one still reads
+        // young, which halves the body and builds a ragdoll scrunched into itself.
+        model.young = entity.isBaby();
+        model.riding = entity.isPassenger();
+        model.attackTime = entity.getAttackAnim(1.0f);
+        if (model instanceof HumanoidModel<?> humanoid) humanoid.crouching = entity.isCrouching();
         ((EntityModel<T>) model).prepareMobModel(entity, entity.walkAnimation.position(),
                 entity.walkAnimation.speed(), 1.0f);
         ((EntityModel<T>) model).setupAnim(entity, entity.walkAnimation.position(),

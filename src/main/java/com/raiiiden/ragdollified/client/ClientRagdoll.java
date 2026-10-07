@@ -77,7 +77,6 @@ public class ClientRagdoll {
     // Holds a dragged limb's pre-drive velocity so its fall speed survives the drag override.
     private final Vector3f scratchDragVel = new Vector3f();
     private final Vector3f scratchAng = new Vector3f();
-    private final Vector3f scratchNormal = new Vector3f();
     private final Vector3f contactNormal = new Vector3f();
     private final Vector3f groupPenetrationCorrection = new Vector3f();
     private final Vector3f supportAabbMin = new Vector3f();
@@ -91,6 +90,8 @@ public class ClientRagdoll {
     private final float[] supportTerrainExtents = new float[3];
     private final BlockPos.MutableBlockPos fluidSamplePos = new BlockPos.MutableBlockPos();
     private final BlockPos.MutableBlockPos fluidSurfacePos = new BlockPos.MutableBlockPos();
+    private final Vector3f fluidBoxMin = new Vector3f();
+    private final Vector3f fluidBoxMax = new Vector3f();
     private final BlockPos.MutableBlockPos supportBlockPos = new BlockPos.MutableBlockPos();
     private final BlockPos.MutableBlockPos terrainScanPos = new BlockPos.MutableBlockPos();
     private static final float TERRAIN_CONTACT_DISTANCE = 0.05f;
@@ -238,6 +239,7 @@ public class ClientRagdoll {
     // Cached skins
     private final ResourceLocation cachedPlayerSkin;
     private final boolean cachedIsSlim;
+    private final ResourceLocation cachedCape;
 
     // Immutable render snapshot published atomically at the end of updateCachedTransforms and read
     // lock-free. About 5 MB/s at 50 ragdolls, all of which stays in eden; it lives one tick.
@@ -438,6 +440,9 @@ public class ClientRagdoll {
     // Render data
     private final boolean isPlayer;
     private final String mobType;
+    // From mobGravity and mobBuoyancy, read once when the body is built. NaN buoyancy means the fluid's own.
+    private float mobGravityMultiplier = 1f;
+    private float mobBuoyancy = Float.NaN;
     private final float scale;
     private final UUID playerUUID;
     private final String playerName;
@@ -781,9 +786,11 @@ public class ClientRagdoll {
             ClientPlayerSkinCache.Skin resolved = ClientPlayerSkinCache.resolve(playerUUID);
             cachedPlayerSkin = resolved.texture;
             cachedIsSlim = resolved.slim;
+            cachedCape = resolved.cape;
         } else {
             cachedPlayerSkin = null;
             cachedIsSlim = false;
+            cachedCape = null;
         }
     }
 
@@ -841,6 +848,8 @@ public class ClientRagdoll {
                 destroy();
                 return;
             }
+            // Walked into: it is awake and pushed, and the next tick runs it normally.
+            if (nudgeOnPlayerWalk()) return;
             if (pendingTerrainValidation) {
                 BlockPos torsoBlock = currentTorsoBlock();
                 if (!isSupportAreaLoaded()) return;
@@ -1896,9 +1905,17 @@ public class ClientRagdoll {
             pos.y = (float) data.position.y + genericRig.spawnYOffset * scale;
         }
 
+        String physicsId = isPlayer ? "minecraft:player" : mobType;
+        mobGravityMultiplier = RagdollifiedConfig.getMobGravityMultiplier(physicsId);
+        mobBuoyancy = RagdollifiedConfig.getMobBuoyancy(physicsId);
+
         RagdollBodyFactory.build(world, ragdollParts, ragdollJoints,
                 modelType, pos, baseQuat, scale, initialVel, capturedPose, bodyProfile,
                 isBaby(), isBaby() && babyScalesHead(), genericRig);
+        // On top of the per-part gravity the factory already set, so the limbs keep their proportions.
+        if (mobGravityMultiplier != 1f) {
+            for (PhysicsBody r : ragdollParts) r.setGravityFactor(r.getGravityFactor() * mobGravityMultiplier);
+        }
         for (PhysicsBody r : ragdollParts) {
             r.setSleepingAllowed(false);
             r.activate();
@@ -1907,11 +1924,24 @@ public class ClientRagdoll {
 
     // Forces: mirrors MobRagdollPhysics exactly
 
-    // Per-part buoyancy and drag: each submerged part gains upward velocity with its depth below the
-    // local surface, so the body hovers half-submerged and can reach the water-surface settle.
+    // How much speed the water takes away each tick.
+    private static final float FLUID_SIDE_DRAG = 0.7f;
+    private static final float FLUID_VERTICAL_DRAG = 0.78f;
+    // Smallest part height used, so a flat part cannot divide by nothing.
+    private static final float FLUID_MIN_PART_HEIGHT = 0.05f;
+    // Deeper than this and the part is under the water, not on it.
+    private static final float FLUID_SKID_SUBMERSION = 0.8f;
+    // Sideways speed a part needs before it starts skipping across the top.
+    private static final float FLUID_SKID_SPEED = 5.0f;
+    // Lift gained for every bit of sideways speed above that.
+    private static final float FLUID_SKID_LIFT = 5.0f;
+    // How much speed a skipping part keeps, instead of the usual water drag.
+    private static final float FLUID_SKID_DRAG = 0.95f;
+
+    // Lifts each part by how much of it is under water, so a body floats up and a fast one skips across.
     private void applyFluidForces() {
         final float dt = 1f / 20f;
-        final float gravity = (float) RagdollifiedConfig.get(RagdollifiedConfig.GRAVITY);
+        final float gravity = physicsWorld.gravity();
 
         for (int i = 0; i < ragdollParts.size() && i < RagdollTransform.MAX_PARTS; i++) {
             if (cachedTransforms[i] == null) continue;
@@ -1925,16 +1955,25 @@ public class ClientRagdoll {
             if (fluid.isEmpty()) continue;
 
             float depth = sampleFluidDepth(partPos, fluid);
-            if (depth <= 0f) continue; // part center is above the local surface
-            float submersion = Math.min(1f, depth);
-
-            float buoyancyAccel = gravity * 2.0f * submersion;
+            // How much of the part is under water, not how deep it sits. Depth alone never lifted a body back up.
+            body.getWorldAabb(fluidBoxMin, fluidBoxMax);
+            float height = Math.max(FLUID_MIN_PART_HEIGHT, fluidBoxMax.y - fluidBoxMin.y);
+            float submersion = Math.min(1f, (depth + height * 0.5f) / height);
+            if (submersion <= 0f) continue; // all of it is above the water
 
             body.getLinearVelocity(scratchVel);
+            float sideways = (float) Math.sqrt(scratchVel.x * scratchVel.x + scratchVel.z * scratchVel.z);
+            // Near the top and moving fast sideways, a part skips like a flat stone.
+            boolean skidding = submersion < FLUID_SKID_SUBMERSION && sideways > FLUID_SKID_SPEED;
+
+            float buoyancyAccel = gravity * mobGravityMultiplier * fluidBuoyancy(fluid) * submersion;
+            if (skidding) buoyancyAccel += (sideways - FLUID_SKID_SPEED) * FLUID_SKID_LIFT;
+
             scratchVel.y += buoyancyAccel * dt;
-            scratchVel.x *= 0.7f;
-            scratchVel.y *= 0.7f;
-            scratchVel.z *= 0.7f;
+            float sideDrag = skidding ? FLUID_SKID_DRAG : FLUID_SIDE_DRAG;
+            scratchVel.x *= sideDrag;
+            scratchVel.z *= sideDrag;
+            scratchVel.y *= FLUID_VERTICAL_DRAG;
 
             // Flow scaled by submersion so a part barely dipping in doesn't get yanked
             // downstream. y-flow ignored; vertical motion is fully owned by buoyancy.
@@ -1945,9 +1984,22 @@ public class ClientRagdoll {
             body.setLinearVelocity(scratchVel);
 
             body.getAngularVelocity(scratchAng);
-            scratchAng.scale(0.7f);
+            // A skipping part keeps its spin, so it tumbles along instead of stopping dead.
+            scratchAng.scale(skidding ? FLUID_SKID_DRAG : FLUID_SIDE_DRAG);
             body.setAngularVelocity(scratchAng);
         }
+    }
+
+    // Lift at full depth, as a multiple of gravity. Above 1 a sunk part rises back to the top.
+    private float fluidBuoyancy(FluidState fluid) {
+        if (!Float.isNaN(mobBuoyancy)) return mobBuoyancy;
+        return (float) RagdollifiedConfig.get(fluid.is(FluidTags.LAVA)
+                ? RagdollifiedConfig.LAVA_BUOYANCY : RagdollifiedConfig.WATER_BUOYANCY);
+    }
+
+    // A fluid set to sink bodies holds nothing up, so a body in it rests on the floor like on land.
+    private boolean fluidCarriesBodies(FluidState fluid) {
+        return fluidBuoyancy(fluid) > 1f;
     }
 
     // Any submerged part suppresses stale-floor recovery while buoyancy is active.
@@ -1974,7 +2026,7 @@ public class ClientRagdoll {
                     (int) Math.floor(transform.position.y),
                     (int) Math.floor(transform.position.z));
             FluidState fluid = level.getFluidState(fluidSamplePos);
-            if (fluid.isEmpty()) continue;
+            if (fluid.isEmpty() || !fluidCarriesBodies(fluid)) continue;
             float depth = sampleFluidDepth(transform.position, fluid);
             if (depth < -FLUID_SURFACE_ABOVE || depth > FLUID_SURFACE_BELOW) continue;
             if (i == RagdollPart.TORSO.index) return true;
@@ -1993,7 +2045,7 @@ public class ClientRagdoll {
                     (int) Math.floor(transform.position.y),
                     (int) Math.floor(transform.position.z));
             FluidState fluid = level.getFluidState(fluidSamplePos);
-            if (fluid.isEmpty()
+            if (fluid.isEmpty() || !fluidCarriesBodies(fluid)
                     || sampleFluidDepth(transform.position, fluid) <= FLUID_SURFACE_BELOW) {
                 continue;
             }
@@ -2026,6 +2078,19 @@ public class ClientRagdoll {
         return first.getType() == second.getType();
     }
 
+    // How close a part has to be before a walking player moves it.
+    private static final float PLAYER_PUSH_RADIUS = 1.5f;
+    // How much speed a part gains from the player's own speed, up close.
+    private static final float PLAYER_PUSH_SPEED = 11f;
+    // The most one walk can add, so a sprint shoves a body rather than launching it.
+    private static final float PLAYER_PUSH_MAX_SPEED = 2.5f;
+    // How much of the push goes up or down, so a walk slides a body instead of squashing it.
+    private static final float PLAYER_PUSH_VERTICAL = 0.25f;
+    // Slack around the player when deciding whether they walked into a resting body.
+    private static final double PLAYER_PUSH_REACH = 0.1;
+    // Below this the player is standing still, not walking.
+    private static final double PLAYER_PUSH_MIN_SPEED = 0.02;
+
     private void applyPlayerCollisions() {
         // A dragger is already steering the body through its paired limbs. Vanilla's local
         // player-shove adds a competing impulse and was the source of most drag flips.
@@ -2046,16 +2111,53 @@ public class ClientRagdoll {
             float dz = (float)(playerPos.z - partPos.z);
             float distSq = dx*dx + dy*dy + dz*dz;
 
-            if (distSq < 1.5f * 1.5f) {
+            if (distSq < PLAYER_PUSH_RADIUS * PLAYER_PUSH_RADIUS) {
                 float dist = (float) Math.sqrt(distSq);
                 if (dist < 0.1f) dist = 0.1f;
-                float pushStrength = playerSpeed * 15f * (1.5f - dist) / 1.5f;
-                float invDist = pushStrength / dist;
-                scratchNormal.set(-dx * invDist, -dy * invDist, -dz * invDist);
-                part.applyCentralImpulse(scratchNormal);
+                float push = playerSpeed * PLAYER_PUSH_SPEED
+                        * (PLAYER_PUSH_RADIUS - dist) / PLAYER_PUSH_RADIUS;
+                if (push > PLAYER_PUSH_MAX_SPEED) push = PLAYER_PUSH_MAX_SPEED;
+                // A speed change, not a shove: dividing one shove by a heavy torso did nothing.
+                float nx = -dx / dist, ny = -dy / dist, nz = -dz / dist;
+                part.getLinearVelocity(scratchVel);
+                // Brought up to walking speed rather than added to, so running through a body
+                // pushes it along instead of piling on more every tick.
+                float already = scratchVel.x * nx + scratchVel.y * ny + scratchVel.z * nz;
+                float add = push - already;
+                if (add <= 0f) continue;
+                scratchVel.x += nx * add;
+                scratchVel.y += ny * add * PLAYER_PUSH_VERTICAL;
+                scratchVel.z += nz * add;
+                part.setLinearVelocity(scratchVel);
                 part.activate();
             }
         }
+    }
+
+    // A resting body is parked and feels nothing, so wake the one the player walked into and push it.
+    private boolean nudgeOnPlayerWalk() {
+        if (destroyed || replicated || dragPhysicsActive || ragdollParts.isEmpty()) return false;
+        net.minecraft.client.Minecraft mc = net.minecraft.client.Minecraft.getInstance();
+        if (mc.player == null || mc.player.isSpectator()) return false;
+
+        Vec3 velocity = mc.player.getDeltaMovement();
+        if (velocity.x * velocity.x + velocity.z * velocity.z
+                < PLAYER_PUSH_MIN_SPEED * PLAYER_PUSH_MIN_SPEED) {
+            return false;
+        }
+
+        AABB reach = mc.player.getBoundingBox().inflate(PLAYER_PUSH_REACH);
+        // Real overlap, not the push radius, or every body a player walks past would wake up.
+        boolean touching = false;
+        for (int i = 0; i < ragdollParts.size(); i++) {
+            AABB part = partBounds(i);
+            if (part != null && part.intersects(reach)) { touching = true; break; }
+        }
+        if (!touching) return false;
+
+        wakeForPush();
+        applyPlayerCollisions();
+        return true;
     }
 
     // Damping for everything that injects momentum: inherited death velocity, impulses, later hits.
@@ -3897,6 +3999,7 @@ public class ClientRagdoll {
     public ClientLevel getLevel() { return level; }
     public ResourceLocation getCachedPlayerSkin() { return cachedPlayerSkin; }
     public boolean isCachedSlim() { return cachedIsSlim; }
+    public ResourceLocation getCachedCape() { return cachedCape; }
 
     // Settle reporting: per-client one-shot guard so each observer reports this ragdoll's
     // settle at most once. The server de-duplicates reports from multiple observers.

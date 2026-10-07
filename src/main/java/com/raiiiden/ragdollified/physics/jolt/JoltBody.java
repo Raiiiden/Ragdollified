@@ -279,6 +279,19 @@ final class JoltBody implements PhysicsBody {
         mass = newMass;
     }
 
+    @Override
+    public void setGravityFactor(float factor) {
+        MotionProperties motion = motion();
+        if (motion == null) return;
+        motion.setGravityFactor(factor);
+    }
+
+    @Override
+    public float getGravityFactor() {
+        MotionProperties motion = motion();
+        return motion == null ? 1f : motion.getGravityFactor();
+    }
+
     // Resync the native motion type with the Java flag on every add, since it can't be set out of world.
     void applyMotionTypeOnAdd() {
         if (bornStatic) return;

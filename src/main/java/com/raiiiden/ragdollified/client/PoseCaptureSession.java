@@ -52,8 +52,9 @@ public final class PoseCaptureSession {
 
         Matrix4f relative = new Matrix4f(inverseReference).mul(poseStack.last().pose());
         // Record the cube centre and size, not the pivot, matching where the renderer draws the part.
-        org.joml.Vector3f cubeCentre = ClientRagdollRenderer.cubeBoxCenter(part);
-        org.joml.Vector3f cubeHalf = ClientRagdollRenderer.cubeBoxHalfExtents(part);
+        // Outer shells are left out so a robe cannot stretch the torso body down over the legs.
+        org.joml.Vector3f cubeCentre = ClientRagdollRenderer.cubeCoreCenter(part);
+        org.joml.Vector3f cubeHalf = ClientRagdollRenderer.cubeCoreHalfExtents(part);
         MobPoseCapture.PartTransform transform = MobPoseCapture.PartTransform.fromRelative(relative,
                 cubeCentre.x / 16f, cubeCentre.y / 16f, cubeCentre.z / 16f,
                 cubeHalf.x / 16f, cubeHalf.y / 16f, cubeHalf.z / 16f);

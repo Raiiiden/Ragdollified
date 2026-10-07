@@ -41,8 +41,27 @@ public final class RagdollRenderApi {
                 at(pose, RagdollPart.TORSO), at(pose, RagdollPart.HEAD),
                 at(pose, RagdollPart.LEFT_ARM), at(pose, RagdollPart.RIGHT_ARM),
                 at(pose, RagdollPart.LEFT_LEG), at(pose, RagdollPart.RIGHT_LEG),
-                skin.texture, skin.slim, helmet, chestplate, leggings, boots,
+                skin.texture, skin.slim, skin.cape, helmet, chestplate, leggings, boots,
                 owner, 0f, visualKey, curios);
+    }
+
+    // Draw a bare skeleton at entity-relative part transforms indexed by RagdollPart#index, with the
+    // same armor and curios a player body gets. For a body long dead: there is no skin to resolve and
+    // no wounds to carry, so neither a playerUUID nor a visualKey is taken. playerUUID is still used
+    // to find the live player the armor renderers want, and may legitimately be absent.
+    public static void renderSkeletonBody(PoseStack poseStack, MultiBufferSource buffer, int packedLight,
+                                          RagdollTransform[] pose,
+                                          ItemStack helmet, ItemStack chestplate,
+                                          ItemStack leggings, ItemStack boots,
+                                          @Nullable UUID playerUUID,
+                                          @Nullable List<CuriosCompat.WornCurio> curios) {
+        if (pose == null) return;
+        ClientRagdollRenderer.renderSkeletonBody(poseStack, buffer, packedLight, 0.0,
+                at(pose, RagdollPart.TORSO), at(pose, RagdollPart.HEAD),
+                at(pose, RagdollPart.LEFT_ARM), at(pose, RagdollPart.RIGHT_ARM),
+                at(pose, RagdollPart.LEFT_LEG), at(pose, RagdollPart.RIGHT_LEG),
+                helmet, chestplate, leggings, boots,
+                findPlayer(playerUUID), curios);
     }
 
     // Free a visual key's GPU textures but keep the capture, so it can rebuild later.

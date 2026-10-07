@@ -25,7 +25,8 @@ public class ClientDeathHandler {
         // Check if this entity should have a ragdoll
         boolean isPlayer = entity instanceof Player;
         String mobType = net.minecraft.world.entity.EntityType.getKey(entity.getType()).toString();
-        if (!RagdollifiedConfig.isRagdollEnabledFor(mobType, isPlayer)) return;
+        if (!RagdollifiedConfig.isRagdollEnabledFor(mobType, isPlayer,
+                entity.level().dimension().location().toString())) return;
 
         // Snapshot the compat visuals before the early-out below: a server spawn packet often lands
         // first, and this is the last moment the entity is guaranteed to still carry its wounds.

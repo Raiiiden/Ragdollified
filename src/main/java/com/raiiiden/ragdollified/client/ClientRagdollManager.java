@@ -200,6 +200,10 @@ public class ClientRagdollManager {
     }
     // No entry means local-only simulation, such as on a vanilla server.
     private static final ConcurrentHashMap<Integer, Boolean> streamOwnership = new ConcurrentHashMap<>();
+    // Bodies an integration parks in a pose it owns: out of the solver, held exactly where it put
+    // them. Separate from streamOwnership, which also means "send this body's pose to the server",
+    // and never applied to an id the server is coordinating.
+    private static final ConcurrentHashMap<Integer, Boolean> posedBodies = new ConcurrentHashMap<>();
     private static final ConcurrentLinkedQueue<StreamedPoseUpdate> streamPoseQueue = new ConcurrentLinkedQueue<>();
     // A spawn packet and its first owner pose can land in the same tick, and inputs drain before
     // construction, so keep the newest early pose rather than dropping the exact initial state.
@@ -475,6 +479,7 @@ public class ClientRagdollManager {
         persistentRagdollIds.remove(entityId);
         pendingPersistenceUpdates.remove(entityId);
         authoritativeStates.remove(entityId);
+        posedBodies.remove(entityId);
         streamOwnership.remove(entityId);
         pendingStreamPoses.remove(entityId);
         streamSendSequences.remove(entityId);
@@ -611,6 +616,12 @@ public class ClientRagdollManager {
 
     // Queue a clean ragdoll using an optional immutable authoritative transform.
     public static boolean spawnFromEntity(LivingEntity entity, boolean persistent, RagdollSpawnTransform spawnTransform) {
+        return spawnFromEntity(entity, persistent, spawnTransform, 0);
+    }
+
+    // As above, built without the parts named by severedMask (RagdollPart bits).
+    public static boolean spawnFromEntity(LivingEntity entity, boolean persistent, RagdollSpawnTransform spawnTransform,
+                                          int severedMask) {
         if (entity == null || hasPendingOrActiveRagdoll(entity.getId())) return false;
         Minecraft mc = Minecraft.getInstance();
         if (mc.level == null || entity.level() != mc.level) return false;
@@ -671,6 +682,10 @@ public class ClientRagdollManager {
                 spawnTransform != null ? spawnTransform.swimming() : entity.getPose() == Pose.SWIMMING,
                 entity.isBaby(), texture,
                 -1, null, wasSheared, dyeColorId, chargedCreeper, saddledPig);
+        // Only the humanoid rigs can lose parts; see RagdollifiedServerApi.supportsAmputation.
+        if (isPlayer || MobModelHelper.isHumanoidModelType(modelType)) {
+            data.severedMask = severedMask & RagdollPart.ALL_SEVERABLE_MASK;
+        }
         if (persistent) persistentRagdollIds.add(entity.getId());
         boolean queued = enqueueSpawn(data, true);
         if (!queued) persistentRagdollIds.remove(entity.getId());
@@ -783,6 +798,17 @@ public class ClientRagdollManager {
             streamSendSequences.remove(entityId);
             lastStreamSampleTicks.remove(entityId);
         }
+    }
+
+    // Park a body as a pose of the caller's own, or hand it back to the solver. Main thread; the
+    // switch itself belongs to the physics worker. Re-applied every tick, as ownership is, since it
+    // can be set before the body has been built.
+    public static void enqueuePosed(int entityId, boolean posed) {
+        posedBodies.put(entityId, posed);
+    }
+
+    public static boolean isPosed(int entityId) {
+        return Boolean.TRUE.equals(posedBodies.get(entityId));
     }
 
     // Server→client relayed pose frame from the owning client. Main thread.
@@ -909,6 +935,24 @@ public class ClientRagdollManager {
                 r.setReplicated(!entry.getValue());
             }
         }
+        // Parked bodies on the same terms, minus any id the server is coordinating: that one has an
+        // owner elected for it, and the two would take turns undoing each other.
+        for (Map.Entry<Integer, Boolean> entry : posedBodies.entrySet()) {
+            if (streamOwnership.containsKey(entry.getKey())) continue;
+            ClientRagdoll r = ragdolls.get(entry.getKey());
+            if (r == null || r.isDestroyed()) continue;
+            boolean posed = entry.getValue();
+            boolean wasPosed = r.isReplicated();
+            r.setReplicated(posed);
+            // A body only just parked draws nothing until it is given the pose it is to hold, so its
+            // retained pose is applied here rather than left to the loop further down.
+            if (posed && !wasPosed) {
+                AuthoritativeState state = authoritativeStates.remove(entry.getKey());
+                if (state != null) {
+                    r.applyAuthoritativeState(state.transforms, state.ageTicks, state.settled);
+                }
+            }
+        }
         StreamedPoseUpdate streamed;
         while ((streamed = streamPoseQueue.poll()) != null) {
             ClientRagdoll r = ragdolls.get(streamed.entityId());
@@ -942,6 +986,9 @@ public class ClientRagdollManager {
             }
         }
         for (Map.Entry<Integer, DragRequest> entry : dragTargets.entrySet()) {
+            // A parked body is held by whoever parked it rather than by the solver, so it is unparked
+            // first and dragged a tick later, instead of being half-woken into both at once.
+            if (isPosed(entry.getKey())) continue;
             ClientRagdoll r = ragdolls.get(entry.getKey());
             DragRequest drag = entry.getValue();
             if (r == null && pendingSpawns.containsKey(entry.getKey())) continue;
@@ -1141,6 +1188,7 @@ public class ClientRagdollManager {
                 // Bodies that expire on their own never pass through requestRemoveRagdoll, so their
                 // stream bookkeeping is released here or it accumulates for the session.
                 streamOwnership.remove(entry.getKey());
+                posedBodies.remove(entry.getKey());
                 streamSendSequences.remove(entry.getKey());
                 lastStreamSampleTicks.remove(entry.getKey());
             }
@@ -1421,7 +1469,8 @@ public class ClientRagdollManager {
 
         boolean isPlayer = entity instanceof Player;
         String mobType = EntityType.getKey(entity.getType()).toString();
-        if (!RagdollifiedConfig.isRagdollEnabledFor(mobType, isPlayer)) {
+        if (!RagdollifiedConfig.isRagdollEnabledFor(mobType, isPlayer,
+                level.dimension().location().toString())) {
             return null;
         }
         MobModelHelper.ModelType modelType = isPlayer
@@ -1558,6 +1607,12 @@ public class ClientRagdollManager {
                     && !Boolean.TRUE.equals(streamOwnership.get(data.originalEntityId))) {
                 ragdoll.setReplicated(true);
             }
+            // Same reasoning for a body parked before it was built: the retained pose below is what
+            // it is meant to hold, and a tick of falling first is exactly what parking avoids.
+            if (Boolean.TRUE.equals(posedBodies.get(data.originalEntityId))
+                    && !streamOwnership.containsKey(data.originalEntityId)) {
+                ragdoll.setReplicated(true);
+            }
             AuthoritativeState retainedState = authoritativeStates.remove(data.originalEntityId);
             if (retainedState != null) {
                 ragdoll.applyAuthoritativeState(
@@ -1639,7 +1694,9 @@ public class ClientRagdollManager {
     }
 
     private static boolean isSupportedSpawn(ClientRagdoll.SpawnData data, boolean force) {
-        if (!force && !RagdollifiedConfig.isRagdollEnabledFor(data.mobType, data.isPlayer)) return false;
+        ClientLevel level = Minecraft.getInstance().level;
+        String dimensionId = level != null ? level.dimension().location().toString() : null;
+        if (!force && !RagdollifiedConfig.isRagdollEnabledFor(data.mobType, data.isPlayer, dimensionId)) return false;
         if (data.isPlayer) return true;
         if (MobModelHelper.isSupportedModelType(data.modelType)) return true;
         Ragdollified.LOGGER.debug(
@@ -1675,7 +1732,8 @@ public class ClientRagdollManager {
     }
 
     private static void enforceMaxRagdolls() {
-        int max = RagdollifiedConfig.getMaxRagdolls();
+        ClientLevel level = Minecraft.getInstance().level;
+        int max = RagdollifiedConfig.getMaxRagdolls(level != null ? level.dimension().location().toString() : null);
         while (ragdolls.size() >= max) {
             // Find the oldest ragdoll by ticksExisted (no insertion order in ConcurrentHashMap).
             ClientRagdoll oldest = null;
@@ -1741,6 +1799,7 @@ public class ClientRagdollManager {
         authoritativeStates.clear();
         dragTargets.clear();
         streamOwnership.clear();
+        posedBodies.clear();
         streamPoseQueue.clear();
         pendingStreamPoses.clear();
         streamSendSequences.clear();

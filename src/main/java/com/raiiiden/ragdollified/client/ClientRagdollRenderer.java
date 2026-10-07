@@ -20,12 +20,17 @@ import net.minecraft.client.model.geom.builders.LayerDefinition;
 import net.minecraft.client.player.AbstractClientPlayer;
 import net.minecraft.client.renderer.MultiBufferSource;
 import net.minecraft.client.renderer.RenderType;
+import net.minecraft.client.renderer.Sheets;
 import net.minecraft.client.renderer.texture.OverlayTexture;
+import net.minecraft.client.renderer.texture.TextureAtlasSprite;
+import com.mojang.math.Axis;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.item.ArmorItem;
+import net.minecraft.world.item.ElytraItem;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.armortrim.ArmorTrim;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.phys.Vec3;
 import net.minecraftforge.api.distmarker.Dist;
@@ -171,6 +176,10 @@ public class ClientRagdollRenderer {
             new ResourceLocation("minecraft", "textures/entity/sheep/sheep_fur.png");
     private static final ResourceLocation DROWNED_OUTER_TEXTURE =
             new ResourceLocation("minecraft", "textures/entity/zombie/drowned_outer_layer.png");
+    // The bare skeleton an addon's long-dead body is drawn with (RagdollRenderApi#renderSkeletonBody).
+    private static final ResourceLocation SKELETON_BODY_TEXTURE =
+            new ResourceLocation("minecraft", "textures/entity/skeleton/skeleton.png");
+
     private static final ResourceLocation STRAY_OUTER_TEXTURE =
             new ResourceLocation("minecraft", "textures/entity/skeleton/stray_overlay.png");
     private static final ResourceLocation CREEPER_POWERED_TEXTURE =
@@ -607,9 +616,15 @@ public class ClientRagdollRenderer {
             limb.setTexture(texture);
         }
         VertexConsumer vc = buffer.getBuffer(RenderType.entityCutoutNoCull(texture));
-        drawLimbPart(poseStack, vc, limbPart(model, part), transform, light, part, scale);
-        if (part == RagdollPart.HEAD) {
-            drawLimbPart(poseStack, vc, model.hat, transform, light, part, scale);
+        // A loose limb poses the same shared model a living mob draws with, so it is saved too.
+        BorrowedModel borrowed = borrowModel(limb.getMobType());
+        try {
+            drawLimbPart(poseStack, vc, limbPart(model, part), transform, light, part, scale);
+            if (part == RagdollPart.HEAD) {
+                drawLimbPart(poseStack, vc, model.hat, transform, light, part, scale);
+            }
+        } finally {
+            returnModel(borrowed);
         }
     }
 
@@ -704,22 +719,22 @@ public class ClientRagdollRenderer {
 
         // Looking out of this head means sitting inside it, so skull, hat and helmet would draw
         // inside-out. Dropping the transform skips them, and only on this client.
-        if (ClientRagdollCamera.isHeadHidden(ragdoll.getId())) head = null;
+        if (ClientRagdollCamera.isHeadHidden(ragdoll.getId(), head)) head = null;
 
         renderPlayerBody(poseStack, buffer, light, distSq, torso, head, larm, rarm, lleg, rleg,
-                skin, isSlim,
+                skin, isSlim, ragdoll.getCachedCape(),
                 ragdoll.getHelmet(), ragdoll.getChestplate(), ragdoll.getLeggings(), ragdoll.getBoots(),
                 playerEntity, liquidBobOffset(ragdoll), ragdoll.getOriginalEntityId(),
                 CuriosRenderCompat.wornFor(ragdoll.getOriginalEntityId()));
     }
 
     // Draw a humanoid body and armor at the given part transforms (live ragdolls and RagdollRenderApi).
-    // damageKey identifies the body to damage-visual compats; null draws a clean body.
+    // damageKey identifies the body to damage-visual compats; null draws a clean body. cape may be null.
     public static void renderPlayerBody(PoseStack poseStack, MultiBufferSource buffer, int light, double distSq,
                                         RagdollTransform torso, RagdollTransform head,
                                         RagdollTransform larm, RagdollTransform rarm,
                                         RagdollTransform lleg, RagdollTransform rleg,
-                                        ResourceLocation skin, boolean isSlim,
+                                        ResourceLocation skin, boolean isSlim, ResourceLocation cape,
                                         ItemStack helmet, ItemStack chestplate, ItemStack leggings, ItemStack boots,
                                         AbstractClientPlayer playerEntity, float bob, Object damageKey,
                                         java.util.List<CuriosCompat.WornCurio> curios) {
@@ -763,11 +778,22 @@ public class ClientRagdollRenderer {
 
             double armorDistSq = RagdollifiedConfig.getArmorRenderDistanceSq();
             double geckoDistSq = RagdollifiedConfig.getGeckoLibArmorRenderDistanceSq();
+            boolean drawArmor = RagdollifiedConfig.RENDER_ARMOR.get();
+
+            // An elytra takes the cape's place, as on a live player.
+            if (cape != null && RagdollifiedConfig.RENDER_CAPES.get()
+                    && !(chestplate != null && chestplate.getItem() instanceof ElytraItem)) {
+                boolean overArmor = drawArmor && distSq <= armorDistSq
+                        && chestplate != null && chestplate.getItem() instanceof ArmorItem;
+                renderCape(poseStack, buffer, light, torso, model, cape, overArmor);
+            }
 
             if (distSq <= armorDistSq) {
-                renderPlayerVanillaArmor(poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg, isSlim, playerEntity, helmet, chestplate, leggings, boots);
+                if (drawArmor) {
+                    renderPlayerVanillaArmor(poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg, isSlim, playerEntity, helmet, chestplate, leggings, boots);
+                }
 
-                if (distSq <= geckoDistSq) {
+                if (drawArmor && RagdollifiedConfig.RENDER_GECKOLIB_ARMOR.get() && distSq <= geckoDistSq) {
                     // Pass playerEntity which may be null; GeckoLibArmorHelper uses its
                     // internal proxy ArmorStand as fallback, identical to the mob armor path.
                     renderPlayerGeckoLibArmor(poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg, isSlim, playerEntity, helmet, chestplate, leggings, boots);
@@ -780,6 +806,91 @@ public class ClientRagdollRenderer {
             }
         } catch (Exception e) {
             Ragdollified.LOGGER.error("Error rendering player body", e);
+        } finally {
+            poseStack.popPose();
+        }
+    }
+
+    // Capes
+
+    // Vanilla's cape hangs at least this far off the back, so it clears the body when standing.
+    private static final float CAPE_REST_ANGLE = (float) Math.toRadians(6.0);
+    // Furthest a cape swings out from the back, short of folding up over the shoulders.
+    private static final float CAPE_MAX_ANGLE = (float) Math.toRadians(80.0);
+
+    // Hang the cape from the top of the back exactly as vanilla's cape layer does, but let it drape by
+    // gravity since a body has no walk cycle to swing it. overArmor sets it out past a chestplate.
+    private static void renderCape(PoseStack poseStack, MultiBufferSource buffer, int light, RagdollTransform torso,
+                                   PlayerModel<AbstractClientPlayer> model, ResourceLocation cape, boolean overArmor) {
+        poseStack.pushPose();
+        try {
+            Quaternionf modelRotation = new Quaternionf(torso.rotation.x, torso.rotation.y,
+                    torso.rotation.z, torso.rotation.w).rotateZ((float) Math.PI);
+            poseStack.mulPose(modelRotation);
+            // The torso pivot is the model root the cape hangs from; vanilla sets it 2px behind the back.
+            poseStack.translate(0f, PART_PIVOTS[RagdollPart.TORSO.index].y / 16f, 0.125f);
+            if (overArmor) poseStack.translate(0f, -0.053125f, 0.06875f);
+            poseStack.mulPose(Axis.XP.rotation(capeDrape(modelRotation)));
+            poseStack.mulPose(Axis.YP.rotationDegrees(180f));
+            model.renderCloak(poseStack, buffer.getBuffer(RenderType.entitySolid(cape)), light, OverlayTexture.NO_OVERLAY);
+        } finally {
+            poseStack.popPose();
+        }
+    }
+
+    // How far the cape swings back off the body: towards world-down, but only out from the back, and
+    // fading to flat as the body lies down, since a body lying on its cape pins it to the ground.
+    private static float capeDrape(Quaternionf modelRotation) {
+        // World down in the model frame, where +y runs down the body and +z out of its back.
+        org.joml.Vector3f down = new Quaternionf(modelRotation).conjugate().transform(new org.joml.Vector3f(0f, -1f, 0f));
+        float swing = Math.max(0f, Math.min(CAPE_MAX_ANGLE, (float) Math.atan2(down.z, down.y)));
+        float upright = Math.max(0f, Math.min(1f, down.y * 2f));
+        return (CAPE_REST_ANGLE + swing) * upright;
+    }
+
+    // Draw a skeletal body at the given part transforms, for an addon whose body has rotted down to
+    // bone. The bones are the same pass a skeleton *mob* ragdoll uses, and the armor and curios are
+    // the same passes renderPlayerBody lays over a fleshed one: armor is drawn on the humanoid armor
+    // models either way, exactly as vanilla equips a skeleton.
+    public static void renderSkeletonBody(PoseStack poseStack, MultiBufferSource buffer, int light, double distSq,
+                                          RagdollTransform torso, RagdollTransform head,
+                                          RagdollTransform larm, RagdollTransform rarm,
+                                          RagdollTransform lleg, RagdollTransform rleg,
+                                          ItemStack helmet, ItemStack chestplate, ItemStack leggings, ItemStack boots,
+                                          AbstractClientPlayer playerEntity,
+                                          java.util.List<CuriosCompat.WornCurio> curios) {
+        if (torso == null) return;
+        // As in renderPlayerBody: an addon can reach this before any live ragdoll has baked the models.
+        initModels();
+        if (skeletonModel == null) return;
+
+        poseStack.pushPose();
+        try {
+            poseStack.translate(torso.position.x, torso.position.y, torso.position.z);
+            VertexConsumer vc = buffer.getBuffer(RenderType.entityTranslucent(SKELETON_BODY_TEXTURE));
+            renderHumanoidMob(poseStack, vc, light, torso, head, larm, rarm, lleg, rleg, skeletonModel);
+
+            double armorDistSq = RagdollifiedConfig.getArmorRenderDistanceSq();
+            double geckoDistSq = RagdollifiedConfig.getGeckoLibArmorRenderDistanceSq();
+            boolean drawArmor = RagdollifiedConfig.RENDER_ARMOR.get();
+
+            if (distSq <= armorDistSq) {
+                // Never slim: the armor layers are the wide ones whatever the skin underneath was.
+                if (drawArmor) {
+                    renderPlayerVanillaArmor(poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg, false, playerEntity, helmet, chestplate, leggings, boots);
+                }
+
+                if (drawArmor && RagdollifiedConfig.RENDER_GECKOLIB_ARMOR.get() && distSq <= geckoDistSq) {
+                    renderPlayerGeckoLibArmor(poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg, false, playerEntity, helmet, chestplate, leggings, boots);
+                }
+
+                // Curio renderers cast to a PlayerModel and align to it, so the body model handed over
+                // stays the player one; only the bones under it changed.
+                renderBodyCurios(curios, poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg,
+                        playerEntity, SKELETON_BODY_TEXTURE, normalModel);
+            }
+        } catch (Exception e) {
+            Ragdollified.LOGGER.error("Error rendering skeleton body", e);
         } finally {
             poseStack.popPose();
         }
@@ -811,6 +922,7 @@ public class ClientRagdollRenderer {
         // No availability gate here: the two draw paths below check their own mods, and the
         // GeckoLib one still works when the ICurioRenderer registry failed to resolve.
         if (curios == null || curios.isEmpty() || torso == null) return;
+        if (!RagdollifiedConfig.RENDER_CURIOS.get()) return;
 
         // Curios needs a LivingEntity for slot context and the follow helpers, and the real player is
         // gone after respawn, so fall back to the proxy ArmorStand the armor paths use.
@@ -1048,13 +1160,21 @@ public class ClientRagdollRenderer {
         // and handed the draw, as vanilla's armor layer does. Our per-part pass would draw only the empty
         // vanilla boxes underneath it.
         if (model != base && drawsItself(model)) {
-            renderSelfDrawingArmor(model, slot, baseFound ? baseTex : null, poseStack, buffer, light,
+            renderSelfDrawingArmor(model, slot, armorConsumer(buffer, baseFound ? baseTex : null), poseStack, light,
                     torso, head, larm, rarm, lleg, rleg, r, g, b);
             if (dyeable) {
                 ResourceLocation overlayTex = ArmorTextureResolver.resolve(armorItem, slot, stack, wearer, "overlay");
                 renderSelfDrawingArmor(model, slot,
-                        overlayTex != null && ArmorTextureResolver.exists(overlayTex) ? overlayTex : null,
-                        poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg, 1f, 1f, 1f);
+                        armorConsumer(buffer, overlayTex != null && ArmorTextureResolver.exists(overlayTex) ? overlayTex : null),
+                        poseStack, light, torso, head, larm, rarm, lleg, rleg, 1f, 1f, 1f);
+            }
+            VertexConsumer trim = trimConsumer(stack, armorItem, slot, buffer);
+            if (trim != null) {
+                renderSelfDrawingArmor(model, slot, trim, poseStack, light, torso, head, larm, rarm, lleg, rleg, 1f, 1f, 1f);
+            }
+            if (stack.hasFoil()) {
+                renderSelfDrawingArmor(model, slot, buffer.getBuffer(RenderType.armorEntityGlint()), poseStack, light,
+                        torso, head, larm, rarm, lleg, rleg, 1f, 1f, 1f);
             }
             return;
         }
@@ -1068,24 +1188,58 @@ public class ClientRagdollRenderer {
             dyeable = false;
             r = g = b = 1f;
         }
-        renderArmorSlotParts(model, baseTex, slot, poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg, r, g, b, modelScale);
+        renderArmorSlotParts(model, armorConsumer(buffer, baseTex), slot, poseStack, light, torso, head, larm, rarm, lleg, rleg, r, g, b, modelScale);
 
         if (dyeable) {
             ResourceLocation overlayTex = ArmorTextureResolver.resolve(armorItem, slot, stack, wearer, "overlay");
             if (overlayTex != null && ArmorTextureResolver.exists(overlayTex)) {
-                renderArmorSlotParts(model, overlayTex, slot, poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg, 1f, 1f, 1f, modelScale);
+                renderArmorSlotParts(model, armorConsumer(buffer, overlayTex), slot, poseStack, light, torso, head, larm, rarm, lleg, rleg, 1f, 1f, 1f, modelScale);
             }
+        }
+
+        VertexConsumer trim = trimConsumer(stack, armorItem, slot, buffer);
+        if (trim != null) {
+            renderArmorSlotParts(model, trim, slot, poseStack, light, torso, head, larm, rarm, lleg, rleg, 1f, 1f, 1f, modelScale);
+        }
+
+        // Enchanted armor shimmers: vanilla's armor layer draws the same parts once more in the glint type.
+        if (stack.hasFoil()) {
+            renderArmorSlotParts(model, buffer.getBuffer(RenderType.armorEntityGlint()), slot, poseStack, light,
+                    torso, head, larm, rarm, lleg, rleg, 1f, 1f, 1f, modelScale);
+        }
+    }
+
+    // A null texture is a missing one, and draws nothing rather than purple.
+    private static VertexConsumer armorConsumer(MultiBufferSource buffer, ResourceLocation texture) {
+        return texture != null ? buffer.getBuffer(RenderType.armorCutoutNoCull(texture)) : DISCARD;
+    }
+
+    // The trim's sprite on the armor-trims atlas, or null when the piece has no trim. Drawn the way
+    // vanilla's armor layer draws it: one more pass over the same parts, legs taking the inner texture.
+    private static VertexConsumer trimConsumer(ItemStack stack, ArmorItem armor, EquipmentSlot slot,
+                                               MultiBufferSource buffer) {
+        Minecraft mc = Minecraft.getInstance();
+        if (mc.level == null) return null;
+        try {
+            ArmorTrim trim = ArmorTrim.getTrim(mc.level.registryAccess(), stack).orElse(null);
+            if (trim == null) return null;
+            ResourceLocation id = slot == EquipmentSlot.LEGS
+                    ? trim.innerTexture(armor.getMaterial()) : trim.outerTexture(armor.getMaterial());
+            TextureAtlasSprite sprite = mc.getModelManager().getAtlas(Sheets.ARMOR_TRIMS_SHEET).getSprite(id);
+            return sprite.wrap(buffer.getBuffer(Sheets.armorTrimsSheet()));
+        } catch (Exception e) {
+            Ragdollified.LOGGER.debug("Armor trim lookup failed for {}: {}", stack, e.getMessage());
+            return null;
         }
     }
 
     // Render the body parts relevant to one armor slot from model, tinted r,g,b.
-    private static void renderArmorSlotParts(HumanoidModel<?> model, ResourceLocation texture, EquipmentSlot slot,
-                                             PoseStack poseStack, MultiBufferSource buffer, int light,
+    private static void renderArmorSlotParts(HumanoidModel<?> model, VertexConsumer vc, EquipmentSlot slot,
+                                             PoseStack poseStack, int light,
                                              RagdollTransform torso, RagdollTransform head,
                                              RagdollTransform larm, RagdollTransform rarm,
                                              RagdollTransform lleg, RagdollTransform rleg,
                                              float r, float g, float b, HumanoidScale modelScale) {
-        VertexConsumer vc = buffer.getBuffer(RenderType.armorCutoutNoCull(texture));
         switch (slot) {
             case HEAD:
                 renderHumanoidPartPhysicsTinted(poseStack, vc, model.head, head, torso, light, RagdollPart.HEAD, r, g, b, 1f, modelScale);
@@ -1154,16 +1308,15 @@ public class ClientRagdollRenderer {
     }
 
     // Pose a self-drawing armor model to the physics pose and let it render, from the same model root the
-    // curio pass uses. texture null means it is missing: whatever the model sends through our buffer is
-    // dropped rather than drawn purple, and anything it draws on its own still shows. Baby scale is not
+    // curio pass uses. A DISCARD consumer stands for a missing texture: whatever the model sends through it
+    // is dropped rather than drawn purple, and anything it draws on its own still shows. Baby scale is not
     // applied here, since the model positions itself.
-    private static void renderSelfDrawingArmor(HumanoidModel<?> model, EquipmentSlot slot, ResourceLocation texture,
-                                               PoseStack poseStack, MultiBufferSource buffer, int light,
+    private static void renderSelfDrawingArmor(HumanoidModel<?> model, EquipmentSlot slot, VertexConsumer vc,
+                                               PoseStack poseStack, int light,
                                                RagdollTransform torso, RagdollTransform head,
                                                RagdollTransform larm, RagdollTransform rarm,
                                                RagdollTransform lleg, RagdollTransform rleg,
                                                float r, float g, float b) {
-        VertexConsumer vc = texture != null ? buffer.getBuffer(RenderType.armorCutoutNoCull(texture)) : DISCARD;
         poseStack.pushPose();
         try {
             tempQuat.set(torso.rotation.x, torso.rotation.y, torso.rotation.z, torso.rotation.w);
@@ -1382,6 +1535,9 @@ public class ClientRagdollRenderer {
 
         if (torso == null) return;
 
+        // Taken before the first pass writes to it, since the mob it was borrowed from is still alive.
+        BorrowedModel borrowed = borrowModel(ragdoll.getMobType());
+
         poseStack.pushPose();
         try {
             float bob = liquidBobOffset(ragdoll);
@@ -1580,10 +1736,10 @@ public class ClientRagdollRenderer {
                 double armorDistSq = RagdollifiedConfig.getArmorRenderDistanceSq();
                 double geckoDistSq = RagdollifiedConfig.getGeckoLibArmorRenderDistanceSq();
 
-                if (distSq <= armorDistSq) {
+                if (distSq <= armorDistSq && RagdollifiedConfig.RENDER_ARMOR.get()) {
                     renderMobVanillaArmor(ragdoll, poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg, humanoidScale);
 
-                    if (distSq <= geckoDistSq) {
+                    if (distSq <= geckoDistSq && RagdollifiedConfig.RENDER_GECKOLIB_ARMOR.get()) {
                         renderMobGeckoLibArmor(ragdoll, poseStack, buffer, light, torso, head, larm, rarm, lleg, rleg, humanoidScale);
                     }
                 }
@@ -1591,6 +1747,7 @@ public class ClientRagdollRenderer {
         } catch (Exception e) {
             Ragdollified.LOGGER.error("Error rendering mob ragdoll", e);
         } finally {
+            returnModel(borrowed);
             poseStack.popPose();
         }
     }
@@ -1674,6 +1831,62 @@ public class ClientRagdollRenderer {
             };
             renderHumanoidPartPhysics(poseStack, vc, overlay.part(), transform, torso, light, overlay.anchor(), scale);
         }
+    }
+
+    // Borrowed models
+
+    // A compat adapter caches the model instance a living mob's own renderer draws with (see
+    // ClientMobModelCache), so every pivot, rotation and visibility flag a ragdoll pass writes lands
+    // on the model those mobs are still being drawn from. HumanoidModel#setupAnim rewrites the
+    // rotations and the legs' y and z each frame, but never their x, so one Guard Villagers ragdoll
+    // used to leave every living guard with both legs merged on the midline. The state is saved
+    // before the passes run and put back after, so a ragdoll can never change a living mob.
+    private record BorrowedModel(HumanoidModel<?> model, ModelPart[] parts, float[] values,
+                                 boolean[] visible, boolean young, boolean riding, boolean crouching) {}
+
+    // Snapshot of the cached model for this mob type, or null when it is drawn on an isolated tree.
+    private static BorrowedModel borrowModel(String mobType) {
+        HumanoidModel<?> model = ClientMobModelCache.getModel(mobType);
+        if (model == null) return null;
+
+        Set<ModelPart> seen = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+        List<ModelPart> parts = new java.util.ArrayList<>();
+        for (ModelPart posed : borrowedParts(model)) {
+            if (posed == null) continue;
+            posed.getAllParts().forEach(p -> { if (seen.add(p)) parts.add(p); });
+        }
+        // The sibling overlay parts the modded-overlay pass poses are not descendants of the six.
+        for (OverlayPart overlay : OVERLAY_CACHE.computeIfAbsent(model, ClientRagdollRenderer::resolveOverlayParts)) {
+            overlay.part().getAllParts().forEach(p -> { if (seen.add(p)) parts.add(p); });
+        }
+
+        float[] values = new float[parts.size() * 6];
+        boolean[] visible = new boolean[parts.size()];
+        for (int i = 0; i < parts.size(); i++) {
+            ModelPart part = parts.get(i);
+            int o = i * 6;
+            values[o] = part.x;        values[o + 1] = part.y;      values[o + 2] = part.z;
+            values[o + 3] = part.xRot; values[o + 4] = part.yRot;   values[o + 5] = part.zRot;
+            visible[i] = part.visible;
+        }
+        return new BorrowedModel(model, parts.toArray(new ModelPart[0]), values, visible,
+                model.young, model.riding, model.crouching);
+    }
+
+    private static void returnModel(BorrowedModel borrowed) {
+        if (borrowed == null) return;
+        ModelPart[] parts = borrowed.parts();
+        for (int i = 0; i < parts.length; i++) {
+            int o = i * 6;
+            parts[i].setPos(borrowed.values()[o], borrowed.values()[o + 1], borrowed.values()[o + 2]);
+            parts[i].xRot = borrowed.values()[o + 3];
+            parts[i].yRot = borrowed.values()[o + 4];
+            parts[i].zRot = borrowed.values()[o + 5];
+            parts[i].visible = borrowed.visible()[i];
+        }
+        borrowed.model().young = borrowed.young();
+        borrowed.model().riding = borrowed.riding();
+        borrowed.model().crouching = borrowed.crouching();
     }
 
     private static List<OverlayPart> resolveOverlayParts(HumanoidModel<?> model) {
@@ -1893,7 +2106,7 @@ public class ClientRagdollRenderer {
             }
 
             switch (ragdollPart) {
-                case HEAD:      part.setPos(0, 4, 0);    break;
+                case HEAD:      setHeadPos(part);        break;
                 case TORSO:     part.setPos(0, -6, 0);   break;
                 case LEFT_ARM:  part.setPos(-1, -4, 0);  break;
                 case RIGHT_ARM: part.setPos(1, -4, 0);   break;
@@ -3049,7 +3262,7 @@ public class ClientRagdollRenderer {
             }
 
             switch (ragdollPart) {
-                case HEAD:      part.setPos(0, 4, 0);    break;
+                case HEAD:      setHeadPos(part);        break;
                 case TORSO:     part.setPos(0, -6, 0);   break;
                 case LEFT_ARM:  part.setPos(-1, -4, 0);  break;
                 case RIGHT_ARM: part.setPos(1, -4, 0);   break;
@@ -3094,7 +3307,7 @@ public class ClientRagdollRenderer {
             }
 
             switch (ragdollPart) {
-                case HEAD:      part.setPos(0, 4, 0);    break;
+                case HEAD:      setHeadPos(part);        break;
                 case TORSO:     part.setPos(0, -6, 0);   break;
                 case LEFT_ARM:  part.setPos(-1, -4, 0);  break;
                 case RIGHT_ARM: part.setPos(1, -4, 0);   break;
@@ -3658,10 +3871,87 @@ public class ClientRagdollRenderer {
         return center;
     }
 
+    // The same measure without outer layers: a cube that wraps another cube on the same part is a
+    // clothing shell (the illager and zombie-villager robe hangs 8 pixels past the body), so a
+    // physics body sized to it would push the hips onto the shins. Used by the pose capture only.
+    public static org.joml.Vector3f cubeCoreCenter(ModelPart part) {
+        float[] b = cubeCoreBounds(part);
+        return b[0] > b[3] ? new org.joml.Vector3f()
+                : new org.joml.Vector3f((b[0] + b[3]) * 0.5f, (b[1] + b[4]) * 0.5f, (b[2] + b[5]) * 0.5f);
+    }
+
+    public static org.joml.Vector3f cubeCoreHalfExtents(ModelPart part) {
+        float[] b = cubeCoreBounds(part);
+        return b[0] > b[3] ? new org.joml.Vector3f()
+                : new org.joml.Vector3f((b[3] - b[0]) * 0.5f, (b[4] - b[1]) * 0.5f, (b[5] - b[2]) * 0.5f);
+    }
+
+    // Centres the head's cubes on its physics body, where the pose capture measured it. A player head
+    // gives the old (0, 4, 0); the 10-pixel illager and zombie-villager heads need (0, 5, 0).
+    private static void setHeadPos(ModelPart head) {
+        org.joml.Vector3f c = cubeCoreCenter(head);
+        head.setPos(-c.x, -c.y, -c.z);
+    }
+
+    private static final java.util.Map<ModelPart, float[]> CUBE_CORE_CACHE = new java.util.WeakHashMap<>();
+
+    private static float[] cubeCoreBounds(ModelPart part) {
+        float[] cached = CUBE_CORE_CACHE.get(part);
+        if (cached != null) return cached;
+        float[] bounds = {Float.POSITIVE_INFINITY, Float.POSITIVE_INFINITY, Float.POSITIVE_INFINITY,
+                Float.NEGATIVE_INFINITY, Float.NEGATIVE_INFINITY, Float.NEGATIVE_INFINITY};
+        accumulateCubeBounds(part, 0f, 0f, 0f, bounds, 0, true);
+        CUBE_CORE_CACHE.put(part, bounds);
+        return bounds;
+    }
+
+    // Whether outer encloses inner on every axis without being the same box.
+    private static boolean enclosesCube(ModelPart.Cube outer, ModelPart.Cube inner) {
+        if (outer == inner) return false;
+        boolean contains = outer.minX <= inner.minX && outer.minY <= inner.minY && outer.minZ <= inner.minZ
+                && outer.maxX >= inner.maxX && outer.maxY >= inner.maxY && outer.maxZ >= inner.maxZ;
+        boolean same = outer.minX == inner.minX && outer.minY == inner.minY && outer.minZ == inner.minZ
+                && outer.maxX == inner.maxX && outer.maxY == inner.maxY && outer.maxZ == inner.maxZ;
+        return contains && !same;
+    }
+
+    // The biggest cube a part is really built from, shells ignored: the yardstick the detail test uses.
+    private static ModelPart.Cube dominantCube(java.util.List<ModelPart.Cube> cubes) {
+        ModelPart.Cube best = null;
+        float bestVolume = -1f;
+        for (ModelPart.Cube c : cubes) {
+            if (cubes.stream().anyMatch(inner -> enclosesCube(c, inner))) continue;
+            float volume = cubeVolume(c);
+            if (volume > bestVolume) {
+                bestVolume = volume;
+                best = c;
+            }
+        }
+        return best;
+    }
+
+    // A small cube poking out of the main one is a facial feature, not body: the zombie-villager nose
+    // hangs a pixel below the skull, which sized the head too tall and lifted it off the neck.
+    private static boolean isProtrudingDetail(ModelPart.Cube cube, ModelPart.Cube dominant) {
+        if (cube == dominant) return false;
+        boolean inside = cube.minX >= dominant.minX && cube.minY >= dominant.minY && cube.minZ >= dominant.minZ
+                && cube.maxX <= dominant.maxX && cube.maxY <= dominant.maxY && cube.maxZ <= dominant.maxZ;
+        return !inside && cubeVolume(cube) * 4f < cubeVolume(dominant);
+    }
+
+    private static float cubeVolume(ModelPart.Cube cube) {
+        return (cube.maxX - cube.minX) * (cube.maxY - cube.minY) * (cube.maxZ - cube.minZ);
+    }
+
+    private static void accumulateCubeBounds(ModelPart part, float ox, float oy, float oz,
+                                             float[] bounds, int depth) {
+        accumulateCubeBounds(part, ox, oy, oz, bounds, depth, false);
+    }
+
     // A part's own cubes when it has any, children excluded so a limb's centre cannot drift. When it has
     // none, CEM packs hang everything on submodels, so those descendants are measured instead.
     private static void accumulateCubeBounds(ModelPart part, float ox, float oy, float oz,
-                                             float[] bounds, int depth) {
+                                             float[] bounds, int depth, boolean skipShells) {
         java.util.List<ModelPart.Cube> cubes;
         try {
             cubes = net.minecraftforge.fml.util.ObfuscationReflectionHelper.getPrivateValue(
@@ -3675,7 +3965,10 @@ public class ClientRagdollRenderer {
         }
 
         if (cubes != null && !cubes.isEmpty()) {
+            ModelPart.Cube dominant = skipShells ? dominantCube(cubes) : null;
             for (ModelPart.Cube c : cubes) {
+                if (skipShells && cubes.stream().anyMatch(inner -> enclosesCube(c, inner))) continue;
+                if (dominant != null && isProtrudingDetail(c, dominant)) continue;
                 bounds[0] = Math.min(bounds[0], ox + c.minX); bounds[3] = Math.max(bounds[3], ox + c.maxX);
                 bounds[1] = Math.min(bounds[1], oy + c.minY); bounds[4] = Math.max(bounds[4], oy + c.maxY);
                 bounds[2] = Math.min(bounds[2], oz + c.minZ); bounds[5] = Math.max(bounds[5], oz + c.maxZ);
@@ -3685,7 +3978,7 @@ public class ClientRagdollRenderer {
 
         if (depth >= MAX_CUBE_SEARCH_DEPTH) return;
         for (ModelPart child : ModelPartTree.childrenOf(part).values()) {
-            accumulateCubeBounds(child, ox + child.x, oy + child.y, oz + child.z, bounds, depth + 1);
+            accumulateCubeBounds(child, ox + child.x, oy + child.y, oz + child.z, bounds, depth + 1, skipShells);
         }
     }
 

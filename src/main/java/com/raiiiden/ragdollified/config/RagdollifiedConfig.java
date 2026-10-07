@@ -22,23 +22,27 @@ public class RagdollifiedConfig {
 
     public static final ForgeConfigSpec.IntValue RAGDOLL_LIFETIME;
     public static final ForgeConfigSpec.IntValue MAX_RAGDOLLS;
+    public static final ForgeConfigSpec.ConfigValue<List<? extends String>> DIMENSION_MAX_RAGDOLLS;
     public static final ForgeConfigSpec.IntValue MAX_RAGDOLLS_PER_PLAYER;
     public static final ForgeConfigSpec.BooleanValue ENABLE_RAGDOLLS;
     public static final ForgeConfigSpec.BooleanValue ENABLE_PLAYER_RAGDOLLS;
     public static final ForgeConfigSpec.BooleanValue ENABLE_MOB_RAGDOLLS;
     public static final ForgeConfigSpec.BooleanValue ENABLE_GENERIC_MOB_RAGDOLLS;
     public static final ForgeConfigSpec.ConfigValue<List<? extends String>> ENTITY_DENYLIST;
+    public static final ForgeConfigSpec.ConfigValue<List<? extends String>> DISABLED_DIMENSIONS;
 
     public static final ForgeConfigSpec.DoubleValue HIT_IMPULSE_HEADSHOT;
     public static final ForgeConfigSpec.DoubleValue HIT_IMPULSE_BODY;
     public static final ForgeConfigSpec.DoubleValue HIT_IMPULSE_MELEE;
     public static final ForgeConfigSpec.DoubleValue HIT_IMPULSE_VANILLA_PROJECTILE;
+    public static final ForgeConfigSpec.DoubleValue HIT_IMPULSE_PUNCH;
     public static final ForgeConfigSpec.DoubleValue HIT_IMPULSE_EXPLOSION;
     public static final ForgeConfigSpec.DoubleValue HIT_IMPULSE_VERTICAL_BIAS;
     public static final ForgeConfigSpec.DoubleValue HIT_IMPULSE_VERTICAL_LIFT;
     public static final ForgeConfigSpec.BooleanValue HIT_IMPULSE_DAMAGE_SCALING;
     public static final ForgeConfigSpec.DoubleValue HIT_IMPULSE_DAMAGE_REFERENCE;
     public static final ForgeConfigSpec.BooleanValue EXPLOSIONS_PUSH_RAGDOLLS;
+    public static final ForgeConfigSpec.BooleanValue CREEPER_EXPLOSION_RAGDOLLS;
     public static final ForgeConfigSpec.BooleanValue KNOCKBACK_PUSHES_LIVE_RAGDOLLS;
     public static final ForgeConfigSpec.BooleanValue PISTONS_PUSH_RAGDOLLS;
     public static final ForgeConfigSpec.DoubleValue HIT_CENTER_LEEWAY;
@@ -75,9 +79,21 @@ public class RagdollifiedConfig {
     public static final ForgeConfigSpec.DoubleValue PART_WEIGHT_LEFT_LEG;
     public static final ForgeConfigSpec.DoubleValue PART_WEIGHT_RIGHT_LEG;
 
+    public static final ForgeConfigSpec.DoubleValue PART_GRAVITY_TORSO;
+    public static final ForgeConfigSpec.DoubleValue PART_GRAVITY_HEAD;
+    public static final ForgeConfigSpec.DoubleValue PART_GRAVITY_LEFT_ARM;
+    public static final ForgeConfigSpec.DoubleValue PART_GRAVITY_RIGHT_ARM;
+    public static final ForgeConfigSpec.DoubleValue PART_GRAVITY_LEFT_LEG;
+    public static final ForgeConfigSpec.DoubleValue PART_GRAVITY_RIGHT_LEG;
+
     // Reference weights of the humanoid skeleton as authored in RagdollBodyFactory. The configured
     // weight divided by these gives the multiplier, so other skeletons keep their own proportions.
     public static final ForgeConfigSpec.DoubleValue GRAVITY;
+    public static final ForgeConfigSpec.ConfigValue<List<? extends String>> DIMENSION_GRAVITY;
+    public static final ForgeConfigSpec.DoubleValue WATER_BUOYANCY;
+    public static final ForgeConfigSpec.DoubleValue LAVA_BUOYANCY;
+    public static final ForgeConfigSpec.ConfigValue<List<? extends String>> MOB_GRAVITY;
+    public static final ForgeConfigSpec.ConfigValue<List<? extends String>> MOB_BUOYANCY;
     public static final ForgeConfigSpec.DoubleValue MASS_SCALE;
     public static final ForgeConfigSpec.DoubleValue INITIAL_VELOCITY_SCALE;
     public static final ForgeConfigSpec.BooleanValue SCALE_VELOCITY_BY_MODEL_SIZE;
@@ -109,6 +125,10 @@ public class RagdollifiedConfig {
 
     public static final ForgeConfigSpec.DoubleValue RENDER_DISTANCE;
     public static final ForgeConfigSpec.BooleanValue ENABLE_DEATH_CAMERA;
+    public static final ForgeConfigSpec.BooleanValue RENDER_ARMOR;
+    public static final ForgeConfigSpec.BooleanValue RENDER_GECKOLIB_ARMOR;
+    public static final ForgeConfigSpec.BooleanValue RENDER_CURIOS;
+    public static final ForgeConfigSpec.BooleanValue RENDER_CAPES;
     public static final ForgeConfigSpec.DoubleValue GECKOLIB_ARMOR_RENDER_DISTANCE;
     public static final ForgeConfigSpec.DoubleValue ARMOR_RENDER_DISTANCE;
     public static final ForgeConfigSpec.ConfigValue<String> MISSING_ARMOR_FALLBACK;
@@ -143,6 +163,15 @@ public class RagdollifiedConfig {
                         "Raise it if your hardware can handle more (watch physics= in the perf log).")
                 .defineInRange("maxRagdolls", 40, 1, 1000);
 
+        DIMENSION_MAX_RAGDOLLS = SERVER_BUILDER
+                .comment("A lower maxRagdolls for particular dimensions. One entry per dimension, as",
+                        "dimension=count, like \"minecraft:the_nether=15\" or \"mymod:moon=5\". Can only lower",
+                        "the cap, never raise it past maxRagdolls. Dimensions not listed use maxRagdolls.")
+                .defineListAllowEmpty(List.of("dimensionMaxRagdolls"),
+                        List.of(),
+                        value -> value instanceof String s && parseIdValue(s) != null
+                                && parseIdValue(s).getValue() >= 1);
+
         MAX_RAGDOLLS_PER_PLAYER = SERVER_BUILDER
                 .comment("Maximum death ragdolls one player can have at once; their oldest is removed past this.",
                         "Addons may bypass this for bodies that must not be removed (like corpses holding loot).")
@@ -172,6 +201,12 @@ public class RagdollifiedConfig {
                         List.of(),
                         value -> value instanceof String);
 
+        DISABLED_DIMENSIONS = SERVER_BUILDER
+                .comment("Dimension ids where nothing ragdolls, like minecraft:the_end. Modded dimensions work too.")
+                .defineListAllowEmpty(List.of("disabledDimensions"),
+                        List.of(),
+                        value -> value instanceof String);
+
         SERVER_BUILDER.pop();
         SERVER_BUILDER.comment("Hit Impulse Settings").push("hitImpulse");
 
@@ -191,6 +226,12 @@ public class RagdollifiedConfig {
                 .comment("Base impulse magnitude for vanilla projectiles.")
                 .defineInRange("vanillaProjectile", 8.0, 0.0, 200.0);
 
+        HIT_IMPULSE_PUNCH = SERVER_BUILDER
+                .comment("Base impulse for hitting a body that is already lying there, before the weapon and",
+                        "the swing timer scale it. The killing blow has its own multipliers, so this one is",
+                        "much larger: it is the whole push. Lower it if corpses fly too far.")
+                .defineInRange("punch", 75.0, 0.0, 500.0);
+
         HIT_IMPULSE_EXPLOSION = SERVER_BUILDER
                 .comment("Launch speed in blocks/second for a body killed point-blank by an explosion (TNT, creepers, TACZ explosives, etc.).",
                         "Eases down to 60% at 8+ blocks from the blast, independent of the victim's health.",
@@ -200,6 +241,11 @@ public class RagdollifiedConfig {
         EXPLOSIONS_PUSH_RAGDOLLS = SERVER_BUILDER
                 .comment("Blasts also throw ragdolls already lying within reach, not only the bodies they kill.")
                 .define("explosionsPushRagdolls", true);
+
+        CREEPER_EXPLOSION_RAGDOLLS = SERVER_BUILDER
+                .comment("A mob that blows itself up, like a creeper, still leaves a body.",
+                        "It never dies of damage, so without this there is nothing to ragdoll.")
+                .define("creeperExplosionRagdolls", true);
 
         KNOCKBACK_PUSHES_LIVE_RAGDOLLS = SERVER_BUILDER
                 .comment("Knockback on a living player whom an addon has ragdolled pushes their body.")
@@ -361,10 +407,58 @@ public class RagdollifiedConfig {
                 .defineInRange("rightLeg", 1.0, 0.05, 20.0);
 
         SERVER_BUILDER.pop();
+        SERVER_BUILDER.comment("Per-Body-Part Gravity Settings",
+                        "How hard gravity pulls each part, without changing its weight. 1.0 = normal, 0 = floats.",
+                        "Weight alone cannot make a limb give way: a heavy arm just props the body up harder.",
+                        "Raise the torso or drop the arms to stop a corpse resting on its own elbows.")
+                .push("partGravityMultipliers");
+
+        PART_GRAVITY_TORSO = SERVER_BUILDER.comment("Gravity multiplier for the torso.")
+                .defineInRange("torso", 1.0, 0.0, 10.0);
+        PART_GRAVITY_HEAD = SERVER_BUILDER.comment("Gravity multiplier for the head.")
+                .defineInRange("head", 1.0, 0.0, 10.0);
+        PART_GRAVITY_LEFT_ARM = SERVER_BUILDER.comment("Gravity multiplier for the left arm.")
+                .defineInRange("leftArm", 1.0, 0.0, 10.0);
+        PART_GRAVITY_RIGHT_ARM = SERVER_BUILDER.comment("Gravity multiplier for the right arm.")
+                .defineInRange("rightArm", 1.0, 0.0, 10.0);
+        PART_GRAVITY_LEFT_LEG = SERVER_BUILDER.comment("Gravity multiplier for the left leg.")
+                .defineInRange("leftLeg", 1.0, 0.0, 10.0);
+        PART_GRAVITY_RIGHT_LEG = SERVER_BUILDER.comment("Gravity multiplier for the right leg.")
+                .defineInRange("rightLeg", 1.0, 0.0, 10.0);
+
+        SERVER_BUILDER.pop();
         SERVER_BUILDER.comment("Physics Settings").push("physics");
 
         GRAVITY = SERVER_BUILDER.comment("Gravity strength for ragdoll physics.")
                 .defineInRange("gravity", 15.00, 0.0, 50.0);
+        DIMENSION_GRAVITY = SERVER_BUILDER
+                .comment("Gravity for particular dimensions, overriding the one above there. One entry per dimension,",
+                        "as dimension=gravity, like \"minecraft:the_end=6.0\" or \"mymod:moon=2.5\".",
+                        "Dimensions not listed use the gravity above.")
+                .defineListAllowEmpty(List.of("dimensionGravity"),
+                        List.of(),
+                        value -> value instanceof String s && parseIdValue(s) != null);
+        WATER_BUOYANCY = SERVER_BUILDER
+                .comment("How hard water pushes a ragdoll up, as a multiple of its weight. Above 1 bodies float,",
+                        "exactly 1 they hang where they are, below 1 they sink, 0 they sink like a stone.")
+                .defineInRange("waterBuoyancy", 2.2, 0.0, 10.0);
+        LAVA_BUOYANCY = SERVER_BUILDER
+                .comment("The same as waterBuoyancy, for lava.")
+                .defineInRange("lavaBuoyancy", 2.2, 0.0, 10.0);
+        MOB_GRAVITY = SERVER_BUILDER
+                .comment("Gravity multiplier for particular mobs, on top of the dimension's gravity. One entry per",
+                        "mob, as entity=multiplier, like \"minecraft:chicken=0.4\" or \"minecraft:player=1.5\".",
+                        "1 is normal, 0 floats in the air. Mobs not listed use 1.")
+                .defineListAllowEmpty(List.of("mobGravity"),
+                        List.of(),
+                        value -> value instanceof String s && parseIdValue(s) != null);
+        MOB_BUOYANCY = SERVER_BUILDER
+                .comment("Buoyancy for particular mobs, replacing waterBuoyancy and lavaBuoyancy for them. One entry",
+                        "per mob, as entity=buoyancy, like \"minecraft:iron_golem=0.0\" so golems sink.",
+                        "Above 1 floats, below 1 sinks. Mobs not listed use the fluid settings.")
+                .defineListAllowEmpty(List.of("mobBuoyancy"),
+                        List.of(),
+                        value -> value instanceof String s && parseIdValue(s) != null);
         MASS_SCALE = SERVER_BUILDER.comment("Global multiplier on every ragdoll body's mass.")
                 .defineInRange("massScale", 1.0, 0.05, 20.0);
         INITIAL_VELOCITY_SCALE = SERVER_BUILDER
@@ -443,6 +537,23 @@ public class RagdollifiedConfig {
                 .comment("When you die, follow your own ragdoll with the camera.")
                 .define("enableDeathCamera", true);
 
+        RENDER_ARMOR = CLIENT_BUILDER
+                .comment("Draw worn armor on ragdolls. Off leaves the bare body and costs nothing to draw.")
+                .define("renderArmor", true);
+
+        RENDER_GECKOLIB_ARMOR = CLIENT_BUILDER
+                .comment("Draw GeckoLib animated armor on ragdolls. It is the most expensive armor to draw,",
+                        "and off it is left out rather than swapped for a plain one. Needs renderArmor on.")
+                .define("renderGeckolibArmor", true);
+
+        RENDER_CURIOS = CLIENT_BUILDER
+                .comment("Draw Curios accessories on ragdolls, like backpacks and rings. Independent of renderArmor.")
+                .define("renderCurios", true);
+
+        RENDER_CAPES = CLIENT_BUILDER
+                .comment("Draw a player's cape on their ragdoll, hanging off the back. Left off when an elytra is worn.")
+                .define("renderCapes", true);
+
         GECKOLIB_ARMOR_RENDER_DISTANCE = CLIENT_BUILDER
                 .comment("Distance in blocks within which GeckoLib animated armor renders on ragdolls.",
                         "Lower improves performance. Should not exceed renderDistance.")
@@ -493,18 +604,21 @@ public class RagdollifiedConfig {
     private static void registerGameplayKeys() {
         register("ragdollLifetime", RAGDOLL_LIFETIME);
         register("maxRagdolls", MAX_RAGDOLLS);
+        register("dimensionMaxRagdolls", DIMENSION_MAX_RAGDOLLS);
         register("maxRagdollsPerPlayer", MAX_RAGDOLLS_PER_PLAYER);
         register("enableRagdolls", ENABLE_RAGDOLLS);
         register("enablePlayerRagdolls", ENABLE_PLAYER_RAGDOLLS);
         register("enableMobRagdolls", ENABLE_MOB_RAGDOLLS);
         register("enableGenericMobRagdolls", ENABLE_GENERIC_MOB_RAGDOLLS);
         register("entityDenylist", ENTITY_DENYLIST);
+        register("disabledDimensions", DISABLED_DIMENSIONS);
         register("hitImpulseHeadshot", HIT_IMPULSE_HEADSHOT);
         register("hitImpulseBody", HIT_IMPULSE_BODY);
         register("hitImpulseMelee", HIT_IMPULSE_MELEE);
         register("hitImpulseVanillaProjectile", HIT_IMPULSE_VANILLA_PROJECTILE);
         register("hitImpulseExplosion", HIT_IMPULSE_EXPLOSION);
         register("explosionsPushRagdolls", EXPLOSIONS_PUSH_RAGDOLLS);
+        register("creeperExplosionRagdolls", CREEPER_EXPLOSION_RAGDOLLS);
         register("knockbackPushesLiveRagdolls", KNOCKBACK_PUSHES_LIVE_RAGDOLLS);
         register("pistonsPushRagdolls", PISTONS_PUSH_RAGDOLLS);
         register("hitImpulseVerticalBias", HIT_IMPULSE_VERTICAL_BIAS);
@@ -540,6 +654,11 @@ public class RagdollifiedConfig {
         register("deathPartKnockbackLeftArm", DEATH_PART_KNOCKBACK_LEFT_ARM);
         register("deathPartKnockbackRightArm", DEATH_PART_KNOCKBACK_RIGHT_ARM);
         register("gravity", GRAVITY);
+        register("dimensionGravity", DIMENSION_GRAVITY);
+        register("waterBuoyancy", WATER_BUOYANCY);
+        register("lavaBuoyancy", LAVA_BUOYANCY);
+        register("mobGravity", MOB_GRAVITY);
+        register("mobBuoyancy", MOB_BUOYANCY);
         register("massScale", MASS_SCALE);
         register("initialVelocityScale", INITIAL_VELOCITY_SCALE);
         register("scaleVelocityByModelSize", SCALE_VELOCITY_BY_MODEL_SIZE);
@@ -570,6 +689,13 @@ public class RagdollifiedConfig {
         register("partWeightRightArm", PART_WEIGHT_RIGHT_ARM);
         register("partWeightLeftLeg", PART_WEIGHT_LEFT_LEG);
         register("partWeightRightLeg", PART_WEIGHT_RIGHT_LEG);
+        register("hitImpulsePunch", HIT_IMPULSE_PUNCH);
+        register("partGravityTorso", PART_GRAVITY_TORSO);
+        register("partGravityHead", PART_GRAVITY_HEAD);
+        register("partGravityLeftArm", PART_GRAVITY_LEFT_ARM);
+        register("partGravityRightArm", PART_GRAVITY_RIGHT_ARM);
+        register("partGravityLeftLeg", PART_GRAVITY_LEFT_LEG);
+        register("partGravityRightLeg", PART_GRAVITY_RIGHT_LEG);
     }
 
     private static void register(String key, ForgeConfigSpec.ConfigValue<?> value) {
@@ -642,6 +768,67 @@ public class RagdollifiedConfig {
     public static int getRagdollLifetime() { return get(RAGDOLL_LIFETIME); }
     public static int getMaxRagdolls() { return get(MAX_RAGDOLLS); }
 
+    // isRagdollEnabledFor plus the dimension the death happened in; null skips the dimension check.
+    public static boolean isRagdollEnabledFor(String entityId, boolean isPlayer, String dimensionId) {
+        if (!isRagdollEnabledFor(entityId, isPlayer)) return false;
+        if (dimensionId == null) return true;
+        for (String disabled : getStringList(DISABLED_DIMENSIONS)) {
+            if (disabled != null && disabled.trim().equalsIgnoreCase(dimensionId)) return false;
+        }
+        return true;
+    }
+
+    // Ragdoll gravity in one dimension: its dimensionGravity entry if there is one, else the global value.
+    public static float getGravity(String dimensionId) {
+        Double gravity = lookupIdValue(DIMENSION_GRAVITY, dimensionId);
+        return gravity != null ? (float) Math.max(0.0, Math.min(50.0, gravity)) : (float) get(GRAVITY);
+    }
+
+    // The most ragdolls one dimension holds: maxRagdolls, or its dimensionMaxRagdolls entry if that is lower.
+    public static int getMaxRagdolls(String dimensionId) {
+        int max = getMaxRagdolls();
+        Double cap = lookupIdValue(DIMENSION_MAX_RAGDOLLS, dimensionId);
+        return cap != null ? Math.max(1, Math.min(max, (int) Math.floor(cap))) : max;
+    }
+
+    // A mob's gravity multiplier from mobGravity, 1 when it has no entry. Players are minecraft:player.
+    public static float getMobGravityMultiplier(String entityId) {
+        Double multiplier = lookupIdValue(MOB_GRAVITY, entityId);
+        return multiplier != null ? (float) Math.max(0.0, Math.min(10.0, multiplier)) : 1f;
+    }
+
+    // A mob's own buoyancy from mobBuoyancy, or NaN when it has no entry and the fluid settings apply.
+    public static float getMobBuoyancy(String entityId) {
+        Double buoyancy = lookupIdValue(MOB_BUOYANCY, entityId);
+        return buoyancy != null ? (float) Math.max(0.0, Math.min(10.0, buoyancy)) : Float.NaN;
+    }
+
+    // The number an "id=number" list gives one id, or null if the id has no entry.
+    private static Double lookupIdValue(ForgeConfigSpec.ConfigValue<List<? extends String>> list, String id) {
+        if (id == null) return null;
+        for (String entry : getStringList(list)) {
+            Map.Entry<String, Double> parsed = parseIdValue(entry);
+            if (parsed != null && parsed.getKey().equalsIgnoreCase(id)) return parsed.getValue();
+        }
+        return null;
+    }
+
+    // "namespace:path=number" into its two halves, or null if the entry is malformed.
+    private static Map.Entry<String, Double> parseIdValue(String entry) {
+        if (entry == null) return null;
+        int split = entry.lastIndexOf('=');
+        if (split <= 0) return null;
+        String id = entry.substring(0, split).trim();
+        if (id.isEmpty()) return null;
+        try {
+            double value = Double.parseDouble(entry.substring(split + 1).trim());
+            if (!Double.isFinite(value)) return null;
+            return Map.entry(id, value);
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
     public static int getMaxRagdollsPerPlayer() {
         return get(MAX_RAGDOLLS_PER_PLAYER);
     }
@@ -667,6 +854,18 @@ public class RagdollifiedConfig {
             case RIGHT_LEG -> (float) get(PART_WEIGHT_RIGHT_LEG);
             case LEFT_ARM -> (float) get(PART_WEIGHT_LEFT_ARM);
             case RIGHT_ARM -> (float) get(PART_WEIGHT_RIGHT_ARM);
+        };
+    }
+
+    // How hard gravity pulls one part. Weight decides how far a push moves it; this decides whether it holds the body up.
+    public static float getPartGravityMultiplier(RagdollPart part) {
+        return switch (part) {
+            case TORSO -> (float) get(PART_GRAVITY_TORSO);
+            case HEAD -> (float) get(PART_GRAVITY_HEAD);
+            case LEFT_LEG -> (float) get(PART_GRAVITY_LEFT_LEG);
+            case RIGHT_LEG -> (float) get(PART_GRAVITY_RIGHT_LEG);
+            case LEFT_ARM -> (float) get(PART_GRAVITY_LEFT_ARM);
+            case RIGHT_ARM -> (float) get(PART_GRAVITY_RIGHT_ARM);
         };
     }
 

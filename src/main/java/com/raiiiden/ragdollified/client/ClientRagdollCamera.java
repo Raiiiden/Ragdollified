@@ -37,6 +37,9 @@ public final class ClientRagdollCamera {
     private static final double NEAR_RADIUS = 0.1D;
     private static final double ESCAPE_STEP = 0.05D;
     private static final double MAX_ESCAPE = 0.75D;
+    // An eye this close to a head's centre is inside the skull, hat or helmet (corners reach ~0.54), or
+    // close enough that the head would fill the view through the near plane.
+    private static final double HEAD_HIDE_RADIUS = 0.5D;
     // Order matters: a head resting on the floor buries the eye in the block below far more
     // often than in a wall, so try straight up first and leave down for last.
     private static final Vec3[] ESCAPE_DIRECTIONS = {
@@ -99,15 +102,23 @@ public final class ClientRagdollCamera {
 
         apply(event, minecraft, transform, current.options);
         activeAngleEvent = event;
-        if (current.part == RagdollPart.HEAD && minecraft.options.getCameraType().isFirstPerson()) {
+        // Any camera type: apply() puts the eye on the face in third person too, and a wall can clip it inside.
+        if (current.part == RagdollPart.HEAD) {
             headViewRagdollId = current.ragdoll.getId();
         }
     }
 
-    // True when the local camera is inside this ragdoll's head, so the renderer can skip it.
-    // Local only: every other client still draws the full body.
-    public static boolean isHeadHidden(int ragdollId) {
-        return headViewRagdollId == ragdollId;
+    // True when the local camera looks out of this ragdoll's head or sits inside it, so the renderer skips
+    // the head while it still drives the camera. Inside covers the frames before the death camera takes over,
+    // when the vanilla eye is still where the head spawned. Local only: every other client draws the full body.
+    public static boolean isHeadHidden(int ragdollId, RagdollTransform head) {
+        if (headViewRagdollId == ragdollId) return true;
+        if (head == null) return false;
+        Vec3 eye = Minecraft.getInstance().gameRenderer.getMainCamera().getPosition();
+        double dx = eye.x - head.position.x;
+        double dy = eye.y - head.position.y;
+        double dz = eye.z - head.position.z;
+        return dx * dx + dy * dy + dz * dz < HEAD_HIDE_RADIUS * HEAD_HIDE_RADIUS;
     }
 
     // Rebuild Camera's public quaternion and direction vectors from the final event angles.

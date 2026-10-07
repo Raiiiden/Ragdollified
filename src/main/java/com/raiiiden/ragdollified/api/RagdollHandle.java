@@ -1,12 +1,14 @@
 package com.raiiiden.ragdollified.api;
 
 import com.raiiiden.ragdollified.RagdollPart;
+import com.raiiiden.ragdollified.RagdollTransform;
 import com.raiiiden.ragdollified.client.ClientRagdollManager;
 import net.minecraft.world.phys.Vec3;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.api.distmarker.OnlyIn;
 
 import java.util.Map;
+import javax.annotation.Nullable;
 import java.util.Optional;
 
 // Stable client-local control handle for an active or queued ragdoll.
@@ -37,6 +39,20 @@ public final class RagdollHandle {
         ClientRagdollManager.restartDeathLifetime(entityId);
         return this;
     }
+
+    // Park this body in a pose the caller owns, or hand it back to the solver. See
+    // RagdollifiedApi#park.
+    public RagdollHandle park(@Nullable RagdollTransform[] worldPose) {
+        RagdollifiedApi.park(entityId, worldPose);
+        return this;
+    }
+
+    public RagdollHandle unpark() {
+        RagdollifiedApi.unpark(entityId);
+        return this;
+    }
+
+    public boolean isParked() { return RagdollifiedApi.isParked(entityId); }
 
     public boolean remove() {
         if (ownsEntityHide) RagdollifiedApi.setEntityHidden(entityId, false);

@@ -220,14 +220,13 @@ public final class RagdollBodyFactory {
                 break;
         }
 
-        applyPartWeights(parts,bodyProfile);
+        applyPartTuning(parts,bodyProfile);
 
         buildJoints(world, parts, joints, modelType, bodyScale, bodyProfile, isBaby, babyBigHead);
     }
 
-    // Scale each body's authored mass by its configured per-part weight, here rather than at ~40 call
-    // sites. Inertia is recomputed: a stale tensor would spin a heavier part as if it were still light.
-    private static void applyPartWeights(List<PhysicsBody> parts,BodyProfile profile) {
+    // Apply the configured per-part weight and gravity here, rather than at ~40 call sites.
+    private static void applyPartTuning(List<PhysicsBody> parts,BodyProfile profile) {
         for (int i = 0; i < parts.size(); i++) {
             RagdollPart part = RagdollPart.byIndex(i);
             if (part == null) continue;
@@ -239,14 +238,15 @@ public final class RagdollBodyFactory {
             // the limbs those weights describe.
             if (profile == BodyProfile.SQUID && i > 0) continue;
             if (profile == BodyProfile.ENDER_DRAGON && i > 5) continue;
-            float multiplier = RagdollifiedConfig.getPartWeightMultiplier(part);
-            if (multiplier == 1f) continue;
             PhysicsBody body = parts.get(i);
+
+            float weight = RagdollifiedConfig.getPartWeightMultiplier(part);
             float invMass = body.getInvMass();
-            if (invMass <= 0f) continue; // static/kinematic: no mass to scale
-            // setMass rebuilds the inertia tensor from the shape as well: a stale tensor would spin
-            // a heavier part as if it were still light, which is the bug this comment used to guard.
-            body.setMass((1f / invMass) * multiplier);
+            // A parked part has no weight to scale. setMass also rebuilds how the part spins.
+            if (weight != 1f && invMass > 0f) body.setMass((1f / invMass) * weight);
+
+            float gravity = RagdollifiedConfig.getPartGravityMultiplier(part);
+            if (gravity != 1f) body.setGravityFactor(gravity);
         }
     }
 

@@ -1,6 +1,7 @@
 package com.raiiiden.ragdollified.api;
 
 import com.raiiiden.ragdollified.RagdollPart;
+import com.raiiiden.ragdollified.RagdollTransform;
 import com.raiiiden.ragdollified.client.ClientRagdoll;
 import com.raiiiden.ragdollified.client.ClientRagdollCamera;
 import com.raiiiden.ragdollified.client.ClientRagdollManager;
@@ -11,6 +12,7 @@ import net.minecraft.world.phys.Vec3;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.api.distmarker.OnlyIn;
 
+import javax.annotation.Nullable;
 import java.util.Optional;
 import java.util.Map;
 import java.util.Set;
@@ -37,7 +39,8 @@ public final class RagdollifiedApi {
     public static RagdollHandle spawn(LivingEntity entity, SpawnOptions options) {
         if (entity == null) throw new IllegalArgumentException("entity cannot be null");
         SpawnOptions resolved = options != null ? options : SpawnOptions.DEFAULT;
-        if (!ClientRagdollManager.spawnFromEntity(entity, resolved.persistent(), resolved.spawnTransform())) {
+        if (!ClientRagdollManager.spawnFromEntity(entity, resolved.persistent(), resolved.spawnTransform(),
+                resolved.severedMask())) {
             throw new IllegalStateException("Could not queue a ragdoll for entity " + entity.getId());
         }
         if (resolved.hideEntity()) setEntityHidden(entity, true);
@@ -150,6 +153,55 @@ public final class RagdollifiedApi {
 
     public static Optional<RagdollDrag> beginDrag(Entity entity, DragEnd end, DragTarget target) {
         return entity == null ? Optional.empty() : beginDrag(entity.getId(), end, target);
+    }
+
+    // Park a body in a pose the caller owns. It leaves the solver entirely, keeps exactly the
+    // transforms given, and still renders and raycasts like any other body. This is for an
+    // integration whose own entity holds where a body rests: every client shows that one pose
+    // rather than each simulating its own copy toward it. Parking a body that has only been queued
+    // is fine; it is built parked. A null pose parks whatever pose the body already has.
+    public static boolean park(int entityId, @Nullable RagdollTransform[] worldPose) {
+        if (worldPose != null && (worldPose.length == 0 || worldPose[0] == null)) return false;
+        ClientRagdollManager.enqueuePosed(entityId, true);
+        if (worldPose != null) ClientRagdollManager.enqueueAuthoritativeState(entityId, worldPose, 0, true);
+        return true;
+    }
+
+    // Hand a parked body back to the solver, resuming from wherever it was left rather than from
+    // where it was built. This is what taking hold of a parked body does.
+    public static void unpark(int entityId) {
+        ClientRagdollManager.enqueuePosed(entityId, false);
+    }
+
+    public static boolean isParked(int entityId) {
+        return ClientRagdollManager.isPosed(entityId);
+    }
+
+    // Move a body straight to a resting pose without waking it. On an unparked body the pose is
+    // still checked against the terrain under it, and one left hanging in the air is refused.
+    public static boolean applyRestingPose(int entityId, RagdollTransform[] worldPose) {
+        if (worldPose == null || worldPose.length == 0 || worldPose[0] == null) return false;
+        ClientRagdollManager.enqueueAuthoritativeState(entityId, worldPose, 0, true);
+        return true;
+    }
+
+    // Every part's world transform, indexed by RagdollPart#index, or empty when there is no body to
+    // read. The counterpart to park: what one client watched a body settle into, to be handed to the
+    // others (or kept by a server) as the pose they park in.
+    public static Optional<RagdollTransform[]> worldPose(int entityId) {
+        ClientRagdoll ragdoll = ClientRagdollManager.get(entityId);
+        if (ragdoll == null || ragdoll.isDestroyed()) return Optional.empty();
+        ClientRagdoll.TransformSnapshot snapshot = ragdoll.getSnapshot();
+        if (snapshot == null || snapshot.destroyed) return Optional.empty();
+        RagdollTransform[] out = new RagdollTransform[RagdollTransform.MAX_PARTS];
+        for (int i = 0; i < out.length && i < snapshot.positions.length; i++) {
+            javax.vecmath.Vector3f position = snapshot.positions[i];
+            javax.vecmath.Quat4f rotation = i < snapshot.rotations.length ? snapshot.rotations[i] : null;
+            if (position == null || rotation == null) continue;
+            out[i] = new RagdollTransform(i, new javax.vecmath.Vector3f(position),
+                    new javax.vecmath.Quat4f(rotation));
+        }
+        return out[0] == null ? Optional.empty() : Optional.of(out);
     }
 
     // Return a thread-safe copy of the current visual/physics state, if constructed.

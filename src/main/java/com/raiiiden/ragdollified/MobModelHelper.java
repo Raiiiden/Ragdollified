@@ -92,7 +92,8 @@ public class MobModelHelper {
     public static boolean shouldHaveRagdoll(LivingEntity entity) {
         boolean isPlayer = entity instanceof net.minecraft.world.entity.player.Player;
         String entityId = isPlayer ? "minecraft:player" : EntityType.getKey(entity.getType()).toString();
-        if (!RagdollifiedConfig.isRagdollEnabledFor(entityId, isPlayer)) return false;
+        if (!RagdollifiedConfig.isRagdollEnabledFor(entityId, isPlayer,
+                entity.level().dimension().location().toString())) return false;
         if (isPlayer) return true;
         return getModelTypeFromEntity(entity) != ModelType.UNSUPPORTED;
     }

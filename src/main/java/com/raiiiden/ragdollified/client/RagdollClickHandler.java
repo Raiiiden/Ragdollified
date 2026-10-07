@@ -33,7 +33,6 @@ public class RagdollClickHandler {
 
     // Reference damage for the hit curve: a stone sword. Fists barely roll a corpse, netherite throws it.
     private static final double REFERENCE_ATTACK_DAMAGE = 5.0;
-    private static final float BASE_STRENGTH = 10f;
     // Blows land off centre by design, but the impact point comes from a raycast against boxes the
     // player cannot see exactly, so this keeps a grazing edge hit from reading as a huge lever.
     private static final double MAX_LEVER = 0.45;
@@ -88,7 +87,10 @@ public class RagdollClickHandler {
         // Cooldown, then weapon, then part. A half-charged swing is half a hit, a better weapon is
         // a harder one, and the head is lighter than the chest so the same blow moves it further.
         float cooldown = mc.player.getAttackStrengthScale(0f);
-        double strength = BASE_STRENGTH * cooldown
+        // The whole push, so a much bigger number than a death hit: it has to move the entire body.
+        double base = com.raiiiden.ragdollified.config.RagdollifiedConfig.get(
+                com.raiiiden.ragdollified.config.RagdollifiedConfig.HIT_IMPULSE_PUNCH);
+        double strength = base * cooldown
                 * Math.sqrt(Math.max(1.0, damage) / REFERENCE_ATTACK_DAMAGE);
         if (part == RagdollPart.HEAD) strength *= 1.25;
 

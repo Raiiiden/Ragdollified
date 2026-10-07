@@ -83,6 +83,12 @@ public interface PhysicsBody {
     // weight config, which multiplies the authored mass after the skeleton is built.
     void setMass(float mass);
 
+    // How hard gravity pulls this one body, without changing its weight. 1 is normal, 0 floats.
+    void setGravityFactor(float factor);
+
+    // The multiplier setGravityFactor last gave this body, 1 if it was never set.
+    float getGravityFactor();
+
     // False makes the body pass through everything while still simulating: some skeletons carry
     // near-zero proxy parts that exist only to give the renderer a transform to hang a limb on.
     void setContactResponse(boolean respond);

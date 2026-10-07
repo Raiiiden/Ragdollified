@@ -18,10 +18,6 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(17)
 
 configurations {
     includedLibs
-    // jolt-jni's JVM classes, unpacked into the mod's own class output rather than put on the
-    // classpath as a library. See unpackJoltJniClasses for why that distinction decides whether
-    // the engine works at all.
-    joltJniClasses
 }
 
 println "Java: ${System.getProperty 'java.version'}, JVM: ${System.getProperty 'java.vm.version'} (${System.getProperty 'java.vendor'}), Arch: ${System.getProperty 'os.arch'}"
@@ -131,8 +127,14 @@ repositories {
             includeGroup "curse.maven"
         }
     }
-    // jolt-jni and its prebuilt natives are published here.
+    // jolt-jni (for the tools bench only) is published here.
     mavenCentral()
+    // Zarith, from `gradlew publishAllToMavenLocal` in D:/CodingProjects/Zarith.
+    mavenLocal {
+        content {
+            includeGroup 'com.raiiiden.zarith'
+        }
+    }
 }
 
 dependencies {
@@ -147,34 +149,10 @@ dependencies {
     minecraftLibrary 'javax.vecmath:vecmath:1.5.2'
     includedLibs 'javax.vecmath:vecmath:1.5.2'
 
-    // jolt-jni JVM classes. Every platform artifact carries the same classes; which one provides
-    // them is arbitrary. The natives below are what differ.
-    //
-    // compileOnly, deliberately: at runtime these classes must come from the mod's own class output
-    // and from nowhere else, so that they share a classloader with the code that loads the native
-    // library. unpackJoltJniClasses puts them there; a second copy on the library classpath would
-    // give the loader something to delegate to and put us back where we started.
-    compileOnly "com.github.stephengold:jolt-jni-Windows64:${jolt_version}"
-    joltJniClasses "com.github.stephengold:jolt-jni-Windows64:${jolt_version}"
-
-    // Native binaries for every platform a 1.20.1 client realistically runs on. All are bundled and
-    // the loader extracts the matching one at runtime; see JoltNatives.
-    //
-    // Both configurations, and the pairing matters: includedLibs is packaging only, so declaring the
-    // natives there alone ships them correctly but leaves them off the dev run's classpath — the
-    // game then starts with the jolt-jni classes present, finds no library to extract, and silently
-    // falls back to JBullet. minecraftLibrary is what puts them in front of runClient.
-    [
-            "Windows64",
-            "Linux64",
-            "Linux_ARM64",
-            "MacOSX64",
-            "MacOSX_ARM64"
-    ].each { platform ->
-        def coordinate = "com.github.stephengold:jolt-jni-${platform}:${jolt_version}:${jolt_natives}"
-        minecraftLibrary coordinate
-        includedLibs coordinate
-    }
+    // Jolt comes from Zarith: its jar carries the one jolt-jni (classes and every platform's natives)
+    // in the game and loads it once for every mod, so Ragdollified bundles none. Two mods carrying the
+    // same jolt-jni packages is exactly what stopped the game when Ragdollified sat beside Felled.
+    implementation fg.deobf("com.raiiiden.zarith:zarith-forge-${minecraft_version}:${zarith_version}")
 
     datagenImplementation sourceSets.main.output
 
@@ -203,6 +181,7 @@ dependencies {
     //implementation fg.deobf("curse.maven:lesraisins-armor-1021131:7343690")
     //implementation fg.deobf("curse.maven:customnpcs-unofficial-1052708:7694841")
     //runtimeOnly fg.deobf("curse.maven:accuratehitboxes-1495830:8677048")
+    compileOnly fg.deobf("curse.maven:guard-villagers-360203:8719057")
     compileOnly fg.deobf("curse.maven:accuratehitboxes-1495830:8677048")
 }
 
@@ -221,14 +200,6 @@ tasks.withType(ProcessResources).configureEach {
     }
 }
 
-// JNI binds a native library to the classloader of the class that called System.load, and it can
-// only satisfy native methods declared by classes from that same loader. FML's dev launcher gives
-// the mod exactly two class roots — build/resources/main and build/classes/java/main — and puts
-// every declared library on a different loader. So jolt-jni's classes are unpacked into the mod's
-// own class output: with them on the library classpath instead, System.load succeeds, every
-// com.github.stephengold.joltjni native method stays unbound, and the first call throws
-// UnsatisfiedLinkError. This also carries them into the shipped jar, since the jar task already
-// packages the source set's output.
 // Drops the humanoid on a floor and prints how far each limb moves and what the step costs.
 // Options are system properties: -Drig.mode=free-rot, -Drig.selfCollide=true, -Drig.collisionSteps=N,
 // -Drig.velocitySteps=N, -Drig.positionSteps=N. See RagdollRig for what each one answers.
@@ -243,23 +214,6 @@ tasks.register('runRagdollRig', JavaExec) {
             if (key.toString().startsWith('rig.')) systemProperty(key.toString(), value)
         }
     }
-}
-
-tasks.register('unpackJoltJniClasses', Copy) {
-    dependsOn tasks.named('compileJava')
-    from({ configurations.joltJniClasses.collect { zipTree(it) } }) {
-        exclude 'META-INF/**'
-        // jolt-jni is a named module. Left in place, its module-info would make the mod's own class
-        // output read as that module, and every package the mod actually uses — Minecraft, Forge,
-        // JOML — becomes invisible to the compiler on the next build.
-        exclude 'module-info.class'
-    }
-    into layout.buildDirectory.dir('classes/java/main')
-    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
-}
-
-tasks.named('classes').configure {
-    dependsOn tasks.named('unpackJoltJniClasses')
 }
 
 tasks.named('jar', Jar).configure {
